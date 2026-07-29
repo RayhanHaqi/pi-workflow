@@ -151,6 +151,10 @@ function Identifier() {
   return Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
 }
 
+function RunId() {
+  return Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$" });
+}
+
 function Digest() {
   return Type.String({ pattern: DIGEST_PATTERN });
 }
@@ -754,6 +758,108 @@ export const TransitionCommitSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_transition_commit_v0.schema.json" },
 );
 
+export const ProcessMetadataSchema = StrictObject({
+  controller_instance_id: Identifier(),
+  process_id: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+  invocation_id: Identifier(),
+});
+
+export const EvidenceMetadataSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_evidence_metadata_v0"),
+    run_id: RunId(),
+    evidence_sha256: Digest(),
+    byte_length: Type.Integer({ minimum: 0, maximum: 16_777_216 }),
+    media_type: NonEmptyString(255),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_evidence_metadata_v0.schema.json" },
+);
+
+export const EvidenceManifestEntrySchema = StrictObject({
+  evidence_sha256: Digest(),
+  metadata_content_sha256: Digest(),
+});
+
+export const EvidenceManifestSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_evidence_manifest_v0"),
+    run_id: RunId(),
+    entries: Type.Array(EvidenceManifestEntrySchema, { maxItems: 1024, uniqueItems: true }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_evidence_manifest_v0.schema.json" },
+);
+
+export const PersistedStatePointerSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_persisted_state_pointer_v0"),
+    run_id: RunId(),
+    revision: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    workflow_state_content_sha256: Digest(),
+    transition_commit_content_sha256: Digest(),
+    previous_state_pointer_content_sha256: NullableDigest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_persisted_state_pointer_v0.schema.json" },
+);
+
+export const ProcessInterruptionObjectSchema = StrictObject({
+  kind: StringEnum([
+    "RAW_EVIDENCE",
+    "EVIDENCE_METADATA",
+    "EVIDENCE_MANIFEST",
+    "WORKFLOW_STATE",
+    "TRANSITION_EVENT",
+    "REDUCER_POLICY",
+    "PROCESS_ASSESSMENT",
+    "TRANSITION_COMMIT",
+  ] as const),
+  content_sha256: Digest(),
+});
+
+export const ProcessInterruptionSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_process_interruption_v0"),
+    run_id: RunId(),
+    expected_revision: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    expected_state_pointer_content_sha256: Digest(),
+    expected_workflow_state_content_sha256: Digest(),
+    evidence: StrictObject({
+      controller_instance_id: Identifier(),
+      process_id: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+      invocation_id: Identifier(),
+      exit_kind: Type.Literal("UNEXPECTED_TERMINATION"),
+      detail: NonEmptyString(4096),
+    }),
+    orphan_objects: Type.Array(ProcessInterruptionObjectSchema, { maxItems: 100_000, uniqueItems: true }),
+    temporary_files: Type.Array(PathString(), { maxItems: 100_000, uniqueItems: true }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_process_interruption_v0.schema.json" },
+);
+
+export const StateTransitionCommitSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_state_transition_commit_v0"),
+    commit_protocol_version: Type.Literal("state-commit-v1"),
+    commit_kind: StringEnum(["GENESIS", "TRANSITION", "PROCESS_CRASH"] as const),
+    run_id: RunId(),
+    transition_id: Identifier(),
+    previous_revision: Type.Union([
+      Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER - 1 }),
+      Type.Null(),
+    ]),
+    new_revision: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    previous_state_pointer_content_sha256: NullableDigest(),
+    previous_workflow_state_content_sha256: NullableDigest(),
+    previous_transition_commit_content_sha256: NullableDigest(),
+    transition_event_content_sha256: NullableDigest(),
+    reducer_policy_content_sha256: Digest(),
+    new_workflow_state_content_sha256: Digest(),
+    evidence_manifest_content_sha256: Digest(),
+    process_assessment_content_sha256: NullableDigest(),
+    process_metadata: ProcessMetadataSchema,
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_state_transition_commit_v0.schema.json" },
+);
+
 export const CommandResultSchema = StrictObject({
   command_id: Identifier(),
   exit_code: Type.Integer({ minimum: 0, maximum: 255 }),
@@ -797,6 +903,11 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_transition_commit_v0", fileName: "pi_gacw_transition_commit_v0.schema.json", schema: TransitionCommitSchema },
   { schemaId: "pi_gacw_final_report_v0", fileName: "pi_gacw_final_report_v0.schema.json", schema: FinalReportSchema },
   { schemaId: "pi_gacw_reducer_policy_v0", fileName: "pi_gacw_reducer_policy_v0.schema.json", schema: ReducerPolicySchema },
+  { schemaId: "pi_gacw_evidence_metadata_v0", fileName: "pi_gacw_evidence_metadata_v0.schema.json", schema: EvidenceMetadataSchema },
+  { schemaId: "pi_gacw_evidence_manifest_v0", fileName: "pi_gacw_evidence_manifest_v0.schema.json", schema: EvidenceManifestSchema },
+  { schemaId: "pi_gacw_persisted_state_pointer_v0", fileName: "pi_gacw_persisted_state_pointer_v0.schema.json", schema: PersistedStatePointerSchema },
+  { schemaId: "pi_gacw_process_interruption_v0", fileName: "pi_gacw_process_interruption_v0.schema.json", schema: ProcessInterruptionSchema },
+  { schemaId: "pi_gacw_state_transition_commit_v0", fileName: "pi_gacw_state_transition_commit_v0.schema.json", schema: StateTransitionCommitSchema },
 ] as const;
 
 // The package-private registry is the sole runtime and emission authority. Every
@@ -847,4 +958,10 @@ export type TransitionEvent = Static<typeof TransitionEventSchema>;
 export type TransitionCommitDocument = Static<typeof TransitionCommitSchema>;
 export type FinalReportDocument = Static<typeof FinalReportSchema>;
 export type ReducerPolicy = Static<typeof ReducerPolicySchema>;
+export type ProcessMetadata = Static<typeof ProcessMetadataSchema>;
+export type EvidenceMetadataDocument = Static<typeof EvidenceMetadataSchema>;
+export type EvidenceManifestDocument = Static<typeof EvidenceManifestSchema>;
+export type PersistedStatePointerDocument = Static<typeof PersistedStatePointerSchema>;
+export type ProcessInterruptionDocument = Static<typeof ProcessInterruptionSchema>;
+export type StateTransitionCommitDocument = Static<typeof StateTransitionCommitSchema>;
 export type ProgressDelta = Static<typeof ProgressDeltaSchema>;

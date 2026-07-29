@@ -1,0 +1,130 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_process_interruption_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_process_interruption_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "expected_revision": {
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
+    },
+    "expected_state_pointer_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "expected_workflow_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "evidence": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "controller_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "process_id": {
+          "minimum": 1,
+          "maximum": 2147483647,
+          "type": "integer"
+        },
+        "invocation_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "exit_kind": {
+          "const": "UNEXPECTED_TERMINATION",
+          "type": "string"
+        },
+        "detail": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "controller_instance_id",
+        "process_id",
+        "invocation_id",
+        "exit_kind",
+        "detail"
+      ]
+    },
+    "orphan_objects": {
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "RAW_EVIDENCE",
+              "EVIDENCE_METADATA",
+              "EVIDENCE_MANIFEST",
+              "WORKFLOW_STATE",
+              "TRANSITION_EVENT",
+              "REDUCER_POLICY",
+              "PROCESS_ASSESSMENT",
+              "TRANSITION_COMMIT"
+            ]
+          },
+          "content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "content_sha256"
+        ]
+      }
+    },
+    "temporary_files": {
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 4096,
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "expected_revision",
+    "expected_state_pointer_content_sha256",
+    "expected_workflow_state_content_sha256",
+    "evidence",
+    "orphan_objects",
+    "temporary_files"
+  ]
+}

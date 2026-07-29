@@ -16,11 +16,14 @@ import {
   type AuthorityLockDocument,
   type BaselineDocument,
   type ContractDocument,
+  type EvidenceManifestDocument,
   type ObjectiveDocument,
+  type PersistedStatePointerDocument,
   type PlanApprovalDocument,
   type ReducerPolicy,
   type RouteMapDocument,
   type SchemaId,
+  type StateTransitionCommitDocument,
   type TaskDocument,
   type TaskGraphDocument,
   type TransitionEvent,
@@ -1029,9 +1032,62 @@ export interface SemanticValidationOptions {
   readonly configuredMaxLeaves?: number;
 }
 
+function assertPersistenceDocumentSemantics(schemaId: SchemaId, value: unknown): void {
+  if (schemaId === "pi_gacw_evidence_manifest_v0") {
+    const manifest = value as EvidenceManifestDocument;
+    assertUniqueBy(manifest.entries, (entry) => entry.evidence_sha256, "DUPLICATE_EVIDENCE_IDENTITY");
+    assertUniqueBy(manifest.entries, (entry) => entry.metadata_content_sha256, "DUPLICATE_METADATA_IDENTITY");
+    return;
+  }
+  if (schemaId === "pi_gacw_persisted_state_pointer_v0") {
+    const pointer = value as PersistedStatePointerDocument;
+    if ((pointer.revision === 0) !== (pointer.previous_state_pointer_content_sha256 === null)) {
+      throw new ContractValidationError(
+        "STATE_POINTER_REVISION_MISMATCH",
+        "Only the genesis pointer may have a null previous pointer identity",
+      );
+    }
+    return;
+  }
+  if (schemaId === "pi_gacw_state_transition_commit_v0") {
+    const commit = value as StateTransitionCommitDocument;
+    const previousReferences = [
+      commit.previous_state_pointer_content_sha256,
+      commit.previous_workflow_state_content_sha256,
+      commit.previous_transition_commit_content_sha256,
+      commit.transition_event_content_sha256,
+    ];
+    if (commit.commit_kind === "GENESIS") {
+      if (
+        commit.previous_revision !== null ||
+        commit.new_revision !== 0 ||
+        previousReferences.some((identity) => identity !== null) ||
+        commit.process_assessment_content_sha256 !== null
+      ) {
+        throw new ContractValidationError("INVALID_GENESIS_COMMIT", "Genesis must start revision zero without previous or event references");
+      }
+      return;
+    }
+    if (
+      commit.previous_revision === null ||
+      commit.new_revision !== commit.previous_revision + 1 ||
+      previousReferences.some((identity) => identity === null)
+    ) {
+      throw new ContractValidationError("INVALID_TRANSITION_REVISION", "A transition must increment one revision and bind all previous/event references");
+    }
+    if ((commit.commit_kind === "PROCESS_CRASH") !== (commit.process_assessment_content_sha256 !== null)) {
+      throw new ContractValidationError(
+        "PROCESS_ASSESSMENT_MISMATCH",
+        "Exactly process-crash commits must bind a process-interruption assessment",
+      );
+    }
+  }
+}
+
 function assertDocumentSemantics(schemaId: SchemaId, value: unknown, options: SemanticValidationOptions): void {
   const document = recordOf(value);
   assertDeclaredSetUniqueness(schemaId, document);
+  assertPersistenceDocumentSemantics(schemaId, value);
 
   switch (schemaId) {
     case "pi_gacw_objective_v0": {

@@ -89,7 +89,7 @@ test("private canonical schema authority is deeply frozen", () => {
   assert.equal(Reflect.deleteProperty(objective.schema, "$id"), false);
 });
 
-test("safe schema inventory contains every required versioned M1 contract", () => {
+test("safe schema inventory contains every required versioned M1 and M2 contract", () => {
   const required = [
     "pi_gacw_objective_v0",
     "pi_gacw_owner_decisions_v0",
@@ -109,6 +109,11 @@ test("safe schema inventory contains every required versioned M1 contract", () =
     "pi_gacw_transition_commit_v0",
     "pi_gacw_final_report_v0",
     "pi_gacw_reducer_policy_v0",
+    "pi_gacw_evidence_metadata_v0",
+    "pi_gacw_evidence_manifest_v0",
+    "pi_gacw_persisted_state_pointer_v0",
+    "pi_gacw_process_interruption_v0",
+    "pi_gacw_state_transition_commit_v0",
   ];
   assert.deepEqual(SCHEMA_IDS, required);
   const snapshots = listSchemaSnapshots();

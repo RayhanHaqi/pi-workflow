@@ -1,0 +1,51 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_evidence_metadata_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_evidence_metadata_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "evidence_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "byte_length": {
+      "minimum": 0,
+      "maximum": 16777216,
+      "type": "integer"
+    },
+    "media_type": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "evidence_sha256",
+    "byte_length",
+    "media_type"
+  ]
+}

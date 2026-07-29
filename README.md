@@ -1,16 +1,17 @@
 # pi-bounded-coding-workflow
 
-Deterministic **V0 M1** foundations for a general-purpose bounded agentic-coding workflow for Pi.
+Deterministic **V0 M1–M2** foundations for a general-purpose bounded agentic-coding workflow for Pi.
 
-This milestone contains only:
+The package contains:
 
 - RFC 8785/JCS-compatible `canonical-json-v1` serialization;
 - SHA-256 content and domain identities;
 - a versioned projection registry and transitive plan-approval binding;
-- strict versioned JSON Schemas with aligned TypeScript types and semantic validators; and
-- one pure reducer for `DIRECT_LUNA_HIGH`, `SINGLE_OWNER_SOL`, and `ROUTED_DAG`.
+- strict versioned JSON Schemas with aligned TypeScript types and semantic validators;
+- one pure reducer for `DIRECT_LUNA_HIGH`, `SINGLE_OWNER_SOL`, and `ROUTED_DAG`; and
+- an M2 state store with immutable evidence, reducer-derived transition commits, a `state.json` commit pointer, reachability inspection, and bounded process-crash terminalization.
 
-It does **not** register a Pi extension or implement a CLI, persistence, transition commits, Git/baseline operations, locking, secure filesystem access, command execution, worker sessions, runtime budgets, resume, or any M2-or-later subsystem.
+It does **not** register a Pi extension or implement a CLI, event journal, resume/recovery, concurrent-writer lock, Git/baseline runtime, secure target-repository mutation, command gateway, worker sessions, routing runtime, or budget runtime.
 
 ## Package foundation
 
@@ -24,7 +25,7 @@ npm test
 npm run build
 ```
 
-Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration is outside M1.
+Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration remains outside M1–M2.
 
 ## Canonical JSON
 
@@ -92,7 +93,7 @@ The private registry in `src/identity/projections.ts` contains:
 
 Canonical runtime schemas are held in a package-private, deeply frozen registry. Ajv compiles exact serialized clones of that authority, so neither compilation nor public inspection can change it. The supported `./schemas` entrypoint exposes the frozen primitive `SCHEMA_VERSION`, the frozen schema-ID list `SCHEMA_IDS`, and `getSchemaSnapshot(schemaId)` / `listSchemaSnapshots()` for runtime inspection. Each schema snapshot is a fresh, detached, deeply frozen, serializable copy; snapshots inspect but never configure validation. Direct TypeBox objects, shared enum arrays, and the backing registry are not public runtime exports. Document and policy types remain available as compile-time-only TypeScript exports.
 
-The 17 required core schemas are present, plus the internal pure-reducer policy schema. Ajv enforces structural constraints. Deterministic semantic validators enforce cross-field rules such as canonical scope separation, route-role completeness and effort, verification-only closeout, owner-acceptance placement, graph consistency and caps, unambiguous write ownership, mode/state isolation, counter consistency, frozen identities, and null-only unavailable usage.
+The 17 required core schemas are present, plus the pure-reducer policy and five additive M2 persistence schemas. Ajv enforces structural constraints. Deterministic semantic validators enforce cross-field rules such as canonical scope separation, route-role completeness and effort, verification-only closeout, owner-acceptance placement, graph consistency and caps, unambiguous write ownership, mode/state isolation, counter consistency, frozen identities, and null-only unavailable usage.
 
 Scope and write-ownership paths use a rejecting repository-relative grammar: no absolute or drive-rooted paths, backslashes, NUL, empty segments, `.`/`..` segments, root aliases, or trailing slash. Paths are already canonical when accepted; no glob interpretation or silent path normalization occurs.
 
@@ -110,6 +111,35 @@ Each state binds `frozen_policy_content_sha256`, the complete independently veri
 
 Ready leaves sort by dependency satisfaction, topological rank, integer priority, then lexicographic `task_id`. The unchecked ordering helper is private to the reducer and runs only after `reduceState` has validated the state, event, policy, frozen policy binding, mode, and phase. The public state-machine subpath exports only `TransitionError`, `createInitialState`, and `reduceState`; it exposes no standalone workflow-decision helper. `PASS` and `BLOCKED` are immutable. An ordinary defect discovered at closeout becomes `BLOCKED_CLOSEOUT_DEFECT`; closeout cannot mutate or reopen a leaf.
 
+## Durable state-commit foundation
+
+The supported `./persistence` entrypoint exports only `StateStoreError`, `initializeRunStorage`, `putEvidence`, `commitTransition`, `inspectRunStorage`, and `terminalizeProcessCrash`. Internal atomic primitives, path derivation, checkpoint hooks, and object registries are blocked package subpaths.
+
+A run uses this fixed private layout beneath a caller-supplied absolute state root and strict ASCII run ID:
+
+```text
+<state-root>/runs/<run-id>/
+  state.json
+  evidence/sha256/<raw-byte-sha256>
+  records/evidence-metadata/<content-sha256>.json
+  records/evidence-manifests/<content-sha256>.json
+  records/workflow-states/<content-sha256>.json
+  records/transition-events/<content-sha256>.json
+  records/reducer-policies/<content-sha256>.json
+  records/process-assessments/<content-sha256>.json
+  commits/<content-sha256>.json
+```
+
+Every immutable JSON object is strictly schema- and identity-validated, encoded as canonical JSON, and stored under its content identity. Raw evidence is binary-safe, bounded to 16 MiB per object, addressed by the SHA-256 of exact bytes, and bound to byte-count metadata. Files are mode `0600`; owned state/run directories are mode `0700`. Existing immutable objects are reused only when their exact bytes match.
+
+Atomic publication uses an exclusive same-directory temporary file, complete writes, file `fsync`, close, atomic rename, and parent-directory `fsync`. A transition publishes all evidence first, then records, then its M2 transition-commit companion, verifies every reference from disk, rechecks the prior pointer/state identities, and replaces `state.json` last through the same fsync/rename discipline. The accepted M1 `pi_gacw_transition_commit_v0` meaning is unchanged; `pi_gacw_state_transition_commit_v0` is the additive M2 record binding run, exact revisions, reconstructed prior pointer, prior commit/state, event, complete reducer policy, reducer-produced state, evidence manifest, process metadata, and optional process assessment.
+
+`state.json` is the sole mutable commit authority. Inspection reconstructs all historical pointers from the immutable commit chain, replays each non-genesis transition through the public M1 `reduceState` boundary, verifies all object hashes/schemas/identities, and reports `HEALTHY`, `ORPHANED_UNCOMMITTED_EVIDENCE`, `BLOCKED_STATE_COMMIT_INCOMPLETE`, or `BLOCKED_UNEXPECTED_STATE_STORE_ENTRY`. Orphans and temporary files are never adopted or silently removed.
+
+V0 has no resume. With explicit interruption evidence and exact expected revision/pointer/state identities, a valid nonterminal run may commit a process-assessment record and an M1 `BLOCK` event whose reducer result is `BLOCKED_PROCESS_CRASH`. Existing orphans are inventoried but remain uncommitted. Terminal state remains immutable.
+
+M2 guarantees process-interruption consistency under supported local-filesystem file/directory-fsync and rename semantics. It does not claim complete power-loss, hardware-controller, storage-device, distributed-filesystem, or concurrent-writer durability. **One-writer ownership is a caller precondition.** Expected-identity rereads detect sequentially observed drift but do not replace the M3 exclusive lock.
+
 ## Authority and milestone boundary
 
-The frozen architecture documents are byte-for-byte copies in `docs/architecture/`. M1 defines transition-commit schemas and identities only; durable evidence and commit-pointer behavior begin at M2 and are intentionally not implemented here.
+The frozen architecture documents are byte-for-byte copies in `docs/architecture/`. M1 reducer, schema, and identity semantics remain frozen dependencies. M2 adds only persistence beneath those boundaries; M3 locking, Git runtime guards, and all later capabilities are not implemented.
