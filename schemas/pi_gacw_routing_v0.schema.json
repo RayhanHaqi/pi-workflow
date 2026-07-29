@@ -1,0 +1,75 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_routing_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_routing_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "routing_projection_id": {
+      "const": "routing-freeze-v1",
+      "type": "string"
+    },
+    "routing_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "requested_mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "DIRECT_LUNA_HIGH",
+        "SINGLE_OWNER_SOL",
+        "ROUTED_DAG"
+      ]
+    },
+    "selected_mode": {
+      "type": "string",
+      "enum": [
+        "DIRECT_LUNA_HIGH",
+        "SINGLE_OWNER_SOL",
+        "ROUTED_DAG"
+      ]
+    },
+    "reasons": {
+      "minItems": 1,
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 16384,
+        "type": "string"
+      }
+    },
+    "route_map_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "routing_projection_id",
+    "routing_sha256",
+    "requested_mode",
+    "selected_mode",
+    "reasons",
+    "route_map_approval_sha256"
+  ]
+}

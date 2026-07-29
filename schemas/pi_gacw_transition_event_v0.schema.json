@@ -1,0 +1,2482 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_transition_event_v0.schema.json",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "FREEZE_OBJECTIVE",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "ACQUIRE_LOCK",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "CAPTURE_BASELINE",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "approval_required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "approval_required"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "REQUEST_BASELINE_APPROVAL",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "ACCEPT_CLEAN_BASELINE",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "APPROVE_BASELINE",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "PASS_FULL_PREFLIGHT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "VALIDATE_CONTRACT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "SELECT_ROUTE",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "execution_mode": {
+              "type": "string",
+              "enum": [
+                "DIRECT_LUNA_HIGH",
+                "SINGLE_OWNER_SOL",
+                "ROUTED_DAG"
+              ]
+            }
+          },
+          "required": [
+            "execution_mode"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "VALIDATE_DIRECT_CONTRACT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "REQUEST_DIRECT_APPROVAL",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "APPROVE_DIRECT_TASK",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "PASS_DIRECT_FAST_PREFLIGHT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "START_DIRECT_ATTEMPT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "COMPLETE_DIRECT_ATTEMPT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "PASS_DIRECT_POSTFLIGHT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "DIRECT_VERIFICATION_PASSED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "DIRECT_VERIFICATION_FAILED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "failure_class": {
+              "type": "string",
+              "enum": [
+                "LOCAL_IMPLEMENTATION_DEFECT",
+                "PLAN_INCORRECT",
+                "SAME_FAILURE_TWICE",
+                "SCOPE_EXPANSION_REQUIRED",
+                "STATE_DRIFT",
+                "TEST_INTEGRITY_VIOLATION",
+                "MODEL_UNAVAILABLE"
+              ]
+            }
+          },
+          "required": [
+            "failure_class"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "ADMIT_DIRECT_RETRY",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "progress_delta": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "VALID_REPOSITORY_DELTA",
+                    "NEW_TEST_EVIDENCE",
+                    "EVIDENCE_BACKED_DIAGNOSIS",
+                    "FAILURE_RECLASSIFICATION",
+                    "CONTEXT_RESTORATION"
+                  ]
+                },
+                "evidence_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "summary": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "evidence_sha256",
+                "summary"
+              ]
+            }
+          },
+          "required": [
+            "progress_delta"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "VALIDATE_SINGLE_OWNER_CONTRACT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "REQUEST_SINGLE_OWNER_APPROVAL",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "APPROVE_SINGLE_OWNER_TASK",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "PASS_SINGLE_OWNER_FAST_PREFLIGHT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "START_SINGLE_OWNER",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "ADMIT_SINGLE_OWNER_MUTATION_CYCLE",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "COMPLETE_SINGLE_OWNER",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "PASS_SINGLE_OWNER_POSTFLIGHT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "SINGLE_OWNER_VERIFICATION_PASSED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "SINGLE_OWNER_VERIFICATION_FAILED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "failure_class": {
+              "type": "string",
+              "enum": [
+                "LOCAL_IMPLEMENTATION_DEFECT",
+                "PLAN_INCORRECT",
+                "SAME_FAILURE_TWICE",
+                "SCOPE_EXPANSION_REQUIRED",
+                "STATE_DRIFT",
+                "TEST_INTEGRITY_VIOLATION",
+                "MODEL_UNAVAILABLE"
+              ]
+            }
+          },
+          "required": [
+            "failure_class"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "OWNER_ACCEPTED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "OWNER_REJECTED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "reason": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "START_PLAN",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "COMPLETE_PLAN",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "REQUEST_PLAN_APPROVAL",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "APPROVE_PLAN",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "plan_approval_sha256": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "task_graph_sha256": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "plan_approval_sha256",
+            "task_graph_sha256"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "ACTIVATE_DAG",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "SELECT_READY_LEAF",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "START_LEAF_ATTEMPT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "COMPLETE_LEAF_ATTEMPT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "PASS_LEAF_POSTFLIGHT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "LEAF_VERIFICATION_PASSED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "LEAF_VERIFICATION_FAILED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "failure_class": {
+              "type": "string",
+              "enum": [
+                "LOCAL_IMPLEMENTATION_DEFECT",
+                "PLAN_INCORRECT",
+                "SAME_FAILURE_TWICE",
+                "SCOPE_EXPANSION_REQUIRED",
+                "STATE_DRIFT",
+                "TEST_INTEGRITY_VIOLATION",
+                "MODEL_UNAVAILABLE"
+              ]
+            }
+          },
+          "required": [
+            "failure_class"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "ADMIT_LEAF_RETRY",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "progress_delta": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "VALID_REPOSITORY_DELTA",
+                    "NEW_TEST_EVIDENCE",
+                    "EVIDENCE_BACKED_DIAGNOSIS",
+                    "FAILURE_RECLASSIFICATION",
+                    "CONTEXT_RESTORATION"
+                  ]
+                },
+                "evidence_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "summary": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "evidence_sha256",
+                "summary"
+              ]
+            }
+          },
+          "required": [
+            "progress_delta"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "START_CONSTRAINED_REPLAN",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "COMPLETE_CONSTRAINED_REPLAN",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "frozen_bindings": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "plan_approval_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "task_graph_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "scope_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "acceptance_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "budget_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "plan_approval_sha256",
+                "task_graph_sha256",
+                "scope_sha256",
+                "acceptance_sha256",
+                "budget_sha256"
+              ]
+            },
+            "proposed_task_ids": {
+              "minItems": 2,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "type": "array",
+              "items": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              }
+            },
+            "proposed_edges": {
+              "maxItems": 56,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                    "type": "string"
+                  },
+                  "to": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to"
+                ]
+              }
+            },
+            "progress_delta": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "VALID_REPOSITORY_DELTA",
+                    "NEW_TEST_EVIDENCE",
+                    "EVIDENCE_BACKED_DIAGNOSIS",
+                    "FAILURE_RECLASSIFICATION",
+                    "CONTEXT_RESTORATION"
+                  ]
+                },
+                "evidence_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "summary": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "evidence_sha256",
+                "summary"
+              ]
+            }
+          },
+          "required": [
+            "frozen_bindings",
+            "proposed_task_ids",
+            "proposed_edges",
+            "progress_delta"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "START_CLOSEOUT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "COMPLETE_CLOSEOUT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "CLOSEOUT_PASSED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "CLOSEOUT_DEFECT",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "reason": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "BLOCK",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "reason": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    }
+  ]
+}

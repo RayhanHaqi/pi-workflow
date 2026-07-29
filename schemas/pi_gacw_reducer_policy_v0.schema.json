@@ -1,0 +1,197 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_reducer_policy_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_reducer_policy_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": [
+        "DIRECT_LUNA_HIGH",
+        "SINGLE_OWNER_SOL",
+        "ROUTED_DAG"
+      ]
+    },
+    "owner_acceptance_required": {
+      "type": "boolean"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "max_direct_attempts": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "max_single_owner_mutation_cycles": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "max_attempts_per_leaf": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "max_replans": {
+          "minimum": 0,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "max_leaves": {
+          "minimum": 1,
+          "maximum": 8,
+          "type": "integer"
+        },
+        "max_worker_invocations": {
+          "minimum": 1,
+          "maximum": 20,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_direct_attempts",
+        "max_single_owner_mutation_cycles",
+        "max_attempts_per_leaf",
+        "max_replans",
+        "max_leaves",
+        "max_worker_invocations"
+      ]
+    },
+    "tasks": {
+      "minItems": 1,
+      "maxItems": 8,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "task_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "topological_rank": {
+            "minimum": 0,
+            "maximum": 1000000,
+            "type": "integer"
+          },
+          "priority": {
+            "minimum": -1000000,
+            "maximum": 1000000,
+            "type": "integer"
+          },
+          "dependencies": {
+            "uniqueItems": true,
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+              "type": "string"
+            }
+          },
+          "editable_paths": {
+            "uniqueItems": true,
+            "maxItems": 10000,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "task_id",
+          "task_sha256",
+          "topological_rank",
+          "priority",
+          "dependencies",
+          "editable_paths"
+        ]
+      }
+    },
+    "frozen_bindings": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "plan_approval_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_graph_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "acceptance_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "budget_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "plan_approval_sha256",
+        "task_graph_sha256",
+        "scope_sha256",
+        "acceptance_sha256",
+        "budget_sha256"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "execution_mode",
+    "owner_acceptance_required",
+    "limits",
+    "tasks",
+    "frozen_bindings"
+  ]
+}

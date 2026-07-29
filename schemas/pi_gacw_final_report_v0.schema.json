@@ -1,0 +1,307 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_final_report_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_final_report_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "final_report_projection_id": {
+      "const": "final-report-v1",
+      "type": "string"
+    },
+    "final_report_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "BLOCKED"
+      ]
+    },
+    "reason": {
+      "minLength": 1,
+      "maxLength": 16384,
+      "type": "string"
+    },
+    "objective_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "contract_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "plan_approval_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "final_state_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "command_results": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "command_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "exit_code": {
+            "minimum": 0,
+            "maximum": 255,
+            "type": "integer"
+          },
+          "output_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "exit_code",
+          "output_sha256"
+        ]
+      }
+    },
+    "usage": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "worker_invocation": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        },
+        "model_turn": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        },
+        "provider_request": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        },
+        "tool_call": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "worker_invocation",
+        "model_turn",
+        "provider_request",
+        "tool_call"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "final_report_projection_id",
+    "final_report_sha256",
+    "run_id",
+    "outcome",
+    "reason",
+    "objective_sha256",
+    "contract_sha256",
+    "plan_approval_sha256",
+    "final_state_sha256",
+    "command_results",
+    "usage"
+  ]
+}

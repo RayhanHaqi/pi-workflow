@@ -1,0 +1,81 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_authority_lock_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_authority_lock_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "authority_lock_projection_id": {
+      "const": "authority-lock-v1",
+      "type": "string"
+    },
+    "authority_lock_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "authorities": {
+      "minItems": 1,
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "OWNER_DECISION",
+              "REPOSITORY_INSTRUCTION",
+              "PUBLIC_API",
+              "SCHEMA",
+              "PROTOCOL",
+              "SECURITY_POLICY",
+              "BUILD_MANIFEST",
+              "TEST_CONTRACT",
+              "DOCUMENTATION_NORMATIVE",
+              "IMPLEMENTATION_CONTEXT"
+            ]
+          },
+          "content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "role",
+          "content_sha256"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "authority_lock_projection_id",
+    "authority_lock_sha256",
+    "authorities"
+  ]
+}

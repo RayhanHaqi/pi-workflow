@@ -1,0 +1,372 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_objective_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_objective_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "objective_projection_id": {
+      "const": "objective-freeze-v1",
+      "type": "string"
+    },
+    "objective_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "target_repository": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "root": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "git_common_dir": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "worktree": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "branch": {
+          "minLength": 1,
+          "maxLength": 512,
+          "type": "string"
+        },
+        "head": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "git_common_dir",
+        "worktree",
+        "branch",
+        "head"
+      ]
+    },
+    "requested_mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "DIRECT_LUNA_HIGH",
+        "SINGLE_OWNER_SOL",
+        "ROUTED_DAG"
+      ]
+    },
+    "objective": {
+      "minLength": 1,
+      "maxLength": 16384,
+      "type": "string"
+    },
+    "primary_failure_domain": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "scope": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "readable_paths": {
+          "uniqueItems": true,
+          "maxItems": 10000,
+          "type": "array",
+          "items": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "editable_paths": {
+          "uniqueItems": true,
+          "maxItems": 10000,
+          "type": "array",
+          "items": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "frozen_paths": {
+          "uniqueItems": true,
+          "maxItems": 10000,
+          "type": "array",
+          "items": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "readable_paths",
+        "editable_paths",
+        "frozen_paths"
+      ]
+    },
+    "repository_authority_paths": {
+      "uniqueItems": true,
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 4096,
+        "type": "string"
+      }
+    },
+    "frozen_invariants": {
+      "minItems": 1,
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 16384,
+        "type": "string"
+      }
+    },
+    "required_outputs": {
+      "minItems": 1,
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 16384,
+        "type": "string"
+      }
+    },
+    "acceptance_criteria": {
+      "minItems": 1,
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "criterion_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "description": {
+            "minLength": 1,
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "evidence_kind": {
+            "type": "string",
+            "enum": [
+              "COMMAND",
+              "FILE",
+              "DIGEST",
+              "OWNER_ACCEPTANCE"
+            ]
+          },
+          "owner_acceptance": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "criterion_id",
+          "description",
+          "evidence_kind",
+          "owner_acceptance"
+        ]
+      }
+    },
+    "verification_commands": {
+      "minItems": 1,
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "command_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "argv": {
+            "minItems": 1,
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "timeout_ms": {
+            "minimum": 1,
+            "maximum": 86400000,
+            "type": "integer"
+          },
+          "network": {
+            "type": "string",
+            "enum": [
+              "FORBIDDEN",
+              "OWNER_APPROVED"
+            ]
+          }
+        },
+        "required": [
+          "command_id",
+          "argv",
+          "cwd",
+          "timeout_ms",
+          "network"
+        ]
+      }
+    },
+    "owner_acceptance_criteria": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "criterion_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "description": {
+            "minLength": 1,
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "evidence_kind": {
+            "type": "string",
+            "enum": [
+              "COMMAND",
+              "FILE",
+              "DIGEST",
+              "OWNER_ACCEPTANCE"
+            ]
+          },
+          "owner_acceptance": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "criterion_id",
+          "description",
+          "evidence_kind",
+          "owner_acceptance"
+        ]
+      }
+    },
+    "command_policy": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "shell": {
+          "const": false,
+          "type": "boolean"
+        },
+        "network": {
+          "type": "string",
+          "enum": [
+            "FORBIDDEN",
+            "OWNER_APPROVED"
+          ]
+        },
+        "allowed_executables": {
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "type": "array",
+          "items": {
+            "minLength": 1,
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
+        "forbidden_operations": {
+          "minItems": 1,
+          "uniqueItems": true,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "INSTALL",
+              "COMMIT",
+              "PUSH",
+              "TAG",
+              "MERGE",
+              "REBASE",
+              "RESET",
+              "RESTORE",
+              "CLEAN",
+              "SWITCH_BRANCH",
+              "MODIFY_REMOTE"
+            ]
+          }
+        }
+      },
+      "required": [
+        "shell",
+        "network",
+        "allowed_executables",
+        "forbidden_operations"
+      ]
+    },
+    "baseline_mode": {
+      "type": "string",
+      "enum": [
+        "CLEAN_REQUIRED",
+        "APPROVED_BASELINE_DIRTY"
+      ]
+    },
+    "configured_max_leaves": {
+      "minimum": 1,
+      "maximum": 8,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "objective_projection_id",
+    "objective_sha256",
+    "target_repository",
+    "requested_mode",
+    "objective",
+    "primary_failure_domain",
+    "scope",
+    "repository_authority_paths",
+    "frozen_invariants",
+    "required_outputs",
+    "acceptance_criteria",
+    "verification_commands",
+    "owner_acceptance_criteria",
+    "command_policy",
+    "baseline_mode",
+    "configured_max_leaves"
+  ]
+}

@@ -1,0 +1,137 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_route_map_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_route_map_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_projection_id": {
+      "const": "route-map-v1",
+      "type": "string"
+    },
+    "route_map_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "routes": {
+      "minItems": 7,
+      "maxItems": 7,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "logical_role": {
+            "type": "string",
+            "enum": [
+              "SOL_OWNER",
+              "SOL_PLANNER",
+              "SOL_REPLAN",
+              "SOL_CLOSEOUT",
+              "LUNA_EXECUTOR",
+              "BENCHMARK_VERIFIER",
+              "BENCHMARK_SELECTOR"
+            ]
+          },
+          "provider_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "model_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "effort": {
+            "type": "string",
+            "enum": [
+              "max",
+              "high"
+            ]
+          },
+          "tool_policy": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "policy_id": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              "built_in_tools_disabled": {
+                "const": true,
+                "type": "boolean"
+              },
+              "mutation_tool": {
+                "type": "string",
+                "enum": [
+                  "NONE",
+                  "APPLY_PATCH_SCOPED"
+                ]
+              },
+              "command_gateway": {
+                "type": "string",
+                "enum": [
+                  "INSPECTION_ONLY",
+                  "TASK_AND_VERIFICATION",
+                  "VERIFICATION_ONLY"
+                ]
+              },
+              "maximum_tool_calls": {
+                "minimum": 0,
+                "maximum": 1000000,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "policy_id",
+              "built_in_tools_disabled",
+              "mutation_tool",
+              "command_gateway",
+              "maximum_tool_calls"
+            ]
+          }
+        },
+        "required": [
+          "logical_role",
+          "provider_id",
+          "model_id",
+          "effort",
+          "tool_policy"
+        ]
+      }
+    },
+    "fallback": {
+      "const": false,
+      "type": "boolean"
+    },
+    "provider_managed_multi_agent": {
+      "const": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "route_map_projection_id",
+    "route_map_sha256",
+    "routes",
+    "fallback",
+    "provider_managed_multi_agent"
+  ]
+}

@@ -1,0 +1,301 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_budget_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_budget_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "budget_projection_id": {
+      "const": "budget-freeze-v1",
+      "type": "string"
+    },
+    "budget_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "max_leaves": {
+          "minimum": 1,
+          "maximum": 8,
+          "type": "integer"
+        },
+        "max_attempts_per_leaf": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "max_replans": {
+          "minimum": 0,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "max_worker_invocations": {
+          "minimum": 1,
+          "maximum": 20,
+          "type": "integer"
+        },
+        "max_model_turns": {
+          "minimum": 1,
+          "maximum": 1000000,
+          "type": "integer"
+        },
+        "max_tool_calls": {
+          "minimum": 0,
+          "maximum": 1000000,
+          "type": "integer"
+        },
+        "max_input_tokens": {
+          "minimum": 1,
+          "maximum": 1000000000,
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "minimum": 1,
+          "maximum": 1000000000,
+          "type": "integer"
+        },
+        "max_cost_microusd": {
+          "minimum": 0,
+          "maximum": 1000000000000,
+          "type": "integer"
+        },
+        "max_wall_time_ms": {
+          "minimum": 1,
+          "maximum": 604800000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_leaves",
+        "max_attempts_per_leaf",
+        "max_replans",
+        "max_worker_invocations",
+        "max_model_turns",
+        "max_tool_calls",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_cost_microusd",
+        "max_wall_time_ms"
+      ]
+    },
+    "usage": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "worker_invocation": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        },
+        "model_turn": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        },
+        "provider_request": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        },
+        "tool_call": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "null"
+                },
+                "enforcement_class": {
+                  "const": "UNAVAILABLE",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            },
+            {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "value": {
+                  "minimum": 0,
+                  "maximum": 1000000000000,
+                  "type": "integer"
+                },
+                "enforcement_class": {
+                  "type": "string",
+                  "enum": [
+                    "HARD_ENFORCEABLE",
+                    "SOFT_ENFORCEABLE",
+                    "OBSERVABLE_ONLY",
+                    "ESTIMATED_ONLY"
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "enforcement_class"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "worker_invocation",
+        "model_turn",
+        "provider_request",
+        "tool_call"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "budget_projection_id",
+    "budget_sha256",
+    "limits",
+    "usage"
+  ]
+}

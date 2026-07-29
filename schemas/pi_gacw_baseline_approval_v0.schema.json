@@ -1,0 +1,88 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_baseline_approval_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_baseline_approval_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_approval_projection_id": {
+      "const": "baseline-approval-v1",
+      "type": "string"
+    },
+    "baseline_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "target_repository": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "root": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "git_common_dir": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "worktree": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "branch": {
+          "minLength": 1,
+          "maxLength": 512,
+          "type": "string"
+        },
+        "head": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "git_common_dir",
+        "worktree",
+        "branch",
+        "head"
+      ]
+    },
+    "approved_by": {
+      "minLength": 1,
+      "maxLength": 1024,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "baseline_approval_projection_id",
+    "baseline_approval_sha256",
+    "baseline_sha256",
+    "target_repository",
+    "approved_by"
+  ]
+}

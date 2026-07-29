@@ -1,0 +1,359 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_state_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_state_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": [
+        "DIRECT_LUNA_HIGH",
+        "SINGLE_OWNER_SOL",
+        "ROUTED_DAG"
+      ]
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "OBJECTIVE_FROZEN",
+        "LOCK_ACQUIRED",
+        "BASELINE_CAPTURED",
+        "AWAITING_BASELINE_APPROVAL",
+        "BASELINE_APPROVED",
+        "FULL_PREFLIGHT_PASSED",
+        "CONTRACT_VALIDATED",
+        "ROUTE_SELECTED",
+        "DIRECT_CONTRACT_VALIDATED",
+        "AWAITING_DIRECT_APPROVAL",
+        "DIRECT_TASK_FROZEN",
+        "DIRECT_FAST_PREFLIGHT",
+        "DIRECT_ATTEMPT_RUNNING",
+        "DIRECT_POSTFLIGHT",
+        "DIRECT_VERIFYING",
+        "DIRECT_RETRY_READY",
+        "SINGLE_OWNER_CONTRACT_VALIDATED",
+        "AWAITING_SINGLE_OWNER_APPROVAL",
+        "SINGLE_OWNER_TASK_FROZEN",
+        "SINGLE_OWNER_FAST_PREFLIGHT",
+        "SINGLE_OWNER_RUNNING",
+        "SINGLE_OWNER_POSTFLIGHT",
+        "SINGLE_OWNER_VERIFYING",
+        "AWAITING_DECLARED_OWNER_ACCEPTANCE",
+        "PLAN_RUNNING",
+        "PLAN_VALIDATED",
+        "AWAITING_PLAN_APPROVAL",
+        "DAG_FROZEN",
+        "READY",
+        "LEAF_FAST_PREFLIGHT",
+        "LEAF_RUNNING",
+        "LEAF_POSTFLIGHT",
+        "LEAF_VERIFYING",
+        "LEAF_RETRY_READY",
+        "REPLAN_REQUIRED",
+        "CLOSEOUT_RUNNING",
+        "CLOSEOUT_VERIFYING",
+        "PASS",
+        "BLOCKED"
+      ]
+    },
+    "identities": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "objective_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "contract_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "baseline_approval_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "authority_lock_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "plan_approval_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_graph_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "acceptance_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "budget_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "objective_sha256",
+        "contract_sha256",
+        "baseline_approval_sha256",
+        "authority_lock_sha256",
+        "plan_approval_sha256",
+        "task_graph_sha256",
+        "scope_sha256",
+        "acceptance_sha256",
+        "budget_sha256"
+      ]
+    },
+    "frozen_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "counters": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "worker_invocations": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "total": {
+              "minimum": 0,
+              "maximum": 20,
+              "type": "integer"
+            },
+            "sol_owner": {
+              "minimum": 0,
+              "maximum": 1,
+              "type": "integer"
+            },
+            "sol_planner": {
+              "minimum": 0,
+              "maximum": 1,
+              "type": "integer"
+            },
+            "sol_replan": {
+              "minimum": 0,
+              "maximum": 2,
+              "type": "integer"
+            },
+            "sol_closeout": {
+              "minimum": 0,
+              "maximum": 1,
+              "type": "integer"
+            },
+            "luna_executor": {
+              "minimum": 0,
+              "maximum": 16,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total",
+            "sol_owner",
+            "sol_planner",
+            "sol_replan",
+            "sol_closeout",
+            "luna_executor"
+          ]
+        },
+        "direct_attempts": {
+          "minimum": 0,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "single_owner_mutation_cycles": {
+          "minimum": 0,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "constrained_replans": {
+          "minimum": 0,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "leaves_completed": {
+          "minimum": 0,
+          "maximum": 8,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "worker_invocations",
+        "direct_attempts",
+        "single_owner_mutation_cycles",
+        "constrained_replans",
+        "leaves_completed"
+      ]
+    },
+    "gates": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "planner_completed": {
+          "type": "boolean"
+        },
+        "owner_acceptance_completed": {
+          "type": "boolean"
+        },
+        "closeout_completed": {
+          "type": "boolean"
+        },
+        "closeout_verification_completed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "planner_completed",
+        "owner_acceptance_completed",
+        "closeout_completed",
+        "closeout_verification_completed"
+      ]
+    },
+    "tasks": {
+      "maxItems": 8,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "RUNNING",
+              "PASS",
+              "BLOCKED"
+            ]
+          },
+          "attempts": {
+            "minimum": 0,
+            "maximum": 2,
+            "type": "integer"
+          },
+          "postflight_completed": {
+            "type": "boolean"
+          },
+          "verification_completed": {
+            "type": "boolean"
+          },
+          "retry_progress_admitted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "task_id",
+          "status",
+          "attempts",
+          "postflight_completed",
+          "verification_completed",
+          "retry_progress_admitted"
+        ]
+      }
+    },
+    "active_task_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "baseline_approval_required": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "route_frozen": {
+      "type": "boolean"
+    },
+    "owner_acceptance_required": {
+      "type": "boolean"
+    },
+    "replan_in_progress": {
+      "type": "boolean"
+    },
+    "terminal_reason": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "execution_mode",
+    "phase",
+    "identities",
+    "frozen_policy_content_sha256",
+    "counters",
+    "gates",
+    "tasks",
+    "active_task_id",
+    "baseline_approval_required",
+    "route_frozen",
+    "owner_acceptance_required",
+    "replan_in_progress",
+    "terminal_reason"
+  ]
+}

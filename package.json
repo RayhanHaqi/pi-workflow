@@ -1,0 +1,38 @@
+{
+  "name": "pi-bounded-coding-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure M1 foundations for a bounded general-purpose Pi agentic-coding workflow",
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "schema:emit": "tsx src/schemas/emit.ts",
+    "schema:check": "tsx src/schemas/emit.ts --check",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && tsx --test --test-concurrency=1 tests/*.test.ts",
+    "build": "npm run schema:check && tsc -p tsconfig.json"
+  },
+  "exports": {
+    "./canonical-json": "./dist/src/canonical-json/index.js",
+    "./identity": "./dist/src/identity/index.js",
+    "./schemas": "./dist/src/schemas/index.js",
+    "./state-machine": "./dist/src/state-machine/index.js"
+  },
+  "files": [
+    "dist/src",
+    "schemas",
+    "docs/architecture",
+    "README.md"
+  ],
+  "dependencies": {
+    "@sinclair/typebox": "0.34.41",
+    "ajv": "8.17.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "tsx": "4.19.3",
+    "typescript": "5.8.3"
+  }
+}

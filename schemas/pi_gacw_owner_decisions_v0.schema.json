@@ -1,0 +1,60 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_owner_decisions_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_owner_decisions_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "decisions": {
+      "minItems": 1,
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "decision_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "question": {
+            "minLength": 1,
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "answer": {
+            "minLength": 1,
+            "maxLength": 16384,
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "question",
+          "answer"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "decisions"
+  ]
+}

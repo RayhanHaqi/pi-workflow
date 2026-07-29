@@ -1,0 +1,55 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_route_map_approval_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_route_map_approval_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_approval_projection_id": {
+      "const": "route-map-approval-v1",
+      "type": "string"
+    },
+    "route_map_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "approved_by": {
+      "minLength": 1,
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "approval_token_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "route_map_approval_projection_id",
+    "route_map_approval_sha256",
+    "route_map_sha256",
+    "approved_by",
+    "approval_token_sha256"
+  ]
+}

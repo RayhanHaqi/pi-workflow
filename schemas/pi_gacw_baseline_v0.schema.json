@@ -1,0 +1,169 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_baseline_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_baseline_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_projection_id": {
+      "const": "baseline-snapshot-v1",
+      "type": "string"
+    },
+    "baseline_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "target_repository": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "root": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "git_common_dir": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "worktree": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "branch": {
+          "minLength": 1,
+          "maxLength": 512,
+          "type": "string"
+        },
+        "head": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "git_common_dir",
+        "worktree",
+        "branch",
+        "head"
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "CLEAN_REQUIRED",
+        "APPROVED_BASELINE_DIRTY"
+      ]
+    },
+    "git_state_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "staged_paths": {
+      "uniqueItems": true,
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 4096,
+        "type": "string"
+      }
+    },
+    "unstaged_paths": {
+      "uniqueItems": true,
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 4096,
+        "type": "string"
+      }
+    },
+    "untracked_paths": {
+      "uniqueItems": true,
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 4096,
+        "type": "string"
+      }
+    },
+    "files": {
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "ownership_class": {
+            "type": "string",
+            "enum": [
+              "OWNER_AUTHORITY",
+              "OWNER_ACCEPTED_MUTABLE",
+              "PREEXISTING_UNRELATED",
+              "GENERATED_ACCEPTED_BASELINE"
+            ]
+          },
+          "data_class": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_SOURCE",
+              "PRIVATE_SOURCE",
+              "SENSITIVE",
+              "LARGE_BINARY",
+              "HASH_ONLY"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "content_sha256",
+          "ownership_class",
+          "data_class"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "baseline_projection_id",
+    "baseline_sha256",
+    "target_repository",
+    "mode",
+    "git_state_sha256",
+    "staged_paths",
+    "unstaged_paths",
+    "untracked_paths",
+    "files"
+  ]
+}
