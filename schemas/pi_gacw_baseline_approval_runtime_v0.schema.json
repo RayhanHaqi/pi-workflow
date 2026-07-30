@@ -1,0 +1,223 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_baseline_approval_runtime_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_baseline_approval_runtime_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "baseline_runtime_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_snapshot_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_snapshot_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "accepted_approval": {
+      "$ref": "https://pi-gacw.invalid/schemas/pi_gacw_baseline_approval_v0.schema.json"
+    },
+    "approved_by": {
+      "minLength": 1,
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "approved_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "approval_scope": {
+      "const": "EXACT_BASELINE",
+      "type": "string"
+    },
+    "decisions": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "ownership_class": {
+            "type": "string",
+            "enum": [
+              "OWNER_AUTHORITY",
+              "OWNER_ACCEPTED_MUTABLE",
+              "PREEXISTING_UNRELATED",
+              "GENERATED_ACCEPTED_BASELINE"
+            ]
+          },
+          "data_class": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_SOURCE",
+              "PRIVATE_SOURCE",
+              "SENSITIVE",
+              "SECRET",
+              "LARGE_BINARY",
+              "HASH_ONLY"
+            ]
+          },
+          "capture_mode": {
+            "type": "string",
+            "enum": [
+              "HASH_ONLY",
+              "BLOB"
+            ]
+          },
+          "explicit_blob_approval": {
+            "type": "boolean"
+          },
+          "retention_days_after_terminal": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "maximum": 30,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "file_type": {
+            "type": "string",
+            "enum": [
+              "REGULAR",
+              "DELETED"
+            ]
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "size": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "blob": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "blob_sha256": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "byte_length": {
+                    "minimum": 0,
+                    "maximum": 1048576,
+                    "type": "integer"
+                  },
+                  "relative_path": {
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "blob_sha256",
+                  "byte_length",
+                  "relative_path"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "ownership_class",
+          "data_class",
+          "capture_mode",
+          "explicit_blob_approval",
+          "retention_days_after_terminal",
+          "content_sha256",
+          "file_type",
+          "mode",
+          "size",
+          "status_sha256",
+          "blob"
+        ]
+      }
+    },
+    "decisions_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "retention_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "baseline_runtime_content_sha256",
+    "baseline_snapshot_sha256",
+    "baseline_snapshot_content_sha256",
+    "accepted_approval",
+    "approved_by",
+    "approved_at",
+    "approval_scope",
+    "decisions",
+    "decisions_sha256",
+    "retention_sha256"
+  ]
+}

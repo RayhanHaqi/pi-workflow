@@ -13,6 +13,15 @@ import {
   identifyContractDocument,
   type EvidenceManifestDocument,
   type EvidenceMetadataDocument,
+  type M3BaselineApprovalRuntimeDocument,
+  type M3BaselineRuntimeDocument,
+  type M3LockAcquisitionDocument,
+  type M3LockDiagnosticDocument,
+  type M3PostflightDocument,
+  type M3PreflightDocument,
+  type M3RepositoryStateTokenDocument,
+  type M3RetentionResultDocument,
+  type M3TerminalRetentionAuthorityDocument,
   type PersistedStatePointerDocument,
   type ProcessInterruptionDocument,
   type ProcessMetadata,
@@ -23,6 +32,7 @@ import {
   type WorkflowState,
 } from "../schemas/index.js";
 import { createInitialState, reduceState } from "../state-machine/index.js";
+import { classifyManagedAuthority } from "./managed-authority.js";
 import {
   assertPrivateDirectory,
   assertRegularPrivateFile,
@@ -39,6 +49,7 @@ import type {
   InitializeRunStorageInput,
   InspectedObject,
   InspectionIssue,
+  ManagedRecordClassification,
   ProcessInterruptionEvidence,
   RunStorageInspection,
   RunStorageLocation,
@@ -55,10 +66,12 @@ const JSON_DIGEST_FILE_PATTERN = /^[0-9a-f]{64}\.json$/;
 
 interface RunLayout {
   readonly stateRoot: string;
+  readonly locksDirectory: string;
   readonly runsDirectory: string;
   readonly runDirectory: string;
   readonly stateFile: string;
   readonly rawEvidenceDirectory: string;
+  readonly baselineBlobDirectory: string;
   readonly recordsDirectory: string;
   readonly evidenceMetadataDirectory: string;
   readonly evidenceManifestDirectory: string;
@@ -66,11 +79,21 @@ interface RunLayout {
   readonly transitionEventDirectory: string;
   readonly reducerPolicyDirectory: string;
   readonly processAssessmentDirectory: string;
+  readonly baselineRecordDirectory: string;
+  readonly baselineApprovalRecordDirectory: string;
+  readonly lockAcquisitionRecordDirectory: string;
+  readonly lockDiagnosticRecordDirectory: string;
+  readonly preflightRecordDirectory: string;
+  readonly repositoryStateTokenDirectory: string;
+  readonly postflightRecordDirectory: string;
+  readonly retentionRecordDirectory: string;
   readonly commitsDirectory: string;
 }
 
+type JsonStoredObjectKind = Exclude<StoredObjectKind, "RAW_EVIDENCE" | "M3_BASELINE_BLOB" | "M3_TERMINAL_RETENTION_AUTHORITY">;
+
 interface JsonKindDefinition {
-  readonly kind: Exclude<StoredObjectKind, "RAW_EVIDENCE">;
+  readonly kind: JsonStoredObjectKind;
   readonly schemaId: SchemaId;
   readonly directory: keyof Pick<
     RunLayout,
@@ -80,6 +103,14 @@ interface JsonKindDefinition {
     | "transitionEventDirectory"
     | "reducerPolicyDirectory"
     | "processAssessmentDirectory"
+    | "baselineRecordDirectory"
+    | "baselineApprovalRecordDirectory"
+    | "lockAcquisitionRecordDirectory"
+    | "lockDiagnosticRecordDirectory"
+    | "preflightRecordDirectory"
+    | "repositoryStateTokenDirectory"
+    | "postflightRecordDirectory"
+    | "retentionRecordDirectory"
     | "commitsDirectory"
   >;
 }
@@ -92,6 +123,14 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "REDUCER_POLICY", schemaId: "pi_gacw_reducer_policy_v0", directory: "reducerPolicyDirectory" },
   { kind: "PROCESS_ASSESSMENT", schemaId: "pi_gacw_process_interruption_v0", directory: "processAssessmentDirectory" },
   { kind: "TRANSITION_COMMIT", schemaId: "pi_gacw_state_transition_commit_v0", directory: "commitsDirectory" },
+  { kind: "M3_BASELINE", schemaId: "pi_gacw_baseline_runtime_v0", directory: "baselineRecordDirectory" },
+  { kind: "M3_BASELINE_APPROVAL", schemaId: "pi_gacw_baseline_approval_runtime_v0", directory: "baselineApprovalRecordDirectory" },
+  { kind: "M3_LOCK_ACQUISITION", schemaId: "pi_gacw_lock_acquisition_v0", directory: "lockAcquisitionRecordDirectory" },
+  { kind: "M3_LOCK_DIAGNOSTIC", schemaId: "pi_gacw_lock_diagnostic_v0", directory: "lockDiagnosticRecordDirectory" },
+  { kind: "M3_PREFLIGHT", schemaId: "pi_gacw_preflight_v0", directory: "preflightRecordDirectory" },
+  { kind: "M3_REPOSITORY_STATE_TOKEN", schemaId: "pi_gacw_repository_state_token_v0", directory: "repositoryStateTokenDirectory" },
+  { kind: "M3_POSTFLIGHT", schemaId: "pi_gacw_postflight_v0", directory: "postflightRecordDirectory" },
+  { kind: "M3_RETENTION_RESULT", schemaId: "pi_gacw_retention_result_v0", directory: "retentionRecordDirectory" },
 ]);
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
@@ -206,15 +245,18 @@ function assertLocation(input: RunStorageLocation): RunLayout {
   if (typeof input.runId !== "string" || !RUN_ID_PATTERN.test(input.runId)) {
     throw new StateStoreError("INVALID_RUN_ID", "runId must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$");
   }
+  const locksDirectory = join(input.stateRoot, "locks");
   const runsDirectory = join(input.stateRoot, "runs");
   const runDirectory = join(runsDirectory, input.runId);
   const recordsDirectory = join(runDirectory, "records");
   return {
     stateRoot: input.stateRoot,
+    locksDirectory,
     runsDirectory,
     runDirectory,
     stateFile: join(runDirectory, "state.json"),
     rawEvidenceDirectory: join(runDirectory, "evidence", "sha256"),
+    baselineBlobDirectory: join(runDirectory, "baseline-blobs", "sha256"),
     recordsDirectory,
     evidenceMetadataDirectory: join(recordsDirectory, "evidence-metadata"),
     evidenceManifestDirectory: join(recordsDirectory, "evidence-manifests"),
@@ -222,6 +264,14 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     transitionEventDirectory: join(recordsDirectory, "transition-events"),
     reducerPolicyDirectory: join(recordsDirectory, "reducer-policies"),
     processAssessmentDirectory: join(recordsDirectory, "process-assessments"),
+    baselineRecordDirectory: join(recordsDirectory, "baselines"),
+    baselineApprovalRecordDirectory: join(recordsDirectory, "baseline-approvals"),
+    lockAcquisitionRecordDirectory: join(recordsDirectory, "lock-acquisitions"),
+    lockDiagnosticRecordDirectory: join(recordsDirectory, "lock-diagnostics"),
+    preflightRecordDirectory: join(recordsDirectory, "preflights"),
+    repositoryStateTokenDirectory: join(recordsDirectory, "repository-state-tokens"),
+    postflightRecordDirectory: join(recordsDirectory, "postflights"),
+    retentionRecordDirectory: join(recordsDirectory, "retention"),
     commitsDirectory: join(runDirectory, "commits"),
   };
 }
@@ -235,7 +285,7 @@ function digestHex(digest: string): string {
   return digest.slice("sha256:".length);
 }
 
-function jsonObjectPath(layout: RunLayout, kind: Exclude<StoredObjectKind, "RAW_EVIDENCE">, digest: string): string {
+function jsonObjectPath(layout: RunLayout, kind: JsonStoredObjectKind, digest: string): string {
   const definition = JSON_KIND_BY_NAME.get(kind);
   if (definition === undefined) throw new StateStoreError("UNKNOWN_OBJECT_KIND", kind);
   return join(layout[definition.directory], `${digestHex(digest)}.json`);
@@ -266,6 +316,8 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.stateRoot);
   const hasRunsDirectory = await requireInitializableTopLevelLayout(layout, true);
   if (!hasRunsDirectory) await ensurePrivateDirectory(layout.runsDirectory);
+  const locksStats = await existingStats(layout.locksDirectory);
+  if (locksStats === undefined) await ensurePrivateDirectory(layout.locksDirectory);
   await requireInitializableTopLevelLayout(layout, false);
 
   const runStats = await existingStats(layout.runDirectory);
@@ -280,6 +332,8 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
 
   await ensurePrivateDirectory(join(layout.runDirectory, "evidence"));
   await ensurePrivateDirectory(layout.rawEvidenceDirectory);
+  await ensurePrivateDirectory(join(layout.runDirectory, "baseline-blobs"));
+  await ensurePrivateDirectory(layout.baselineBlobDirectory);
   await ensurePrivateDirectory(layout.recordsDirectory);
   await ensurePrivateDirectory(layout.evidenceMetadataDirectory);
   await ensurePrivateDirectory(layout.evidenceManifestDirectory);
@@ -287,16 +341,27 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.transitionEventDirectory);
   await ensurePrivateDirectory(layout.reducerPolicyDirectory);
   await ensurePrivateDirectory(layout.processAssessmentDirectory);
+  await ensurePrivateDirectory(layout.baselineRecordDirectory);
+  await ensurePrivateDirectory(layout.baselineApprovalRecordDirectory);
+  await ensurePrivateDirectory(layout.lockAcquisitionRecordDirectory);
+  await ensurePrivateDirectory(layout.lockDiagnosticRecordDirectory);
+  await ensurePrivateDirectory(layout.preflightRecordDirectory);
+  await ensurePrivateDirectory(layout.repositoryStateTokenDirectory);
+  await ensurePrivateDirectory(layout.postflightRecordDirectory);
+  await ensurePrivateDirectory(layout.retentionRecordDirectory);
   await ensurePrivateDirectory(layout.commitsDirectory);
 }
 
 async function assertExistingLayout(layout: RunLayout): Promise<void> {
   for (const directory of [
     layout.stateRoot,
+    layout.locksDirectory,
     layout.runsDirectory,
     layout.runDirectory,
     join(layout.runDirectory, "evidence"),
     layout.rawEvidenceDirectory,
+    join(layout.runDirectory, "baseline-blobs"),
+    layout.baselineBlobDirectory,
     layout.recordsDirectory,
     layout.evidenceMetadataDirectory,
     layout.evidenceManifestDirectory,
@@ -304,6 +369,14 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
     layout.transitionEventDirectory,
     layout.reducerPolicyDirectory,
     layout.processAssessmentDirectory,
+    layout.baselineRecordDirectory,
+    layout.baselineApprovalRecordDirectory,
+    layout.lockAcquisitionRecordDirectory,
+    layout.lockDiagnosticRecordDirectory,
+    layout.preflightRecordDirectory,
+    layout.repositoryStateTokenDirectory,
+    layout.postflightRecordDirectory,
+    layout.retentionRecordDirectory,
     layout.commitsDirectory,
   ]) {
     await assertPrivateDirectory(directory);
@@ -312,7 +385,7 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
 
 async function publishJsonDocument(
   layout: RunLayout,
-  kind: Exclude<StoredObjectKind, "RAW_EVIDENCE">,
+  kind: JsonStoredObjectKind,
   document: Record<string, unknown>,
 ): Promise<{ readonly reused: boolean }> {
   const definition = JSON_KIND_BY_NAME.get(kind);
@@ -326,7 +399,7 @@ async function publishJsonDocument(
 
 async function readJsonDocument<T extends Record<string, unknown>>(
   layout: RunLayout,
-  kind: Exclude<StoredObjectKind, "RAW_EVIDENCE">,
+  kind: JsonStoredObjectKind,
   contentSha256: string,
 ): Promise<T> {
   const definition = JSON_KIND_BY_NAME.get(kind);
@@ -480,9 +553,11 @@ function identifiedManifest(runId: string, receipts: readonly EvidenceReceipt[])
 }
 
 function objectDescriptor(layout: RunLayout, kind: StoredObjectKind, digest: Sha256Digest): InspectedObject {
-  const path = kind === "RAW_EVIDENCE"
+  const path = kind === "RAW_EVIDENCE" || kind === "M3_TERMINAL_RETENTION_AUTHORITY"
     ? rawEvidencePath(layout, digest)
-    : jsonObjectPath(layout, kind, digest);
+    : kind === "M3_BASELINE_BLOB"
+      ? join(layout.baselineBlobDirectory, digestHex(digest))
+      : jsonObjectPath(layout, kind, digest);
   return { kind, contentSha256: digest, relativePath: toRelative(layout, path) };
 }
 
@@ -696,26 +771,48 @@ function unexpectedStateRootIssue(stats: Stats, relativePath: string): Inspectio
     return { code: "SYMLINK_ENTRY", relativePath, detail: "State-root symlink entries are forbidden" };
   }
   if (stats.isFile()) {
-    return { code: "UNKNOWN_ENTRY", relativePath, detail: "State root permits only runs/; unexpected regular file" };
+    return { code: "UNKNOWN_ENTRY", relativePath, detail: "State root permits only runs/ and locks/; unexpected regular file" };
   }
   if (stats.isDirectory()) {
-    return { code: "UNKNOWN_ENTRY", relativePath, detail: "State root permits only runs/; unexpected directory" };
+    return { code: "UNKNOWN_ENTRY", relativePath, detail: "State root permits only runs/ and locks/; unexpected directory" };
   }
-  return { code: "SPECIAL_FILE_ENTRY", relativePath, detail: "State root permits only runs/; unexpected special file" };
+  return { code: "SPECIAL_FILE_ENTRY", relativePath, detail: "State root permits only runs/ and locks/; unexpected special file" };
+}
+
+async function scanLockDirectory(layout: RunLayout): Promise<void> {
+  await assertScannedDirectory(layout, layout.locksDirectory, "locks");
+  for (const name of (await readdir(layout.locksDirectory)).sort(compareText)) {
+    const relativePath = `locks/${name}`;
+    if (!/^(?:[0-9a-f]{64}\.(?:lock|owner\.json)|[0-9a-f]{64}\.acquisition-[0-9a-f]{64}\.json)$/.test(name)) {
+      throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath, detail: "Lock entries must use a worktree/acquisition-derived name" });
+    }
+    const stats = await lstat(join(layout.locksDirectory, name));
+    if (stats.isSymbolicLink()) throw new LayoutIssue({ code: "SYMLINK_ENTRY", relativePath, detail: "Lock entries cannot be symlinks" });
+    if (!stats.isFile()) throw new LayoutIssue({ code: "SPECIAL_FILE_ENTRY", relativePath, detail: "Lock entries must be regular files" });
+    if ((stats.mode & 0o777) !== 0o600) {
+      throw new LayoutIssue({ code: "PERMISSION_MISMATCH", relativePath, detail: "Lock entries must have mode 0600" });
+    }
+  }
 }
 
 async function scanOwnedTopLevelLayout(layout: RunLayout, allowMissingRuns: boolean): Promise<boolean> {
   await assertScannedDirectory(layout, layout.stateRoot, ".");
   const stateRootEntries = (await readdir(layout.stateRoot)).sort(compareText);
   for (const name of stateRootEntries) {
-    if (name === "runs") continue;
+    if (name === "runs" || name === "locks") continue;
     const relativePath = name;
     throw new LayoutIssue(unexpectedStateRootIssue(await lstat(join(layout.stateRoot, name)), relativePath));
   }
-  if (!stateRootEntries.includes("runs")) {
-    if (allowMissingRuns) return false;
+  const hasRuns = stateRootEntries.includes("runs");
+  if (!hasRuns && !allowMissingRuns) {
     throw new LayoutIssue({ code: "MISSING_DIRECTORY", relativePath: "runs", detail: "Required runs directory is missing" });
   }
+  if (!stateRootEntries.includes("locks")) {
+    if (!allowMissingRuns) throw new LayoutIssue({ code: "MISSING_DIRECTORY", relativePath: "locks", detail: "Required locks directory is missing" });
+  } else {
+    await scanLockDirectory(layout);
+  }
+  if (!hasRuns) return false;
 
   await assertScannedDirectory(layout, layout.runsDirectory, "runs");
   for (const name of (await readdir(layout.runsDirectory)).sort(compareText)) {
@@ -764,11 +861,18 @@ async function scanObjectDirectory(
   path: string,
   kind: StoredObjectKind,
   finalPattern: RegExp,
+  ignoredFinalNames: ReadonlySet<string> = new Set(),
 ): Promise<{ objects: InspectedObject[]; temporaryFiles: string[] }> {
   await assertScannedDirectory(layout, path);
   const objects: InspectedObject[] = [];
   const temporaryFiles: string[] = [];
   for (const name of (await readdir(path)).sort()) {
+    if (ignoredFinalNames.has(name)) {
+      if (!finalPattern.test(name)) {
+        throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath: toRelative(layout, join(path, name)), detail: "Ignored target name is not content-addressed" });
+      }
+      continue;
+    }
     const fullPath = join(path, name);
     const stats = await lstat(fullPath);
     const relativePath = toRelative(layout, fullPath);
@@ -790,11 +894,14 @@ async function scanObjectDirectory(
   return { objects, temporaryFiles };
 }
 
-async function scanLayout(layout: RunLayout): Promise<ScannedLayout> {
+async function scanLayout(
+  layout: RunLayout,
+  ignoredBaselineBlobNames: ReadonlySet<string> = new Set(),
+): Promise<ScannedLayout> {
   await scanOwnedTopLevelLayout(layout, false);
   await assertScannedDirectory(layout, layout.runDirectory);
   const runNames = new Set(await readdir(layout.runDirectory));
-  const allowedRunEntries = new Set(["state.json", "evidence", "records", "commits"]);
+  const allowedRunEntries = new Set(["state.json", "evidence", "baseline-blobs", "records", "commits"]);
   for (const name of runNames) {
     if (allowedRunEntries.has(name)) continue;
     const fullPath = join(layout.runDirectory, name);
@@ -827,12 +934,25 @@ async function scanLayout(layout: RunLayout): Promise<ScannedLayout> {
   if (canonicalize(evidenceChildren.sort()) !== canonicalize(["sha256"])) {
     throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath: "evidence", detail: "Evidence directory has an unexpected entry" });
   }
+  await assertScannedDirectory(layout, join(layout.runDirectory, "baseline-blobs"));
+  const baselineBlobChildren = await readdir(join(layout.runDirectory, "baseline-blobs"));
+  if (canonicalize(baselineBlobChildren.sort()) !== canonicalize(["sha256"])) {
+    throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath: "baseline-blobs", detail: "Baseline blob directory has an unexpected entry" });
+  }
   await assertScannedDirectory(layout, layout.recordsDirectory);
   const expectedRecordNames = [
+    "baseline-approvals",
+    "baselines",
     "evidence-manifests",
     "evidence-metadata",
+    "lock-acquisitions",
+    "lock-diagnostics",
+    "postflights",
+    "preflights",
     "process-assessments",
     "reducer-policies",
+    "repository-state-tokens",
+    "retention",
     "transition-events",
     "workflow-states",
   ].sort();
@@ -847,6 +967,14 @@ async function scanLayout(layout: RunLayout): Promise<ScannedLayout> {
   temporaryFiles.push(...stateTempNames.map((name) => toRelative(layout, join(layout.runDirectory, name))));
   const raw = await scanObjectDirectory(layout, layout.rawEvidenceDirectory, "RAW_EVIDENCE", DIGEST_FILE_PATTERN);
   objects.push(...raw.objects); temporaryFiles.push(...raw.temporaryFiles);
+  const baselineBlobs = await scanObjectDirectory(
+    layout,
+    layout.baselineBlobDirectory,
+    "M3_BASELINE_BLOB",
+    DIGEST_FILE_PATTERN,
+    ignoredBaselineBlobNames,
+  );
+  objects.push(...baselineBlobs.objects); temporaryFiles.push(...baselineBlobs.temporaryFiles);
   for (const definition of JSON_KINDS) {
     const scanned = await scanObjectDirectory(layout, layout[definition.directory], definition.kind, JSON_DIGEST_FILE_PATTERN);
     objects.push(...scanned.objects); temporaryFiles.push(...scanned.temporaryFiles);
@@ -858,11 +986,115 @@ async function scanLayout(layout: RunLayout): Promise<ScannedLayout> {
 }
 
 async function validateScannedObject(layout: RunLayout, object: InspectedObject): Promise<void> {
-  if (object.kind === "RAW_EVIDENCE") {
+  if (object.kind === "RAW_EVIDENCE" || object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
     await readRawEvidence(layout, object.contentSha256);
     return;
   }
+  if (object.kind === "M3_BASELINE_BLOB") {
+    const path = join(layout.baselineBlobDirectory, digestHex(object.contentSha256));
+    await assertRegularPrivateFile(path);
+    const bytes = await readFile(path);
+    if (sha256Bytes(bytes) !== object.contentSha256) {
+      throw new StateStoreError("EVIDENCE_HASH_MISMATCH", `Baseline blob hash mismatch: ${toRelative(layout, path)}`);
+    }
+    return;
+  }
   await readJsonDocument(layout, object.kind, object.contentSha256);
+}
+
+const M3_MANAGED_KINDS = new Set<StoredObjectKind>([
+  "M3_BASELINE",
+  "M3_BASELINE_APPROVAL",
+  "M3_LOCK_ACQUISITION",
+  "M3_LOCK_DIAGNOSTIC",
+  "M3_PREFLIGHT",
+  "M3_REPOSITORY_STATE_TOKEN",
+  "M3_POSTFLIGHT",
+  "M3_RETENTION_RESULT",
+  "M3_TERMINAL_RETENTION_AUTHORITY",
+  "M3_BASELINE_BLOB",
+]);
+
+async function terminalAuthorityManagedObjects(
+  layout: RunLayout,
+  scanned: readonly InspectedObject[],
+  graph: GraphInspection,
+): Promise<readonly InspectedObject[]> {
+  const objects: InspectedObject[] = [];
+  for (const object of scanned) {
+    if (object.kind !== "RAW_EVIDENCE" || !graph.reachable.has(object.relativePath)) continue;
+    try {
+      const value: unknown = JSON.parse((await readRawEvidence(layout, object.contentSha256)).toString("utf8"));
+      if (value !== null && typeof value === "object" && !Array.isArray(value) &&
+          (value as Record<string, unknown>)["schema_id"] === "pi_gacw_terminal_retention_authority_v0") {
+        objects.push({ ...object, kind: "M3_TERMINAL_RETENTION_AUTHORITY" });
+      }
+    } catch {
+      // Arbitrary raw evidence is not a managed terminal-authority candidate.
+    }
+  }
+  return objects;
+}
+
+async function classifyManagedRecords(
+  layout: RunLayout,
+  objects: readonly InspectedObject[],
+  graph: GraphInspection,
+): Promise<readonly ManagedRecordClassification[]> {
+  const baselines = new Map<string, M3BaselineRuntimeDocument>();
+  const approvals = new Map<string, M3BaselineApprovalRuntimeDocument>();
+  const lockAcquisitions = new Map<string, M3LockAcquisitionDocument>();
+  const lockDiagnostics = new Map<string, M3LockDiagnosticDocument>();
+  const preflights = new Map<string, M3PreflightDocument>();
+  const tokens = new Map<string, M3RepositoryStateTokenDocument>();
+  const postflights = new Map<string, M3PostflightDocument>();
+  const results = new Map<string, M3RetentionResultDocument>();
+  const terminalAuthorities = new Map<string, M3TerminalRetentionAuthorityDocument | Error>();
+  const blobDigests = new Set<string>();
+  const blobSizes = new Map<string, number>();
+  for (const object of objects) {
+    if (object.kind === "M3_BASELINE") baselines.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_BASELINE_APPROVAL") approvals.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_LOCK_ACQUISITION") lockAcquisitions.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_LOCK_DIAGNOSTIC") lockDiagnostics.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_PREFLIGHT") preflights.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_REPOSITORY_STATE_TOKEN") tokens.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_POSTFLIGHT") postflights.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_RETENTION_RESULT") results.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_BASELINE_BLOB") {
+      blobDigests.add(object.contentSha256);
+      blobSizes.set(object.contentSha256, (await lstat(join(layout.baselineBlobDirectory, digestHex(object.contentSha256)))).size);
+    }
+    else if (object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
+      try {
+        const bytes = await readRawEvidence(layout, object.contentSha256);
+        const value: unknown = JSON.parse(bytes.toString("utf8"));
+        assertDocumentValid("pi_gacw_terminal_retention_authority_v0", value);
+        const authority = value as M3TerminalRetentionAuthorityDocument;
+        if (!bytes.equals(canonicalJsonBytes(authority))) throw new Error("Terminal authority bytes are not canonical");
+        terminalAuthorities.set(object.contentSha256, authority);
+      } catch (error: unknown) {
+        terminalAuthorities.set(object.contentSha256, error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  }
+  return classifyManagedAuthority({
+    stateRoot: layout.stateRoot,
+    runId: basename(layout.runDirectory),
+    workflowState: graph.currentState,
+    objects,
+    baselines,
+    approvals,
+    lockAcquisitions,
+    lockDiagnostics,
+    preflights,
+    tokens,
+    postflights,
+    results,
+    terminalAuthorities,
+    blobDigests,
+    blobSizes,
+  });
 }
 
 function blockedInspection(
@@ -880,18 +1112,21 @@ function blockedInspection(
     transitionCommit: graph?.currentCommit ?? null,
     reachableObjects: graph?.reachable === undefined ? [] : [...graph.reachable.values()].sort((a, b) => compareText(a.relativePath, b.relativePath)),
     orphanedObjects: [],
+    managedObjects: [],
+    managedRecordClassifications: [],
     temporaryFiles: [],
     issues: [issue],
   });
 }
 
-export async function inspectRunStorage(input: RunStorageLocation): Promise<RunStorageInspection> {
-  assertRecord(input, "inspect input");
-  assertExactKeys(input, ["stateRoot", "runId"], "inspect input");
+async function inspectRunStorageInternal(
+  input: RunStorageLocation,
+  ignoredBaselineBlobNames: ReadonlySet<string>,
+): Promise<RunStorageInspection> {
   const layout = assertLocation(input);
   let scanned: ScannedLayout;
   try {
-    scanned = await scanLayout(layout);
+    scanned = await scanLayout(layout, ignoredBaselineBlobNames);
   } catch (error: unknown) {
     const issue = error instanceof LayoutIssue
       ? error.issue
@@ -926,7 +1161,30 @@ export async function inspectRunStorage(input: RunStorageLocation): Promise<RunS
     }
   }
 
-  const orphanedObjects = scanned.objects.filter((object) => !graph.reachable.has(object.relativePath));
+  const managedObjects = [
+    ...scanned.objects.filter((object) => M3_MANAGED_KINDS.has(object.kind)),
+    ...await terminalAuthorityManagedObjects(layout, scanned.objects, graph),
+  ].sort((left, right) => compareText(left.relativePath, right.relativePath) || compareText(left.kind, right.kind));
+  const managedRecordClassifications = await classifyManagedRecords(layout, managedObjects, graph);
+  const uncommittedBaselineBlobs = managedRecordClassifications.filter((entry) =>
+    entry.object.kind === "M3_BASELINE_BLOB" && entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION",
+  ).map((entry) => entry.object);
+  const orphanedObjects = [
+    ...scanned.objects.filter((object) => !M3_MANAGED_KINDS.has(object.kind) && !graph.reachable.has(object.relativePath)),
+    ...uncommittedBaselineBlobs,
+  ].sort((left, right) => compareText(left.relativePath, right.relativePath));
+  const issues = [
+    ...uncommittedBaselineBlobs.map((object) => ({
+      code: "UNCOMMITTED_BASELINE_PUBLICATION",
+      relativePath: object.relativePath,
+      detail: "A baseline blob has no committed durable baseline-runtime reference",
+    })),
+    ...managedRecordClassifications.filter((entry) => entry.classification === "INVALID_MANAGED_RECORD").map((entry) => ({
+      code: "INVALID_MANAGED_RECORD",
+      relativePath: entry.object.relativePath,
+      detail: entry.detail,
+    })),
+  ].sort((left, right) => compareText(left.relativePath, right.relativePath) || compareText(left.code, right.code));
   const status = orphanedObjects.length > 0 || scanned.temporaryFiles.length > 0
     ? "ORPHANED_UNCOMMITTED_EVIDENCE" as const
     : "HEALTHY" as const;
@@ -939,9 +1197,35 @@ export async function inspectRunStorage(input: RunStorageLocation): Promise<RunS
     transitionCommit: graph.currentCommit,
     reachableObjects: [...graph.reachable.values()].sort((a, b) => compareText(a.relativePath, b.relativePath)),
     orphanedObjects,
+    managedObjects,
+    managedRecordClassifications,
     temporaryFiles: scanned.temporaryFiles,
-    issues: [],
+    issues,
   });
+}
+
+export async function inspectRunStorage(input: RunStorageLocation): Promise<RunStorageInspection> {
+  assertRecord(input, "inspect input");
+  assertExactKeys(input, ["stateRoot", "runId"], "inspect input");
+  return inspectRunStorageInternal(input, new Set());
+}
+
+/** Package-internal retention inspection: only exact expected blob targets may be omitted from layout validation. */
+export async function inspectRunStorageForRetention(
+  input: RunStorageLocation,
+  expectedBlobDigests: readonly Sha256Digest[],
+): Promise<RunStorageInspection> {
+  if (!Array.isArray(expectedBlobDigests) || expectedBlobDigests.length > 100_000) {
+    throw new StateStoreError("INVALID_ARGUMENT", "Retention target digest inventory is invalid");
+  }
+  const names = new Set<string>();
+  for (const digest of expectedBlobDigests) {
+    assertDigestArgument(digest, "retention target digest");
+    const name = digestHex(digest);
+    if (names.has(name)) throw new StateStoreError("INVALID_ARGUMENT", "Retention target digest inventory contains a duplicate");
+    names.add(name);
+  }
+  return inspectRunStorageInternal(input, names);
 }
 
 function requireUsableInspection(inspection: RunStorageInspection): asserts inspection is RunStorageInspection & {

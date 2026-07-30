@@ -60,7 +60,17 @@ export type StoredObjectKind =
   | "TRANSITION_EVENT"
   | "REDUCER_POLICY"
   | "PROCESS_ASSESSMENT"
-  | "TRANSITION_COMMIT";
+  | "TRANSITION_COMMIT"
+  | "M3_BASELINE"
+  | "M3_BASELINE_APPROVAL"
+  | "M3_LOCK_ACQUISITION"
+  | "M3_LOCK_DIAGNOSTIC"
+  | "M3_PREFLIGHT"
+  | "M3_REPOSITORY_STATE_TOKEN"
+  | "M3_POSTFLIGHT"
+  | "M3_RETENTION_RESULT"
+  | "M3_TERMINAL_RETENTION_AUTHORITY"
+  | "M3_BASELINE_BLOB";
 
 export interface InspectedObject {
   readonly kind: StoredObjectKind;
@@ -71,6 +81,19 @@ export interface InspectedObject {
 export interface InspectionIssue {
   readonly code: string;
   readonly relativePath: string;
+  readonly detail: string;
+}
+
+export type ManagedRecordAuthorityClass =
+  | "AUTHORITATIVE_MANAGED_RECORD"
+  | "UNREFERENCED_MANAGED_RECORD"
+  | "INCOMPLETE_MANAGED_RECORD_CHAIN"
+  | "INVALID_MANAGED_RECORD"
+  | "UNCOMMITTED_BASELINE_PUBLICATION";
+
+export interface ManagedRecordClassification {
+  readonly object: InspectedObject;
+  readonly classification: ManagedRecordAuthorityClass;
   readonly detail: string;
 }
 
@@ -89,6 +112,8 @@ export interface RunStorageInspection {
   readonly transitionCommit: StateTransitionCommitDocument | null;
   readonly reachableObjects: readonly InspectedObject[];
   readonly orphanedObjects: readonly InspectedObject[];
+  readonly managedObjects: readonly InspectedObject[];
+  readonly managedRecordClassifications: readonly ManagedRecordClassification[];
   readonly temporaryFiles: readonly string[];
   readonly issues: readonly InspectionIssue[];
 }

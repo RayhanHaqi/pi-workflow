@@ -1,0 +1,324 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_retention_result_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_retention_result_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "INSPECT",
+        "CLEANUP"
+      ]
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "terminal_authority_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "terminal_workflow_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_runtime_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_approval_runtime_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "evaluated_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "logical_target_count": {
+      "minimum": 0,
+      "maximum": 100000,
+      "type": "integer"
+    },
+    "physical_target_count": {
+      "minimum": 0,
+      "maximum": 100000,
+      "type": "integer"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "ELIGIBLE",
+        "REFUSED",
+        "COMPLETE",
+        "PARTIAL",
+        "IDEMPOTENT",
+        "FAILED"
+      ]
+    },
+    "blobs": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "blob_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "byte_length": {
+            "minimum": 0,
+            "maximum": 1048576,
+            "type": "integer"
+          },
+          "relative_path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "data_class": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_SOURCE",
+              "PRIVATE_SOURCE",
+              "SENSITIVE"
+            ]
+          },
+          "retention_deadline": {
+            "minLength": 1,
+            "maxLength": 64,
+            "type": "string"
+          },
+          "logical_references": {
+            "minItems": 1,
+            "maxItems": 100000,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "baseline_runtime_content_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "baseline_approval_runtime_content_sha256": {
+                  "anyOf": [
+                    {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "terminal_authority_content_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "terminal_workflow_state_content_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "repository_identity_content_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "worktree_key": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "baseline_path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "blob_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "byte_length": {
+                  "minimum": 0,
+                  "maximum": 1048576,
+                  "type": "integer"
+                },
+                "relative_path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "data_class": {
+                  "type": "string",
+                  "enum": [
+                    "PUBLIC_SOURCE",
+                    "PRIVATE_SOURCE",
+                    "SENSITIVE"
+                  ]
+                },
+                "retention_deadline": {
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "baseline_runtime_content_sha256",
+                "baseline_approval_runtime_content_sha256",
+                "terminal_authority_content_sha256",
+                "terminal_workflow_state_content_sha256",
+                "repository_identity_content_sha256",
+                "worktree_key",
+                "baseline_path",
+                "blob_sha256",
+                "byte_length",
+                "relative_path",
+                "data_class",
+                "retention_deadline"
+              ]
+            }
+          },
+          "uncovered_references": {
+            "maxItems": 100000,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "baseline_runtime_content_sha256": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "baseline_path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "baseline_runtime_content_sha256",
+                "baseline_path"
+              ]
+            }
+          },
+          "prior_successful_result_content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ELIGIBLE",
+              "DEADLINE_PENDING",
+              "DELETED",
+              "ALREADY_REMOVED",
+              "MISSING",
+              "MISMATCH",
+              "ERROR"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "ELIGIBLE",
+              "REFUSED",
+              "SUCCEEDED",
+              "FAILED",
+              "IDEMPOTENT"
+            ]
+          },
+          "detail_code": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unlink_performed": {
+            "type": "boolean"
+          },
+          "directory_fsync_performed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "blob_sha256",
+          "byte_length",
+          "relative_path",
+          "data_class",
+          "retention_deadline",
+          "logical_references",
+          "uncovered_references",
+          "prior_successful_result_content_sha256",
+          "status",
+          "result",
+          "detail_code",
+          "unlink_performed",
+          "directory_fsync_performed"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "operation",
+    "run_id",
+    "terminal_authority_content_sha256",
+    "terminal_workflow_state_content_sha256",
+    "baseline_runtime_content_sha256",
+    "baseline_approval_runtime_content_sha256",
+    "repository_identity_content_sha256",
+    "worktree_key",
+    "evaluated_at",
+    "logical_target_count",
+    "physical_target_count",
+    "outcome",
+    "blobs"
+  ]
+}

@@ -14,6 +14,8 @@ export type {
   InitializeRunStorageInput,
   InspectedObject,
   InspectionIssue,
+  ManagedRecordAuthorityClass,
+  ManagedRecordClassification,
   ProcessInterruptionEvidence,
   RunStorageInspection,
   RunStorageInspectionStatus,

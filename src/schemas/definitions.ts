@@ -866,6 +866,462 @@ export const CommandResultSchema = StrictObject({
   output_sha256: Digest(),
 });
 
+const NullableStringSchema = Type.Union([NonEmptyString(), Type.Null()]);
+const NullablePathSchema = Type.Union([PathString(), Type.Null()]);
+const NullableSafeIntegerSchema = Type.Union([
+  Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  Type.Null(),
+]);
+const GitObjectIdSchema = Type.String({ pattern: "^[0-9a-f]{40,64}$" });
+const GitModeSchema = Type.String({ pattern: "^[0-7]{6}$" });
+const NullableGitObjectIdSchema = Type.Union([GitObjectIdSchema, Type.Null()]);
+const NullableGitModeSchema = Type.Union([GitModeSchema, Type.Null()]);
+
+export const M3WorktreeEntrySchema = StrictObject({
+  path: PathString(),
+  head: NullableGitObjectIdSchema,
+  branch: NullableStringSchema,
+  detached: Type.Boolean(),
+  locked_reason: NullableStringSchema,
+  prunable_reason: NullableStringSchema,
+});
+
+export const M3PartialCloneSchema = StrictObject({
+  promisor_remote: NullableStringSchema,
+  filters: Type.Array(NonEmptyString(4096), { maxItems: 1024, uniqueItems: true }),
+});
+
+export const M3SubmoduleEntrySchema = StrictObject({
+  path: PathString(),
+  state: StringEnum(["CLEAN", "MODIFIED", "UNINITIALIZED", "CONFLICT"] as const),
+  head: GitObjectIdSchema,
+  description: NonEmptyString(4096),
+});
+
+export const M3RepositoryIdentitySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_repository_identity_v0"),
+    requested_path: PathString(),
+    physical_requested_path: PathString(),
+    worktree_root: PathString(),
+    git_toplevel: PathString(),
+    git_common_dir: PathString(),
+    git_dir: PathString(),
+    worktree_git_dir: PathString(),
+    branch: NullableStringSchema,
+    detached: Type.Boolean(),
+    head: GitObjectIdSchema,
+    head_tree: GitObjectIdSchema,
+    upstream_ref: NullableStringSchema,
+    ahead: NullableSafeIntegerSchema,
+    behind: NullableSafeIntegerSchema,
+    worktrees: Type.Array(M3WorktreeEntrySchema, { minItems: 1, maxItems: 1024 }),
+    worktree_list_sha256: Digest(),
+    shallow: Type.Boolean(),
+    partial_clone: M3PartialCloneSchema,
+    submodules: Type.Array(M3SubmoduleEntrySchema, { maxItems: 10_000 }),
+    submodule_state_sha256: Digest(),
+    git_version: NonEmptyString(255),
+    worktree_key: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_repository_identity_v0.schema.json" },
+);
+
+export const M3StagedEntrySchema = StrictObject({
+  path: PathString(),
+  old_path: NullablePathSchema,
+  status: NonEmptyString(8),
+  head_mode: GitModeSchema,
+  index_mode: GitModeSchema,
+  worktree_mode: GitModeSchema,
+  head_object: GitObjectIdSchema,
+  index_object: GitObjectIdSchema,
+});
+
+export const M3WorktreeEntryStateSchema = StrictObject({
+  path: PathString(),
+  old_path: NullablePathSchema,
+  status: NonEmptyString(8),
+  state: StringEnum(["PRESENT", "DELETED"] as const),
+  file_type: StringEnum(["REGULAR", "DELETED"] as const),
+  mode: NullableSafeIntegerSchema,
+  size: NullableSafeIntegerSchema,
+  content_sha256: NullableDigest(),
+});
+
+export const M3UntrackedEntrySchema = StrictObject({
+  path: PathString(),
+  file_type: Type.Literal("REGULAR"),
+  mode: Type.Integer({ minimum: 0, maximum: 4095 }),
+  size: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  content_sha256: Digest(),
+});
+
+export const M3ConflictEntrySchema = StrictObject({
+  path: PathString(),
+  status: NonEmptyString(8),
+  stage1_mode: GitModeSchema,
+  stage2_mode: GitModeSchema,
+  stage3_mode: GitModeSchema,
+  worktree_mode: GitModeSchema,
+  stage1_object: GitObjectIdSchema,
+  stage2_object: GitObjectIdSchema,
+  stage3_object: GitObjectIdSchema,
+});
+
+export const M3GitStateFingerprintSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_git_state_fingerprint_v0"),
+    repository_identity_content_sha256: Digest(),
+    branch: NullableStringSchema,
+    detached: Type.Boolean(),
+    head: GitObjectIdSchema,
+    head_tree: GitObjectIdSchema,
+    upstream_ref: NullableStringSchema,
+    ahead: NullableSafeIntegerSchema,
+    behind: NullableSafeIntegerSchema,
+    porcelain_v2_sha256: Digest(),
+    index_sha256: Digest(),
+    staged_diff_sha256: Digest(),
+    unstaged_diff_sha256: Digest(),
+    untracked_inventory_sha256: Digest(),
+    staged: Type.Array(M3StagedEntrySchema, { maxItems: 100_000 }),
+    unstaged: Type.Array(M3WorktreeEntryStateSchema, { maxItems: 100_000 }),
+    untracked: Type.Array(M3UntrackedEntrySchema, { maxItems: 100_000 }),
+    conflicts: Type.Array(M3ConflictEntrySchema, { maxItems: 100_000 }),
+    submodule_state_sha256: Digest(),
+    worktree_list_sha256: Digest(),
+    active_operations: Type.Array(
+      StringEnum(["MERGE", "REBASE", "CHERRY_PICK", "REVERT", "BISECT"] as const),
+      { maxItems: 5, uniqueItems: true },
+    ),
+    index_lock: Type.Boolean(),
+    dirty: Type.Boolean(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_git_state_fingerprint_v0.schema.json" },
+);
+
+export const M3FingerprintFileEntrySchema = StrictObject({
+  path: PathString(),
+  real_path: PathString(),
+  mode: Type.Integer({ minimum: 0, maximum: 4095 }),
+  size: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  content_sha256: Digest(),
+});
+
+export const M3FileSetFingerprintSchema = StrictObject({
+  entries: Type.Array(M3FingerprintFileEntrySchema, { maxItems: 10_000 }),
+  content_sha256: Digest(),
+});
+
+export const M3BlobMetadataSchema = StrictObject({
+  blob_sha256: Digest(),
+  byte_length: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  relative_path: PathString(),
+});
+
+export const M3BaselinePathSchema = StrictObject({
+  path: PathString(),
+  ownership_class: StringEnum([
+    "OWNER_AUTHORITY",
+    "OWNER_ACCEPTED_MUTABLE",
+    "PREEXISTING_UNRELATED",
+    "GENERATED_ACCEPTED_BASELINE",
+  ] as const),
+  data_class: StringEnum([
+    "PUBLIC_SOURCE",
+    "PRIVATE_SOURCE",
+    "SENSITIVE",
+    "SECRET",
+    "LARGE_BINARY",
+    "HASH_ONLY",
+  ] as const),
+  capture_mode: StringEnum(["HASH_ONLY", "BLOB"] as const),
+  explicit_blob_approval: Type.Boolean(),
+  retention_days_after_terminal: Type.Union([Type.Integer({ minimum: 1, maximum: 30 }), Type.Null()]),
+  content_sha256: Digest(),
+  file_type: StringEnum(["REGULAR", "DELETED"] as const),
+  mode: NullableSafeIntegerSchema,
+  size: NullableSafeIntegerSchema,
+  status_sha256: Digest(),
+  blob: Type.Union([M3BlobMetadataSchema, Type.Null()]),
+});
+
+export const M3BlobQuotaSchema = StrictObject({
+  logical_approved_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  physical_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  deduplicated_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  existing_physical_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  new_unique_physical_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  resulting_physical_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+});
+
+export const M3BaselineRuntimeSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_baseline_runtime_v0"),
+    run_id: RunId(),
+    baseline_mode: StringEnum(["CLEAN_REQUIRED", "APPROVED_BASELINE_DIRTY"] as const),
+    repository: Type.Ref(M3RepositoryIdentitySchema),
+    git_fingerprint: Type.Ref(M3GitStateFingerprintSchema),
+    accepted_baseline: Type.Ref(BaselineSchema),
+    instruction_fingerprint: M3FileSetFingerprintSchema,
+    authority_fingerprint: M3FileSetFingerprintSchema,
+    paths: Type.Array(M3BaselinePathSchema, { maxItems: 100_000 }),
+    blob_quota: M3BlobQuotaSchema,
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_baseline_runtime_v0.schema.json" },
+);
+
+export const M3BaselineApprovalRuntimeSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_baseline_approval_runtime_v0"),
+    run_id: RunId(),
+    baseline_runtime_content_sha256: Digest(),
+    baseline_snapshot_sha256: Digest(),
+    baseline_snapshot_content_sha256: Digest(),
+    accepted_approval: Type.Ref(BaselineApprovalSchema),
+    approved_by: NonEmptyString(1024),
+    approved_at: NonEmptyString(64),
+    approval_scope: Type.Literal("EXACT_BASELINE"),
+    decisions: Type.Array(M3BaselinePathSchema, { maxItems: 100_000 }),
+    decisions_sha256: Digest(),
+    retention_sha256: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_baseline_approval_runtime_v0.schema.json" },
+);
+
+export const M3LockAcquisitionSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_lock_acquisition_v0"),
+    state_root: PathString(),
+    protocol_version: Type.Literal("flock-guardian-v1"),
+    worktree_key: Digest(),
+    worktree_root: PathString(),
+    git_common_dir: PathString(),
+    lock_path: PathString(),
+    owner_marker_path: PathString(),
+    guardian_python_invocation_path: PathString(),
+    guardian_python_realpath: PathString(),
+    guardian_python_version: NonEmptyString(255),
+    guardian_helper_path: PathString(),
+    guardian_helper_realpath: PathString(),
+    guardian_helper_sha256: Digest(),
+    controller_pid: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+    guardian_pid: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+    acquired_at: NonEmptyString(64),
+    acquisition_nonce: NonEmptyString(64),
+    guardian_ready_sha256: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_lock_acquisition_v0.schema.json" },
+);
+
+export const M3LockDiagnosticSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_lock_diagnostic_v0"),
+    lock_acquisition_content_sha256: Digest(),
+    state_root: PathString(),
+    protocol_version: Type.Literal("flock-guardian-v1"),
+    worktree_key: Digest(),
+    worktree_root: PathString(),
+    git_common_dir: PathString(),
+    lock_path: PathString(),
+    owner_marker_path: PathString(),
+    guardian_python_invocation_path: PathString(),
+    guardian_python_realpath: PathString(),
+    guardian_python_path: PathString(),
+    guardian_python_version: NonEmptyString(255),
+    guardian_helper_path: PathString(),
+    guardian_helper_realpath: PathString(),
+    guardian_helper_sha256: Digest(),
+    controller_pid: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+    guardian_pid: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+    acquired_at: NonEmptyString(64),
+    acquisition_nonce: NonEmptyString(64),
+    guardian_ready_sha256: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_lock_diagnostic_v0.schema.json" },
+);
+
+export const M3EnvironmentFingerprintSchema = StrictObject({
+  node_version: NonEmptyString(255),
+  git_version: NonEmptyString(255),
+  python_version: NonEmptyString(255),
+  controller_version: Type.Literal("0.1.0"),
+  node_path: PathString(),
+  git_path: PathString(),
+  python_path: PathString(),
+  guardian_helper_path: PathString(),
+  guardian_helper_sha256: Digest(),
+  content_sha256: Digest(),
+});
+
+export const M3PreflightSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_preflight_v0"),
+    preflight_kind: StringEnum(["FULL", "FAST"] as const),
+    run_id: RunId(),
+    prior_token_content_sha256: NullableDigest(),
+    repository: Type.Ref(M3RepositoryIdentitySchema),
+    worktree_key: Digest(),
+    lock_diagnostic_content_sha256: Digest(),
+    baseline_runtime_content_sha256: Digest(),
+    baseline_snapshot_sha256: Digest(),
+    baseline_approval_runtime_content_sha256: NullableDigest(),
+    git_fingerprint: Type.Ref(M3GitStateFingerprintSchema),
+    instruction_fingerprint: M3FileSetFingerprintSchema,
+    authority_fingerprint: M3FileSetFingerprintSchema,
+    environment_fingerprint: M3EnvironmentFingerprintSchema,
+    task_scope_identity: Digest(),
+    result: Type.Literal("PASS"),
+    blockers: Type.Array(NonEmptyString(255), { maxItems: 0 }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_preflight_v0.schema.json" },
+);
+
+export const M3RepositoryStateTokenSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_repository_state_token_v0"),
+    source: StringEnum(["FULL_PREFLIGHT", "POSTFLIGHT"] as const),
+    source_content_sha256: Digest(),
+    prior_token_content_sha256: NullableDigest(),
+    run_id: RunId(),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    branch: NullableStringSchema,
+    head: GitObjectIdSchema,
+    worktree_list_sha256: Digest(),
+    git_fingerprint: Type.Ref(M3GitStateFingerprintSchema),
+    instruction_fingerprint: M3FileSetFingerprintSchema,
+    authority_fingerprint: M3FileSetFingerprintSchema,
+    baseline_runtime_content_sha256: Digest(),
+    lock_diagnostic_content_sha256: Digest(),
+    task_scope_identity: Digest(),
+    workflow_owned_delta_sha256: Digest(),
+    changed_paths: Type.Array(PathString(), { maxItems: 100_000, uniqueItems: true }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_repository_state_token_v0.schema.json" },
+);
+
+export const M3DeltaEntrySchema = StrictObject({
+  path: PathString(),
+  change_kind: StringEnum(["ADDED", "MODIFIED", "DELETED", "TYPE_CHANGED", "MODE_CHANGED", "BASELINE_REVERTED"] as const),
+  before_content_sha256: NullableDigest(),
+  after_content_sha256: NullableDigest(),
+  before_type: NullableStringSchema,
+  after_type: NullableStringSchema,
+  before_mode: NullableSafeIntegerSchema,
+  after_mode: NullableSafeIntegerSchema,
+  staged_status: NullableStringSchema,
+  unstaged_status: NullableStringSchema,
+  untracked: Type.Boolean(),
+});
+
+export const M3ScopeSchema = StrictObject({
+  schema_id: Type.Literal("pi_gacw_task_scope_v0"),
+  schema_version: Type.Literal("0.1.0"),
+  scope_projection_id: Type.Literal("m3-task-scope-v1"),
+  editable_paths: Type.Array(PathString(), { maxItems: 10_000, uniqueItems: true }),
+  frozen_paths: Type.Array(PathString(), { maxItems: 10_000, uniqueItems: true }),
+  scope_identity: Digest(),
+});
+
+export const M3PostflightSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_postflight_v0"),
+    run_id: RunId(),
+    prior_token_content_sha256: Digest(),
+    baseline_runtime_content_sha256: Digest(),
+    repository: Type.Ref(M3RepositoryIdentitySchema),
+    git_fingerprint: Type.Ref(M3GitStateFingerprintSchema),
+    repository_git_delta: Type.Array(M3DeltaEntrySchema, { maxItems: 100_000 }),
+    workflow_owned_delta: Type.Array(M3DeltaEntrySchema, { maxItems: 100_000 }),
+    claimed_workflow_paths: Type.Array(PathString(), { maxItems: 100_000, uniqueItems: true }),
+    scope: M3ScopeSchema,
+    lock_diagnostic_content_sha256: Digest(),
+    result: Type.Literal("PASS"),
+    blockers: Type.Array(NonEmptyString(255), { maxItems: 0 }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_postflight_v0.schema.json" },
+);
+
+export const M3RetentionBlobAuthoritySchema = StrictObject({
+  baseline_path: PathString(),
+  blob_sha256: Digest(),
+  byte_length: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  relative_path: PathString(),
+  data_class: StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE"] as const),
+  retention_deadline: NonEmptyString(64),
+});
+
+export const M3TerminalRetentionAuthoritySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_terminal_retention_authority_v0"),
+    run_id: RunId(),
+    baseline_runtime_content_sha256: Digest(),
+    baseline_approval_runtime_content_sha256: NullableDigest(),
+    repository_identity_content_sha256: Digest(),
+    terminal_workflow_state_content_sha256: Digest(),
+    terminal_timestamp: NonEmptyString(64),
+    worktree_key: Digest(),
+    blobs: Type.Array(M3RetentionBlobAuthoritySchema, { maxItems: 100_000 }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_terminal_retention_authority_v0.schema.json" },
+);
+
+export const M3RetentionLogicalReferenceSchema = StrictObject({
+  baseline_runtime_content_sha256: Digest(),
+  baseline_approval_runtime_content_sha256: NullableDigest(),
+  terminal_authority_content_sha256: Digest(),
+  terminal_workflow_state_content_sha256: Digest(),
+  repository_identity_content_sha256: Digest(),
+  worktree_key: Digest(),
+  baseline_path: PathString(),
+  blob_sha256: Digest(),
+  byte_length: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  relative_path: PathString(),
+  data_class: StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE"] as const),
+  retention_deadline: NonEmptyString(64),
+});
+
+export const M3RetentionBlobResultSchema = StrictObject({
+  blob_sha256: Digest(),
+  byte_length: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  relative_path: PathString(),
+  data_class: StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE"] as const),
+  retention_deadline: NonEmptyString(64),
+  logical_references: Type.Array(M3RetentionLogicalReferenceSchema, { minItems: 1, maxItems: 100_000 }),
+  uncovered_references: Type.Array(StrictObject({
+    baseline_runtime_content_sha256: Digest(),
+    baseline_path: PathString(),
+  }), { maxItems: 100_000 }),
+  prior_successful_result_content_sha256: NullableDigest(),
+  status: StringEnum(["ELIGIBLE", "DEADLINE_PENDING", "DELETED", "ALREADY_REMOVED", "MISSING", "MISMATCH", "ERROR"] as const),
+  result: StringEnum(["ELIGIBLE", "REFUSED", "SUCCEEDED", "FAILED", "IDEMPOTENT"] as const),
+  detail_code: NullableStringSchema,
+  unlink_performed: Type.Boolean(),
+  directory_fsync_performed: Type.Boolean(),
+});
+
+export const M3RetentionResultSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_retention_result_v0"),
+    operation: StringEnum(["INSPECT", "CLEANUP"] as const),
+    run_id: RunId(),
+    terminal_authority_content_sha256: Digest(),
+    terminal_workflow_state_content_sha256: Digest(),
+    baseline_runtime_content_sha256: Digest(),
+    baseline_approval_runtime_content_sha256: NullableDigest(),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    evaluated_at: NonEmptyString(64),
+    logical_target_count: Type.Integer({ minimum: 0, maximum: 100_000 }),
+    physical_target_count: Type.Integer({ minimum: 0, maximum: 100_000 }),
+    outcome: StringEnum(["ELIGIBLE", "REFUSED", "COMPLETE", "PARTIAL", "IDEMPOTENT", "FAILED"] as const),
+    blobs: Type.Array(M3RetentionBlobResultSchema, { maxItems: 100_000 }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_retention_result_v0.schema.json" },
+);
+
 export const FinalReportSchema = StrictObject(
   {
     ...DocumentFields("pi_gacw_final_report_v0"),
@@ -908,6 +1364,17 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_persisted_state_pointer_v0", fileName: "pi_gacw_persisted_state_pointer_v0.schema.json", schema: PersistedStatePointerSchema },
   { schemaId: "pi_gacw_process_interruption_v0", fileName: "pi_gacw_process_interruption_v0.schema.json", schema: ProcessInterruptionSchema },
   { schemaId: "pi_gacw_state_transition_commit_v0", fileName: "pi_gacw_state_transition_commit_v0.schema.json", schema: StateTransitionCommitSchema },
+  { schemaId: "pi_gacw_repository_identity_v0", fileName: "pi_gacw_repository_identity_v0.schema.json", schema: M3RepositoryIdentitySchema },
+  { schemaId: "pi_gacw_git_state_fingerprint_v0", fileName: "pi_gacw_git_state_fingerprint_v0.schema.json", schema: M3GitStateFingerprintSchema },
+  { schemaId: "pi_gacw_baseline_runtime_v0", fileName: "pi_gacw_baseline_runtime_v0.schema.json", schema: M3BaselineRuntimeSchema },
+  { schemaId: "pi_gacw_baseline_approval_runtime_v0", fileName: "pi_gacw_baseline_approval_runtime_v0.schema.json", schema: M3BaselineApprovalRuntimeSchema },
+  { schemaId: "pi_gacw_lock_acquisition_v0", fileName: "pi_gacw_lock_acquisition_v0.schema.json", schema: M3LockAcquisitionSchema },
+  { schemaId: "pi_gacw_lock_diagnostic_v0", fileName: "pi_gacw_lock_diagnostic_v0.schema.json", schema: M3LockDiagnosticSchema },
+  { schemaId: "pi_gacw_preflight_v0", fileName: "pi_gacw_preflight_v0.schema.json", schema: M3PreflightSchema },
+  { schemaId: "pi_gacw_repository_state_token_v0", fileName: "pi_gacw_repository_state_token_v0.schema.json", schema: M3RepositoryStateTokenSchema },
+  { schemaId: "pi_gacw_postflight_v0", fileName: "pi_gacw_postflight_v0.schema.json", schema: M3PostflightSchema },
+  { schemaId: "pi_gacw_terminal_retention_authority_v0", fileName: "pi_gacw_terminal_retention_authority_v0.schema.json", schema: M3TerminalRetentionAuthoritySchema },
+  { schemaId: "pi_gacw_retention_result_v0", fileName: "pi_gacw_retention_result_v0.schema.json", schema: M3RetentionResultSchema },
 ] as const;
 
 // The package-private registry is the sole runtime and emission authority. Every
@@ -965,3 +1432,18 @@ export type PersistedStatePointerDocument = Static<typeof PersistedStatePointerS
 export type ProcessInterruptionDocument = Static<typeof ProcessInterruptionSchema>;
 export type StateTransitionCommitDocument = Static<typeof StateTransitionCommitSchema>;
 export type ProgressDelta = Static<typeof ProgressDeltaSchema>;
+export type M3RepositoryIdentityDocument = Static<typeof M3RepositoryIdentitySchema>;
+export type M3GitStateFingerprintDocument = Static<typeof M3GitStateFingerprintSchema>;
+export type M3FileSetFingerprint = Static<typeof M3FileSetFingerprintSchema>;
+export type M3BaselinePath = Static<typeof M3BaselinePathSchema>;
+export type M3BaselineRuntimeDocument = Static<typeof M3BaselineRuntimeSchema>;
+export type M3BaselineApprovalRuntimeDocument = Static<typeof M3BaselineApprovalRuntimeSchema>;
+export type M3LockAcquisitionDocument = Static<typeof M3LockAcquisitionSchema>;
+export type M3LockDiagnosticDocument = Static<typeof M3LockDiagnosticSchema>;
+export type M3EnvironmentFingerprint = Static<typeof M3EnvironmentFingerprintSchema>;
+export type M3PreflightDocument = Static<typeof M3PreflightSchema>;
+export type M3RepositoryStateTokenDocument = Static<typeof M3RepositoryStateTokenSchema>;
+export type M3DeltaEntry = Static<typeof M3DeltaEntrySchema>;
+export type M3PostflightDocument = Static<typeof M3PostflightSchema>;
+export type M3TerminalRetentionAuthorityDocument = Static<typeof M3TerminalRetentionAuthoritySchema>;
+export type M3RetentionResultDocument = Static<typeof M3RetentionResultSchema>;

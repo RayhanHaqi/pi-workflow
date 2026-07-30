@@ -1,0 +1,310 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_repository_identity_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_repository_identity_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "requested_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "physical_requested_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "worktree_root": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "git_toplevel": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "git_common_dir": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "git_dir": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "worktree_git_dir": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "branch": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 16384,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "detached": {
+      "type": "boolean"
+    },
+    "head": {
+      "pattern": "^[0-9a-f]{40,64}$",
+      "type": "string"
+    },
+    "head_tree": {
+      "pattern": "^[0-9a-f]{40,64}$",
+      "type": "string"
+    },
+    "upstream_ref": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 16384,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ahead": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "behind": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "worktrees": {
+      "minItems": 1,
+      "maxItems": 1024,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{40,64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detached": {
+            "type": "boolean"
+          },
+          "locked_reason": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prunable_reason": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "head",
+          "branch",
+          "detached",
+          "locked_reason",
+          "prunable_reason"
+        ]
+      }
+    },
+    "worktree_list_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "shallow": {
+      "type": "boolean"
+    },
+    "partial_clone": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "promisor_remote": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "maxLength": 16384,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "filters": {
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "type": "array",
+          "items": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "promisor_remote",
+        "filters"
+      ]
+    },
+    "submodules": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "CLEAN",
+              "MODIFIED",
+              "UNINITIALIZED",
+              "CONFLICT"
+            ]
+          },
+          "head": {
+            "pattern": "^[0-9a-f]{40,64}$",
+            "type": "string"
+          },
+          "description": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "state",
+          "head",
+          "description"
+        ]
+      }
+    },
+    "submodule_state_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "git_version": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "requested_path",
+    "physical_requested_path",
+    "worktree_root",
+    "git_toplevel",
+    "git_common_dir",
+    "git_dir",
+    "worktree_git_dir",
+    "branch",
+    "detached",
+    "head",
+    "head_tree",
+    "upstream_ref",
+    "ahead",
+    "behind",
+    "worktrees",
+    "worktree_list_sha256",
+    "shallow",
+    "partial_clone",
+    "submodules",
+    "submodule_state_sha256",
+    "git_version",
+    "worktree_key"
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_terminal_retention_authority_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_terminal_retention_authority_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "baseline_runtime_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_approval_runtime_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "terminal_workflow_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "terminal_timestamp": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "blobs": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "baseline_path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "blob_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "byte_length": {
+            "minimum": 0,
+            "maximum": 1048576,
+            "type": "integer"
+          },
+          "relative_path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "data_class": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_SOURCE",
+              "PRIVATE_SOURCE",
+              "SENSITIVE"
+            ]
+          },
+          "retention_deadline": {
+            "minLength": 1,
+            "maxLength": 64,
+            "type": "string"
+          }
+        },
+        "required": [
+          "baseline_path",
+          "blob_sha256",
+          "byte_length",
+          "relative_path",
+          "data_class",
+          "retention_deadline"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "baseline_runtime_content_sha256",
+    "baseline_approval_runtime_content_sha256",
+    "repository_identity_content_sha256",
+    "terminal_workflow_state_content_sha256",
+    "terminal_timestamp",
+    "worktree_key",
+    "blobs"
+  ]
+}

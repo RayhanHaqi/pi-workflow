@@ -1,0 +1,133 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_lock_acquisition_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_lock_acquisition_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "state_root": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "flock-guardian-v1",
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "worktree_root": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "git_common_dir": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "lock_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "owner_marker_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "guardian_python_invocation_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "guardian_python_realpath": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "guardian_python_version": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    },
+    "guardian_helper_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "guardian_helper_realpath": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "guardian_helper_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "controller_pid": {
+      "minimum": 1,
+      "maximum": 2147483647,
+      "type": "integer"
+    },
+    "guardian_pid": {
+      "minimum": 1,
+      "maximum": 2147483647,
+      "type": "integer"
+    },
+    "acquired_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "acquisition_nonce": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "guardian_ready_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "state_root",
+    "protocol_version",
+    "worktree_key",
+    "worktree_root",
+    "git_common_dir",
+    "lock_path",
+    "owner_marker_path",
+    "guardian_python_invocation_path",
+    "guardian_python_realpath",
+    "guardian_python_version",
+    "guardian_helper_path",
+    "guardian_helper_realpath",
+    "guardian_helper_sha256",
+    "controller_pid",
+    "guardian_pid",
+    "acquired_at",
+    "acquisition_nonce",
+    "guardian_ready_sha256"
+  ]
+}
