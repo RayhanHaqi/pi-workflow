@@ -1033,6 +1033,31 @@ export interface SemanticValidationOptions {
 }
 
 function assertPersistenceDocumentSemantics(schemaId: SchemaId, value: unknown): void {
+  if (schemaId === "pi_gacw_mutation_receipt_v0") {
+    const receipt = recordOf(value); const outcome = receipt["helper_outcome"]; const failure = receipt["failure_code"];
+    const successor = receipt["successor_state_token_content_sha256"]; const postflight = receipt["postflight_content_sha256"];
+    if (outcome === "APPLIED") {
+      if (failure !== null || successor === null || postflight === null || receipt["atomic_rename"] !== true || receipt["directory_fsync"] !== true || receipt["rollback_outcome"] === "UNKNOWN") {
+        throw new ContractValidationError("MUTATION_RECEIPT_INCONSISTENT", "Applied mutation receipt lacks complete successful authority");
+      }
+    } else if (typeof failure !== "string" || successor !== null || postflight !== null) {
+      throw new ContractValidationError("MUTATION_RECEIPT_INCONSISTENT", "Blocked mutation receipt lacks exact failure authority");
+    }
+    if (outcome === "BLOCKED" && (receipt["file_fsync"] !== false || receipt["atomic_rename"] !== false || receipt["directory_fsync"] !== false || receipt["rollback_outcome"] !== "NOT_REQUIRED")) {
+      throw new ContractValidationError("MUTATION_RECEIPT_INCONSISTENT", "Pre-write blocked receipt claims mutation progress");
+    }
+    if (outcome === "UNCERTAIN" && receipt["rollback_outcome"] !== "UNKNOWN") {
+      throw new ContractValidationError("MUTATION_RECEIPT_INCONSISTENT", "Uncertain mutation receipt must retain unknown rollback state");
+    }
+    return;
+  }
+  if (schemaId === "pi_gacw_command_result_v0") {
+    const result = recordOf(value); const passed = result["outcome"] === "PASS";
+    if (passed !== (result["failure_code"] === null) || (passed && (result["state_token_after"] === null || result["postflight_content_sha256"] === null))) {
+      throw new ContractValidationError("COMMAND_RESULT_INCONSISTENT", "Command result outcome, failure, and postflight authority differ");
+    }
+    return;
+  }
   if (schemaId === "pi_gacw_evidence_manifest_v0") {
     const manifest = value as EvidenceManifestDocument;
     assertUniqueBy(manifest.entries, (entry) => entry.evidence_sha256, "DUPLICATE_EVIDENCE_IDENTITY");

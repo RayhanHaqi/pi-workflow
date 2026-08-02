@@ -1,0 +1,131 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_tool_result_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_tool_result_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "request_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "result_kind": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "LIST",
+        "SEARCH",
+        "INSPECT_GIT",
+        "READ_EVIDENCE"
+      ]
+    },
+    "state_token_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "path": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "data_class": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "PUBLIC_SOURCE",
+            "PRIVATE_SOURCE",
+            "SENSITIVE",
+            "SECRET",
+            "LARGE_BINARY",
+            "HASH_ONLY"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "content_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "byte_count": {
+      "minimum": 0,
+      "maximum": 67108864,
+      "type": "integer"
+    },
+    "item_count": {
+      "minimum": 0,
+      "maximum": 100000,
+      "type": "integer"
+    },
+    "output_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "RAW",
+        "METADATA_ONLY",
+        "PASS"
+      ]
+    },
+    "completed_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "request_content_sha256",
+    "result_kind",
+    "state_token_content_sha256",
+    "path",
+    "data_class",
+    "content_digest",
+    "byte_count",
+    "item_count",
+    "output_digest",
+    "outcome",
+    "completed_at"
+  ]
+}

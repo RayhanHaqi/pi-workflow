@@ -75,7 +75,8 @@ export async function createCleanAdmission(
 ) {
   const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
   const lock = await acquireWorktreeLock({ stateRoot: fixture.stateRoot, repository });
-  const selected = await instructionAuthorityInputs(fixture);
+  try {
+    const selected = await instructionAuthorityInputs(fixture);
   const baseline = (await captureBaseline({
     stateRoot: fixture.stateRoot,
     runId: fixture.runId,
@@ -111,6 +112,10 @@ export async function createCleanAdmission(
     lock,
   });
   return { repository, lock, selected, baseline, editable, frozen, taskScopeIdentity, environment, full };
+  } catch (error: unknown) {
+    await releaseWorktreeLock(lock).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function releaseAdmission(admission: { readonly lock: WorktreeLockHandle }): Promise<void> {

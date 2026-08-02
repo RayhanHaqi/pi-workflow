@@ -22,6 +22,15 @@ import {
   type M3RepositoryStateTokenDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
+  type M4CommandCatalogDocument,
+  type M4CommandResultDocument,
+  type M4MutationReceiptDocument,
+  type M4PatchRequestDocument,
+  type M4SandboxCapabilityDocument,
+  type M4ScopedToolPolicyDocument,
+  type M4SecureFilesystemCapabilityDocument,
+  type M4ToolRequestDocument,
+  type M4ToolResultDocument,
   type PersistedStatePointerDocument,
   type ProcessInterruptionDocument,
   type ProcessMetadata,
@@ -33,6 +42,7 @@ import {
 } from "../schemas/index.js";
 import { createInitialState, reduceState } from "../state-machine/index.js";
 import { classifyManagedAuthority } from "./managed-authority.js";
+import { classifyM4Authority } from "./m4-authority.js";
 import {
   assertPrivateDirectory,
   assertRegularPrivateFile,
@@ -87,6 +97,15 @@ interface RunLayout {
   readonly repositoryStateTokenDirectory: string;
   readonly postflightRecordDirectory: string;
   readonly retentionRecordDirectory: string;
+  readonly secureFilesystemCapabilityDirectory: string;
+  readonly sandboxCapabilityDirectory: string;
+  readonly toolPolicyDirectory: string;
+  readonly commandCatalogDirectory: string;
+  readonly toolRequestDirectory: string;
+  readonly patchRequestDirectory: string;
+  readonly toolResultDirectory: string;
+  readonly mutationReceiptDirectory: string;
+  readonly commandResultDirectory: string;
   readonly commitsDirectory: string;
 }
 
@@ -111,6 +130,15 @@ interface JsonKindDefinition {
     | "repositoryStateTokenDirectory"
     | "postflightRecordDirectory"
     | "retentionRecordDirectory"
+    | "secureFilesystemCapabilityDirectory"
+    | "sandboxCapabilityDirectory"
+    | "toolPolicyDirectory"
+    | "commandCatalogDirectory"
+    | "toolRequestDirectory"
+    | "patchRequestDirectory"
+    | "toolResultDirectory"
+    | "mutationReceiptDirectory"
+    | "commandResultDirectory"
     | "commitsDirectory"
   >;
 }
@@ -131,6 +159,15 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M3_REPOSITORY_STATE_TOKEN", schemaId: "pi_gacw_repository_state_token_v0", directory: "repositoryStateTokenDirectory" },
   { kind: "M3_POSTFLIGHT", schemaId: "pi_gacw_postflight_v0", directory: "postflightRecordDirectory" },
   { kind: "M3_RETENTION_RESULT", schemaId: "pi_gacw_retention_result_v0", directory: "retentionRecordDirectory" },
+  { kind: "M4_SECURE_FS_CAPABILITY", schemaId: "pi_gacw_secure_fs_capability_v0", directory: "secureFilesystemCapabilityDirectory" },
+  { kind: "M4_SANDBOX_CAPABILITY", schemaId: "pi_gacw_sandbox_capability_v0", directory: "sandboxCapabilityDirectory" },
+  { kind: "M4_TOOL_POLICY", schemaId: "pi_gacw_scoped_tool_policy_v0", directory: "toolPolicyDirectory" },
+  { kind: "M4_COMMAND_CATALOG", schemaId: "pi_gacw_command_catalog_v0", directory: "commandCatalogDirectory" },
+  { kind: "M4_TOOL_REQUEST", schemaId: "pi_gacw_tool_request_v0", directory: "toolRequestDirectory" },
+  { kind: "M4_PATCH_REQUEST", schemaId: "pi_gacw_patch_request_v0", directory: "patchRequestDirectory" },
+  { kind: "M4_TOOL_RESULT", schemaId: "pi_gacw_tool_result_v0", directory: "toolResultDirectory" },
+  { kind: "M4_MUTATION_RECEIPT", schemaId: "pi_gacw_mutation_receipt_v0", directory: "mutationReceiptDirectory" },
+  { kind: "M4_COMMAND_RESULT", schemaId: "pi_gacw_command_result_v0", directory: "commandResultDirectory" },
 ]);
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
@@ -272,6 +309,15 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     repositoryStateTokenDirectory: join(recordsDirectory, "repository-state-tokens"),
     postflightRecordDirectory: join(recordsDirectory, "postflights"),
     retentionRecordDirectory: join(recordsDirectory, "retention"),
+    secureFilesystemCapabilityDirectory: join(recordsDirectory, "secure-fs-capabilities"),
+    sandboxCapabilityDirectory: join(recordsDirectory, "sandbox-capabilities"),
+    toolPolicyDirectory: join(recordsDirectory, "tool-policies"),
+    commandCatalogDirectory: join(recordsDirectory, "command-catalogs"),
+    toolRequestDirectory: join(recordsDirectory, "tool-requests"),
+    patchRequestDirectory: join(recordsDirectory, "patch-requests"),
+    toolResultDirectory: join(recordsDirectory, "tool-results"),
+    mutationReceiptDirectory: join(recordsDirectory, "mutation-receipts"),
+    commandResultDirectory: join(recordsDirectory, "command-results"),
     commitsDirectory: join(runDirectory, "commits"),
   };
 }
@@ -349,6 +395,15 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.repositoryStateTokenDirectory);
   await ensurePrivateDirectory(layout.postflightRecordDirectory);
   await ensurePrivateDirectory(layout.retentionRecordDirectory);
+  await ensurePrivateDirectory(layout.secureFilesystemCapabilityDirectory);
+  await ensurePrivateDirectory(layout.sandboxCapabilityDirectory);
+  await ensurePrivateDirectory(layout.toolPolicyDirectory);
+  await ensurePrivateDirectory(layout.commandCatalogDirectory);
+  await ensurePrivateDirectory(layout.toolRequestDirectory);
+  await ensurePrivateDirectory(layout.patchRequestDirectory);
+  await ensurePrivateDirectory(layout.toolResultDirectory);
+  await ensurePrivateDirectory(layout.mutationReceiptDirectory);
+  await ensurePrivateDirectory(layout.commandResultDirectory);
   await ensurePrivateDirectory(layout.commitsDirectory);
 }
 
@@ -377,6 +432,15 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
     layout.repositoryStateTokenDirectory,
     layout.postflightRecordDirectory,
     layout.retentionRecordDirectory,
+    layout.secureFilesystemCapabilityDirectory,
+    layout.sandboxCapabilityDirectory,
+    layout.toolPolicyDirectory,
+    layout.commandCatalogDirectory,
+    layout.toolRequestDirectory,
+    layout.patchRequestDirectory,
+    layout.toolResultDirectory,
+    layout.mutationReceiptDirectory,
+    layout.commandResultDirectory,
     layout.commitsDirectory,
   ]) {
     await assertPrivateDirectory(directory);
@@ -953,6 +1017,15 @@ async function scanLayout(
     "reducer-policies",
     "repository-state-tokens",
     "retention",
+    "secure-fs-capabilities",
+    "sandbox-capabilities",
+    "tool-policies",
+    "command-catalogs",
+    "tool-requests",
+    "patch-requests",
+    "tool-results",
+    "mutation-receipts",
+    "command-results",
     "transition-events",
     "workflow-states",
   ].sort();
@@ -1015,6 +1088,13 @@ const M3_MANAGED_KINDS = new Set<StoredObjectKind>([
   "M3_BASELINE_BLOB",
 ]);
 
+const M4_MANAGED_KINDS = new Set<StoredObjectKind>([
+  "M4_SECURE_FS_CAPABILITY", "M4_SANDBOX_CAPABILITY", "M4_TOOL_POLICY", "M4_COMMAND_CATALOG",
+  "M4_TOOL_REQUEST", "M4_PATCH_REQUEST", "M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT",
+]);
+
+const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS]);
+
 async function terminalAuthorityManagedObjects(
   layout: RunLayout,
   scanned: readonly InspectedObject[],
@@ -1052,6 +1132,15 @@ async function classifyManagedRecords(
   const terminalAuthorities = new Map<string, M3TerminalRetentionAuthorityDocument | Error>();
   const blobDigests = new Set<string>();
   const blobSizes = new Map<string, number>();
+  const secureCapabilities = new Map<string, M4SecureFilesystemCapabilityDocument>();
+  const sandboxCapabilities = new Map<string, M4SandboxCapabilityDocument>();
+  const policies = new Map<string, M4ScopedToolPolicyDocument>();
+  const catalogs = new Map<string, M4CommandCatalogDocument>();
+  const toolRequests = new Map<string, M4ToolRequestDocument>();
+  const patchRequests = new Map<string, M4PatchRequestDocument>();
+  const toolResults = new Map<string, M4ToolResultDocument>();
+  const mutationReceipts = new Map<string, M4MutationReceiptDocument>();
+  const commandResults = new Map<string, M4CommandResultDocument>();
   for (const object of objects) {
     if (object.kind === "M3_BASELINE") baselines.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_BASELINE_APPROVAL") approvals.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
@@ -1065,6 +1154,15 @@ async function classifyManagedRecords(
       blobDigests.add(object.contentSha256);
       blobSizes.set(object.contentSha256, (await lstat(join(layout.baselineBlobDirectory, digestHex(object.contentSha256)))).size);
     }
+    else if (object.kind === "M4_SECURE_FS_CAPABILITY") secureCapabilities.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_SANDBOX_CAPABILITY") sandboxCapabilities.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_TOOL_POLICY") policies.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_COMMAND_CATALOG") catalogs.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_TOOL_REQUEST") toolRequests.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_PATCH_REQUEST") patchRequests.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_TOOL_RESULT") toolResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_MUTATION_RECEIPT") mutationReceipts.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_COMMAND_RESULT") commandResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
       try {
         const bytes = await readRawEvidence(layout, object.contentSha256);
@@ -1078,11 +1176,12 @@ async function classifyManagedRecords(
       }
     }
   }
-  return classifyManagedAuthority({
+  const m3Objects = objects.filter((object) => M3_MANAGED_KINDS.has(object.kind));
+  const m3 = await classifyManagedAuthority({
     stateRoot: layout.stateRoot,
     runId: basename(layout.runDirectory),
     workflowState: graph.currentState,
-    objects,
+    objects: m3Objects,
     baselines,
     approvals,
     lockAcquisitions,
@@ -1095,6 +1194,11 @@ async function classifyManagedRecords(
     blobDigests,
     blobSizes,
   });
+  const m4 = await classifyM4Authority({
+    runId: basename(layout.runDirectory), objects, m3Classifications: m3, baselines, locks: lockAcquisitions, tokens, postflights,
+    secureCapabilities, sandboxCapabilities, policies, catalogs, toolRequests, patchRequests, toolResults, mutationReceipts, commandResults,
+  });
+  return [...m3, ...m4].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
 }
 
 function blockedInspection(
@@ -1162,7 +1266,7 @@ async function inspectRunStorageInternal(
   }
 
   const managedObjects = [
-    ...scanned.objects.filter((object) => M3_MANAGED_KINDS.has(object.kind)),
+    ...scanned.objects.filter((object) => ALL_MANAGED_KINDS.has(object.kind)),
     ...await terminalAuthorityManagedObjects(layout, scanned.objects, graph),
   ].sort((left, right) => compareText(left.relativePath, right.relativePath) || compareText(left.kind, right.kind));
   const managedRecordClassifications = await classifyManagedRecords(layout, managedObjects, graph);
@@ -1170,7 +1274,7 @@ async function inspectRunStorageInternal(
     entry.object.kind === "M3_BASELINE_BLOB" && entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION",
   ).map((entry) => entry.object);
   const orphanedObjects = [
-    ...scanned.objects.filter((object) => !M3_MANAGED_KINDS.has(object.kind) && !graph.reachable.has(object.relativePath)),
+    ...scanned.objects.filter((object) => !ALL_MANAGED_KINDS.has(object.kind) && !graph.reachable.has(object.relativePath)),
     ...uncommittedBaselineBlobs,
   ].sort((left, right) => compareText(left.relativePath, right.relativePath));
   const issues = [

@@ -125,6 +125,15 @@ test("safe schema inventory contains every required versioned M1, M2, and M3 con
     "pi_gacw_postflight_v0",
     "pi_gacw_terminal_retention_authority_v0",
     "pi_gacw_retention_result_v0",
+    "pi_gacw_secure_fs_capability_v0",
+    "pi_gacw_sandbox_capability_v0",
+    "pi_gacw_scoped_tool_policy_v0",
+    "pi_gacw_command_catalog_v0",
+    "pi_gacw_tool_request_v0",
+    "pi_gacw_patch_request_v0",
+    "pi_gacw_mutation_receipt_v0",
+    "pi_gacw_tool_result_v0",
+    "pi_gacw_command_result_v0",
   ];
   assert.deepEqual(SCHEMA_IDS, required);
   const snapshots = listSchemaSnapshots();

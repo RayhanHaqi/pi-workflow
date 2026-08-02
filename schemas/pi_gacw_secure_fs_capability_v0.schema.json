@@ -1,0 +1,191 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_secure_fs_capability_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_secure_fs_capability_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "capability_protocol": {
+      "const": "secure-fs-capability-v1",
+      "type": "string"
+    },
+    "probed_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "probe_evidence_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "helper_protocol_version": {
+      "const": "pi-gacw-secure-fs-v1",
+      "type": "string"
+    },
+    "helper_invocation_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "helper_realpath": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "helper_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "python_invocation_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "python_realpath": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "python_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "python_version": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    },
+    "kernel_release": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    },
+    "architecture": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    },
+    "libc_identity": {
+      "minLength": 1,
+      "maxLength": 1024,
+      "type": "string"
+    },
+    "openat2_available": {
+      "type": "boolean"
+    },
+    "supported_resolve_flags": {
+      "uniqueItems": true,
+      "maxItems": 3,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "RESOLVE_BENEATH",
+          "RESOLVE_NO_SYMLINKS",
+          "RESOLVE_NO_MAGICLINKS"
+        ]
+      }
+    },
+    "renameat2_available": {
+      "type": "boolean"
+    },
+    "rename_noreplace_available": {
+      "type": "boolean"
+    },
+    "rename_exchange_available": {
+      "type": "boolean"
+    },
+    "directory_fsync_available": {
+      "type": "boolean"
+    },
+    "landlock_available": {
+      "type": "boolean"
+    },
+    "landlock_abi": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "maximum": 255,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "no_new_privs_available": {
+      "type": "boolean"
+    },
+    "network_denial_available": {
+      "type": "boolean"
+    },
+    "secure_fs_result": {
+      "type": "string",
+      "enum": [
+        "SECURE_FS_AVAILABLE",
+        "SECURE_FS_UNAVAILABLE"
+      ]
+    },
+    "command_sandbox_result": {
+      "type": "string",
+      "enum": [
+        "COMMAND_SANDBOX_AVAILABLE",
+        "COMMAND_SANDBOX_UNAVAILABLE"
+      ]
+    },
+    "network_sandbox_result": {
+      "type": "string",
+      "enum": [
+        "NETWORK_SANDBOX_AVAILABLE",
+        "NETWORK_SANDBOX_UNAVAILABLE"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "capability_protocol",
+    "probed_at",
+    "probe_evidence_sha256",
+    "helper_protocol_version",
+    "helper_invocation_path",
+    "helper_realpath",
+    "helper_sha256",
+    "python_invocation_path",
+    "python_realpath",
+    "python_sha256",
+    "python_version",
+    "kernel_release",
+    "architecture",
+    "libc_identity",
+    "openat2_available",
+    "supported_resolve_flags",
+    "renameat2_available",
+    "rename_noreplace_available",
+    "rename_exchange_available",
+    "directory_fsync_available",
+    "landlock_available",
+    "landlock_abi",
+    "no_new_privs_available",
+    "network_denial_available",
+    "secure_fs_result",
+    "command_sandbox_result",
+    "network_sandbox_result"
+  ]
+}

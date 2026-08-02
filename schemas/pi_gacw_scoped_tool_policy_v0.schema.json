@@ -1,0 +1,338 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_scoped_tool_policy_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_scoped_tool_policy_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "policy_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "task_scope_identity": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "readable_paths": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "EXACT",
+              "PREFIX"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ]
+      }
+    },
+    "editable_paths": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "EXACT",
+              "PREFIX"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ]
+      }
+    },
+    "frozen_paths": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "EXACT",
+              "PREFIX"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ]
+      }
+    },
+    "command_readable_paths": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "EXACT",
+              "PREFIX"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ]
+      }
+    },
+    "command_writable_paths": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "EXACT",
+              "PREFIX"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ]
+      }
+    },
+    "path_authorities": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "EXACT",
+              "PREFIX"
+            ]
+          },
+          "ownership_class": {
+            "type": "string",
+            "enum": [
+              "OWNER_AUTHORITY",
+              "OWNER_ACCEPTED_MUTABLE",
+              "PREEXISTING_UNRELATED",
+              "GENERATED_ACCEPTED_BASELINE"
+            ]
+          },
+          "data_class": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_SOURCE",
+              "PRIVATE_SOURCE",
+              "SENSITIVE",
+              "SECRET",
+              "LARGE_BINARY",
+              "HASH_ONLY"
+            ]
+          },
+          "raw_read_approved": {
+            "type": "boolean"
+          },
+          "create": {
+            "type": "boolean"
+          },
+          "replace": {
+            "type": "boolean"
+          },
+          "delete": {
+            "type": "boolean"
+          },
+          "mode_change": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "ownership_class",
+          "data_class",
+          "raw_read_approved",
+          "create",
+          "replace",
+          "delete",
+          "mode_change"
+        ]
+      }
+    },
+    "evidence_readable_kinds": {
+      "uniqueItems": true,
+      "maxItems": 128,
+      "type": "array",
+      "items": {
+        "minLength": 1,
+        "maxLength": 128,
+        "type": "string"
+      }
+    },
+    "limits": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "maximum_patch_bytes": {
+          "minimum": 0,
+          "maximum": 1048576,
+          "type": "integer"
+        },
+        "maximum_read_bytes": {
+          "minimum": 0,
+          "maximum": 1048576,
+          "type": "integer"
+        },
+        "maximum_hash_bytes": {
+          "minimum": 0,
+          "maximum": 67108864,
+          "type": "integer"
+        },
+        "maximum_search_input_bytes": {
+          "minimum": 0,
+          "maximum": 67108864,
+          "type": "integer"
+        },
+        "maximum_search_matches": {
+          "minimum": 0,
+          "maximum": 10000,
+          "type": "integer"
+        },
+        "maximum_list_entries": {
+          "minimum": 0,
+          "maximum": 100000,
+          "type": "integer"
+        },
+        "maximum_list_metadata_bytes": {
+          "minimum": 0,
+          "maximum": 67108864,
+          "type": "integer"
+        },
+        "maximum_command_stdout_bytes": {
+          "minimum": 0,
+          "maximum": 4194304,
+          "type": "integer"
+        },
+        "maximum_command_stderr_bytes": {
+          "minimum": 0,
+          "maximum": 4194304,
+          "type": "integer"
+        },
+        "maximum_command_duration_ms": {
+          "minimum": 1,
+          "maximum": 1800000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_patch_bytes",
+        "maximum_read_bytes",
+        "maximum_hash_bytes",
+        "maximum_search_input_bytes",
+        "maximum_search_matches",
+        "maximum_list_entries",
+        "maximum_list_metadata_bytes",
+        "maximum_command_stdout_bytes",
+        "maximum_command_stderr_bytes",
+        "maximum_command_duration_ms"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "policy_id",
+    "repository_identity_content_sha256",
+    "worktree_key",
+    "task_scope_identity",
+    "readable_paths",
+    "editable_paths",
+    "frozen_paths",
+    "command_readable_paths",
+    "command_writable_paths",
+    "path_authorities",
+    "evidence_readable_kinds",
+    "limits"
+  ]
+}

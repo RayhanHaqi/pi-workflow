@@ -1,6 +1,6 @@
 # pi-bounded-coding-workflow
 
-Deterministic **V0 M1–M3** foundations for a general-purpose bounded agentic-coding workflow for Pi.
+Deterministic **V0 M1–M4** foundations for a general-purpose bounded agentic-coding workflow for Pi.
 
 The package contains:
 
@@ -8,11 +8,12 @@ The package contains:
 - SHA-256 content and domain identities;
 - a versioned projection registry and transitive plan-approval binding;
 - strict versioned JSON Schemas with aligned TypeScript types and semantic validators;
-- one pure reducer for `DIRECT_LUNA_HIGH`, `SINGLE_OWNER_SOL`, and `ROUTED_DAG`; and
-- an M2 state store with immutable evidence, reducer-derived transition commits, a `state.json` commit pointer, reachability inspection, and bounded process-crash terminalization; and
-- an M3 repository guard with deterministic Git/worktree identity, exact clean or approved-dirty baselines, bounded baseline blobs and retention, a Linux `flock` guardian, and full/fast preflight plus postflight ownership accounting.
+- one pure reducer for `DIRECT_LUNA_HIGH`, `SINGLE_OWNER_SOL`, and `ROUTED_DAG`;
+- an M2 state store with immutable evidence, reducer-derived transition commits, a `state.json` commit pointer, reachability inspection, and bounded process-crash terminalization;
+- an M3 repository guard with deterministic Git/worktree identity, exact clean or approved-dirty baselines, bounded baseline blobs and retention, a Linux `flock` guardian, and full/fast preflight plus postflight ownership accounting; and
+- an M4 descriptor-relative secure filesystem and scoped tool gateway with exact-byte mutation, frozen structured commands, Landlock filesystem confinement, `no_new_privs`, seccomp network denial, and immutable operation evidence.
 
-It does **not** register a Pi extension or implement a CLI, event journal, resume/recovery, secure target-repository mutation, command gateway, worker sessions, routing runtime, or budget runtime.
+It does **not** register a Pi extension or implement a CLI, event journal, resume/recovery, worker sessions, routing runtime, budget runtime, or any M5+ controller capability.
 
 ## Package foundation
 
@@ -26,7 +27,7 @@ npm test
 npm run build
 ```
 
-Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration remains outside M1–M2.
+Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration remains outside M1–M4.
 
 ## Canonical JSON
 
@@ -94,7 +95,7 @@ The private registry in `src/identity/projections.ts` contains:
 
 Canonical runtime schemas are held in a package-private, deeply frozen registry. Ajv compiles exact serialized clones of that authority, so neither compilation nor public inspection can change it. The supported `./schemas` entrypoint exposes the frozen primitive `SCHEMA_VERSION`, the frozen schema-ID list `SCHEMA_IDS`, and `getSchemaSnapshot(schemaId)` / `listSchemaSnapshots()` for runtime inspection. Each schema snapshot is a fresh, detached, deeply frozen, serializable copy; snapshots inspect but never configure validation. Direct TypeBox objects, shared enum arrays, and the backing registry are not public runtime exports. Document and policy types remain available as compile-time-only TypeScript exports.
 
-The 17 required core schemas are present, plus the pure-reducer policy and five additive M2 persistence schemas. Ajv enforces structural constraints. Deterministic semantic validators enforce cross-field rules such as canonical scope separation, route-role completeness and effort, verification-only closeout, owner-acceptance placement, graph consistency and caps, unambiguous write ownership, mode/state isolation, counter consistency, frozen identities, and null-only unavailable usage.
+The 17 required core schemas are present, plus the pure-reducer policy, five additive M2 persistence schemas, twelve M3 repository schemas, and nine M4 secure-tool schemas (43 emitted schemas total). Ajv enforces structural constraints. Deterministic semantic validators enforce cross-field rules such as canonical scope separation, route-role completeness and effort, verification-only closeout, owner-acceptance placement, graph consistency and caps, unambiguous write ownership, mode/state isolation, counter consistency, frozen identities, and null-only unavailable usage.
 
 Scope and write-ownership paths use a rejecting repository-relative grammar: no absolute or drive-rooted paths, backslashes, NUL, empty segments, `.`/`..` segments, root aliases, or trailing slash. Paths are already canonical when accepted; no glob interpretation or silent path normalization occurs.
 
@@ -135,6 +136,15 @@ A run uses this fixed private layout beneath a caller-supplied absolute state ro
   records/repository-state-tokens/<content-sha256>.json
   records/postflights/<content-sha256>.json
   records/retention/<content-sha256>.json
+  records/secure-fs-capabilities/<content-sha256>.json
+  records/sandbox-capabilities/<content-sha256>.json
+  records/tool-policies/<content-sha256>.json
+  records/command-catalogs/<content-sha256>.json
+  records/tool-requests/<content-sha256>.json
+  records/patch-requests/<content-sha256>.json
+  records/tool-results/<content-sha256>.json
+  records/mutation-receipts/<content-sha256>.json
+  records/command-results/<content-sha256>.json
   baseline-blobs/sha256/<raw-byte-sha256>
   commits/<content-sha256>.json
 ```
@@ -165,6 +175,16 @@ Retention requires exact durable baseline/approval records and terminal-timestam
 
 For cooperating controllers, M3 guarantees one active lock owner per worktree key and detects guardian loss. A process that ignores advisory locking can still write; unexplained file, index, ref, instruction, authority, worktree-list, or lock drift is detected at guard boundaries. Until M4, model-controlled path containment, `openat2` repository writes, preimage-checked mutation, and a repository write API are explicitly not guaranteed.
 
+## Secure filesystem and scoped tool gateway
+
+The supported `./secure-fs` entrypoint exports only `SecureFilesystemError`, `probeSecureFilesystemCapabilities`, and `createSecureFilesystem`. Reads and listings use the packaged Python guardian through a verified helper identity. Every path is rejecting canonical repository-relative form; `.git`, symlinks, magic links, special files, root changes, and scope escapes fail closed. The helper opens the exact M3 physical worktree root and resolves descendants with Linux `openat2(2)` using `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`.
+
+Mutation is available only through the supported `./scoped-tools` gateway. `CREATE` uses same-directory temporary-file publication with `RENAME_NOREPLACE`; `REPLACE` uses `RENAME_EXCHANGE` and validates the displaced inode before unlink; `DELETE` uses a no-replace tombstone. Each protocol checks exact digest/size/mode preimages, rejects multiply linked targets, fsyncs file and directory boundaries, verifies parent and installed-inode identity, runs M3 fast preflight immediately before the helper, and advances authority only through M3 postflight. M4 publishes capability, policy, request, result, receipt, and command records as private content-addressed objects and never writes `state.json`.
+
+The gateway exposes only `read_scoped`, `search_scoped`, `list_scoped`, `inspect_git_scoped`, `read_evidence`, `apply_patch_scoped`, `run_inspection_command`, `run_task_command`, and `run_verification_command`. Read policy supports raw, metadata-only, and forbidden data classes. Search is literal and bounded. Git inspection has a fixed catalog and hides paths outside readable scope. The caller supplies only a frozen command ID and current M3 token—never an executable, shell, argument vector, environment, cwd, or sandbox rule.
+
+Commands revalidate catalog, executable, and helper identities at execution. The packaged sandbox applies Landlock before `execve`, sets `no_new_privs`, denies network and dangerous metadata/namespace syscalls with seccomp, supplies a minimal environment, enforces timeout and stdout/stderr bounds, kills the complete process group, and runs M3 postflight over exact declared effects. Missing secure-write, filesystem-sandbox, or network-denial primitives are distinct blocking outcomes; no weaker fallback exists.
+
 ## Authority and milestone boundary
 
-The frozen architecture documents are byte-for-byte copies in `docs/architecture/`. M1 reducer, schema, and identity projections remain frozen dependencies. M2 commit-graph semantics remain unchanged: M3 records/blobs are validated immutable managed objects, `state.json` is still the sole mutable commit pointer, and no managed object is silently adopted into the graph. Read-only inspection uses the same semantic baseline, approval, source/token, terminal-authority, and retention-proof validators as operational consumers. It classifies managed objects as authoritative, unreferenced, incomplete-chain, invalid, or uncommitted-baseline publication without creating a second mutable pointer. `HEALTHY` describes intact foundational M2 layout and bytes; a semantic-invalid managed object is still reported by an `INVALID_MANAGED_RECORD` issue and classification, is never authoritative, and is rejected by any operational authority path. M4 secure mutation and all later capabilities are not implemented.
+The frozen architecture documents are byte-for-byte copies in `docs/architecture/`. M1 reducer, schema, and identity projections remain frozen dependencies. M2 commit-graph semantics remain unchanged: M3 records/blobs are validated immutable managed objects, `state.json` is still the sole mutable commit pointer, and no managed object is silently adopted into the graph. Read-only inspection uses the same semantic baseline, approval, source/token, terminal-authority, and retention-proof validators as operational consumers. It classifies managed objects as authoritative, unreferenced, incomplete-chain, invalid, or uncommitted-baseline publication without creating a second mutable pointer. `HEALTHY` describes intact foundational M2 layout and bytes; a semantic-invalid managed object is still reported by an `INVALID_MANAGED_RECORD` issue and classification, is never authoritative, and is rejected by any operational authority path. M4 records remain managed immutable evidence rather than a second mutable controller pointer; a future controller may reference them in a transition. M5 usage budgets, routing, progress/failure orchestration, Pi worker integration, CLI/extension behavior, resume, and all later capabilities remain unimplemented.

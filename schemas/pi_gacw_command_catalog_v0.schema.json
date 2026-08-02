@@ -1,0 +1,364 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_command_catalog_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_command_catalog_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "catalog_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "tool_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "commands": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "command_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "command_spec_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "command_class": {
+            "type": "string",
+            "enum": [
+              "INSPECTION",
+              "TASK",
+              "VERIFICATION"
+            ]
+          },
+          "executable_invocation_path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "executable_realpath": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "executable_device": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "executable_inode": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "executable_mode": {
+            "minimum": 0,
+            "maximum": 4095,
+            "type": "integer"
+          },
+          "executable_size": {
+            "minimum": 0,
+            "maximum": 67108864,
+            "type": "integer"
+          },
+          "executable_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "argv": {
+            "minItems": 1,
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "anyOf": [
+              {
+                "const": "REPOSITORY_ROOT",
+                "type": "string"
+              },
+              {
+                "minLength": 1,
+                "maxLength": 4096,
+                "type": "string"
+              }
+            ]
+          },
+          "cwd_realpath": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "cwd_device": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "cwd_inode": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "execution_inputs": {
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "realpath": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "device": {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "inode": {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "mode": {
+                  "minimum": 0,
+                  "maximum": 4095,
+                  "type": "integer"
+                },
+                "size": {
+                  "minimum": 0,
+                  "maximum": 67108864,
+                  "type": "integer"
+                },
+                "digest": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "realpath",
+                "device",
+                "inode",
+                "mode",
+                "size",
+                "digest"
+              ]
+            }
+          },
+          "environment": {
+            "uniqueItems": true,
+            "maxItems": 256,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "key": {
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                "value": {
+                  "maxLength": 16384,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "value"
+              ]
+            }
+          },
+          "read_paths": {
+            "maxItems": 10000,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "EXACT",
+                    "PREFIX"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "kind"
+              ]
+            }
+          },
+          "write_paths": {
+            "maxItems": 10000,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "EXACT",
+                    "PREFIX"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "kind"
+              ]
+            }
+          },
+          "network_policy": {
+            "const": "FORBIDDEN",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "minimum": 1,
+            "maximum": 1800000,
+            "type": "integer"
+          },
+          "stdout_limit": {
+            "minimum": 0,
+            "maximum": 4194304,
+            "type": "integer"
+          },
+          "stderr_limit": {
+            "minimum": 0,
+            "maximum": 4194304,
+            "type": "integer"
+          },
+          "expected_exit_codes": {
+            "minItems": 1,
+            "uniqueItems": true,
+            "maxItems": 256,
+            "type": "array",
+            "items": {
+              "minimum": 0,
+              "maximum": 255,
+              "type": "integer"
+            }
+          },
+          "repository_side_effect": {
+            "type": "string",
+            "enum": [
+              "NONE",
+              "EXACT_PATHS",
+              "GENERATED_ONLY"
+            ]
+          },
+          "claimed_paths": {
+            "uniqueItems": true,
+            "maxItems": 100000,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "cleanup_paths": {
+            "uniqueItems": true,
+            "maxItems": 100000,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 4096,
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "command_id",
+          "command_spec_sha256",
+          "command_class",
+          "executable_invocation_path",
+          "executable_realpath",
+          "executable_device",
+          "executable_inode",
+          "executable_mode",
+          "executable_size",
+          "executable_sha256",
+          "argv",
+          "cwd",
+          "cwd_realpath",
+          "cwd_device",
+          "cwd_inode",
+          "execution_inputs",
+          "environment",
+          "read_paths",
+          "write_paths",
+          "network_policy",
+          "timeout_ms",
+          "stdout_limit",
+          "stderr_limit",
+          "expected_exit_codes",
+          "repository_side_effect",
+          "claimed_paths",
+          "cleanup_paths"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "catalog_id",
+    "repository_identity_content_sha256",
+    "tool_policy_content_sha256",
+    "commands"
+  ]
+}

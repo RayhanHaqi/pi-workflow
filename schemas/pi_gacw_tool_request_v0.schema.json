@@ -1,0 +1,145 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_tool_request_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_tool_request_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "request_kind": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "LIST",
+        "SEARCH",
+        "INSPECT_GIT",
+        "READ_EVIDENCE",
+        "COMMAND"
+      ]
+    },
+    "requested_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "state_token_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "tool_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "task_scope_identity": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "path": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "command_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "secure_fs_capability_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sandbox_capability_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "command_catalog_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "command_spec_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "request_metadata_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "request_kind",
+    "requested_at",
+    "state_token_content_sha256",
+    "tool_policy_content_sha256",
+    "task_scope_identity",
+    "path",
+    "command_id",
+    "secure_fs_capability_content_sha256",
+    "sandbox_capability_content_sha256",
+    "command_catalog_content_sha256",
+    "command_spec_sha256",
+    "request_metadata_sha256"
+  ]
+}

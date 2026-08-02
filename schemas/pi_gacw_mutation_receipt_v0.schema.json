@@ -1,0 +1,532 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_mutation_receipt_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_mutation_receipt_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "request_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "CREATE",
+        "REPLACE",
+        "DELETE"
+      ]
+    },
+    "path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "before": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "digest",
+        "size",
+        "mode"
+      ]
+    },
+    "after": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "digest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "digest",
+        "size",
+        "mode"
+      ]
+    },
+    "secure_fs_capability_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "lock_acquisition_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "prior_state_token_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "successor_state_token_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task_scope_identity": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "tool_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "APPLIED",
+        "PREIMAGE_MISMATCH",
+        "BLOCKED",
+        "UNCERTAIN"
+      ]
+    },
+    "helper_outcome": {
+      "type": "string",
+      "enum": [
+        "APPLIED",
+        "BLOCKED",
+        "UNCERTAIN",
+        "BLOCKED_AFTER_WRITE"
+      ]
+    },
+    "file_fsync": {
+      "type": "boolean"
+    },
+    "atomic_rename": {
+      "type": "boolean"
+    },
+    "directory_fsync": {
+      "type": "boolean"
+    },
+    "rollback_outcome": {
+      "type": "string",
+      "enum": [
+        "NOT_REQUIRED",
+        "SUCCEEDED",
+        "FAILED",
+        "UNKNOWN"
+      ]
+    },
+    "postflight_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "helper_journal": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "temporary_file_created": {
+              "type": "boolean"
+            },
+            "temporary_bytes_written": {
+              "minimum": 0,
+              "maximum": 1048576,
+              "type": "integer"
+            },
+            "temporary_file_fsync_attempted": {
+              "type": "boolean"
+            },
+            "temporary_file_fsync_completed": {
+              "type": "boolean"
+            },
+            "atomic_operation": {
+              "type": "string",
+              "enum": [
+                "NONE",
+                "RENAME_NOREPLACE",
+                "RENAME_EXCHANGE",
+                "TOMBSTONE_NOREPLACE"
+              ]
+            },
+            "atomic_rename_attempted": {
+              "type": "boolean"
+            },
+            "atomic_rename_completed": {
+              "type": "boolean"
+            },
+            "directory_fsync_attempt_count": {
+              "minimum": 0,
+              "maximum": 8,
+              "type": "integer"
+            },
+            "directory_fsync_completed_count": {
+              "minimum": 0,
+              "maximum": 8,
+              "type": "integer"
+            },
+            "preimage_validation": {
+              "type": "string",
+              "enum": [
+                "NOT_RUN",
+                "PASS",
+                "FAIL"
+              ]
+            },
+            "rollback_required": {
+              "type": "boolean"
+            },
+            "rollback_attempted": {
+              "type": "boolean"
+            },
+            "rollback_completed": {
+              "type": "boolean"
+            },
+            "rollback_directory_fsync_completed": {
+              "type": "boolean"
+            },
+            "final_verification": {
+              "type": "string",
+              "enum": [
+                "NOT_RUN",
+                "PASS",
+                "FAIL"
+              ]
+            },
+            "operation_nonce": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "temporary_device": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "temporary_inode": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "temporary_nlink": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tombstone_created": {
+              "type": "boolean"
+            },
+            "tombstone_device": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tombstone_inode": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tombstone_nlink": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "preimage_device": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "preimage_inode": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "preimage_nlink": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recovery_attempted": {
+              "type": "boolean"
+            },
+            "recovery_outcome": {
+              "type": "string",
+              "enum": [
+                "NOT_RUN",
+                "SUCCEEDED",
+                "FAILED",
+                "IDENTITY_MISMATCH"
+              ]
+            },
+            "recovery_residue_count": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recovery_target_verification": {
+              "type": "string",
+              "enum": [
+                "NOT_RUN",
+                "ABSENT",
+                "PREIMAGE",
+                "REPLACEMENT",
+                "MISMATCH",
+                "UNKNOWN"
+              ]
+            },
+            "recovery_directory_fsync": {
+              "type": "string",
+              "enum": [
+                "NOT_RUN",
+                "SUCCEEDED",
+                "FAILED"
+              ]
+            },
+            "recovery_helper_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "temporary_file_created",
+            "temporary_bytes_written",
+            "temporary_file_fsync_attempted",
+            "temporary_file_fsync_completed",
+            "atomic_operation",
+            "atomic_rename_attempted",
+            "atomic_rename_completed",
+            "directory_fsync_attempt_count",
+            "directory_fsync_completed_count",
+            "preimage_validation",
+            "rollback_required",
+            "rollback_attempted",
+            "rollback_completed",
+            "rollback_directory_fsync_completed",
+            "final_verification"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "completed_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "request_content_sha256",
+    "operation",
+    "path",
+    "before",
+    "after",
+    "secure_fs_capability_content_sha256",
+    "lock_acquisition_content_sha256",
+    "prior_state_token_content_sha256",
+    "successor_state_token_content_sha256",
+    "task_scope_identity",
+    "tool_policy_content_sha256",
+    "outcome",
+    "helper_outcome",
+    "file_fsync",
+    "atomic_rename",
+    "directory_fsync",
+    "rollback_outcome",
+    "postflight_content_sha256",
+    "failure_code",
+    "helper_journal",
+    "completed_at"
+  ]
+}

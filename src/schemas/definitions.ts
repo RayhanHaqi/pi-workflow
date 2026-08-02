@@ -1322,6 +1322,344 @@ export const M3RetentionResultSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_retention_result_v0.schema.json" },
 );
 
+export const M4PathRuleSchema = StrictObject({
+  path: PathString(),
+  kind: StringEnum(["EXACT", "PREFIX"] as const),
+});
+
+export const M4PathAuthoritySchema = StrictObject({
+  path: PathString(),
+  kind: StringEnum(["EXACT", "PREFIX"] as const),
+  ownership_class: StringEnum(["OWNER_AUTHORITY", "OWNER_ACCEPTED_MUTABLE", "PREEXISTING_UNRELATED", "GENERATED_ACCEPTED_BASELINE"] as const),
+  data_class: StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE", "SECRET", "LARGE_BINARY", "HASH_ONLY"] as const),
+  raw_read_approved: Type.Boolean(),
+  create: Type.Boolean(),
+  replace: Type.Boolean(),
+  delete: Type.Boolean(),
+  mode_change: Type.Boolean(),
+});
+
+export const M4LimitsSchema = StrictObject({
+  maximum_patch_bytes: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  maximum_read_bytes: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  maximum_hash_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  maximum_search_input_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  maximum_search_matches: Type.Integer({ minimum: 0, maximum: 10_000 }),
+  maximum_list_entries: Type.Integer({ minimum: 0, maximum: 100_000 }),
+  maximum_list_metadata_bytes: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  maximum_command_stdout_bytes: Type.Integer({ minimum: 0, maximum: 4_194_304 }),
+  maximum_command_stderr_bytes: Type.Integer({ minimum: 0, maximum: 4_194_304 }),
+  maximum_command_duration_ms: Type.Integer({ minimum: 1, maximum: 1_800_000 }),
+});
+
+export const M4SecureFilesystemCapabilitySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_secure_fs_capability_v0"),
+    capability_protocol: Type.Literal("secure-fs-capability-v1"),
+    probed_at: NonEmptyString(64),
+    probe_evidence_sha256: Digest(),
+    helper_protocol_version: Type.Literal("pi-gacw-secure-fs-v1"),
+    helper_invocation_path: PathString(),
+    helper_realpath: PathString(),
+    helper_sha256: Digest(),
+    python_invocation_path: PathString(),
+    python_realpath: PathString(),
+    python_sha256: Digest(),
+    python_version: NonEmptyString(255),
+    kernel_release: NonEmptyString(255),
+    architecture: NonEmptyString(255),
+    libc_identity: NonEmptyString(1024),
+    openat2_available: Type.Boolean(),
+    supported_resolve_flags: Type.Array(StringEnum(["RESOLVE_BENEATH", "RESOLVE_NO_SYMLINKS", "RESOLVE_NO_MAGICLINKS"] as const), { uniqueItems: true, maxItems: 3 }),
+    renameat2_available: Type.Boolean(),
+    rename_noreplace_available: Type.Boolean(),
+    rename_exchange_available: Type.Boolean(),
+    directory_fsync_available: Type.Boolean(),
+    landlock_available: Type.Boolean(),
+    landlock_abi: Type.Union([Type.Integer({ minimum: 1, maximum: 255 }), Type.Null()]),
+    no_new_privs_available: Type.Boolean(),
+    network_denial_available: Type.Boolean(),
+    secure_fs_result: StringEnum(["SECURE_FS_AVAILABLE", "SECURE_FS_UNAVAILABLE"] as const),
+    command_sandbox_result: StringEnum(["COMMAND_SANDBOX_AVAILABLE", "COMMAND_SANDBOX_UNAVAILABLE"] as const),
+    network_sandbox_result: StringEnum(["NETWORK_SANDBOX_AVAILABLE", "NETWORK_SANDBOX_UNAVAILABLE"] as const),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_secure_fs_capability_v0.schema.json" },
+);
+
+export const M4SandboxCapabilitySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_sandbox_capability_v0"),
+    capability_protocol: Type.Literal("command-sandbox-capability-v1"),
+    probed_at: NonEmptyString(64),
+    probe_evidence_sha256: Digest(),
+    helper_protocol_version: Type.Literal("pi-gacw-command-sandbox-v1"),
+    helper_invocation_path: PathString(),
+    helper_realpath: PathString(),
+    helper_sha256: Digest(),
+    python_invocation_path: PathString(),
+    python_realpath: PathString(),
+    python_sha256: Digest(),
+    python_version: NonEmptyString(255),
+    landlock_available: Type.Boolean(),
+    landlock_abi: Type.Union([Type.Integer({ minimum: 1, maximum: 255 }), Type.Null()]),
+    filesystem_restrictions: Type.Boolean(),
+    child_inheritance: Type.Boolean(),
+    no_new_privs: Type.Boolean(),
+    seccomp_available: Type.Boolean(),
+    network_denial: Type.Boolean(),
+    result: StringEnum(["COMMAND_SANDBOX_AVAILABLE", "COMMAND_SANDBOX_UNAVAILABLE"] as const),
+    network_result: StringEnum(["NETWORK_SANDBOX_AVAILABLE", "NETWORK_SANDBOX_UNAVAILABLE"] as const),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_sandbox_capability_v0.schema.json" },
+);
+
+export const M4ScopedToolPolicySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_scoped_tool_policy_v0"),
+    run_id: RunId(),
+    policy_id: Identifier(),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    task_scope_identity: Digest(),
+    readable_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+    editable_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+    frozen_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+    command_readable_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+    command_writable_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+    path_authorities: Type.Array(M4PathAuthoritySchema, { maxItems: 100_000 }),
+    evidence_readable_kinds: Type.Array(NonEmptyString(128), { uniqueItems: true, maxItems: 128 }),
+    limits: M4LimitsSchema,
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_scoped_tool_policy_v0.schema.json" },
+);
+
+export const M4CommandEnvironmentEntrySchema = StrictObject({ key: NonEmptyString(255), value: Type.String({ maxLength: 16_384 }) });
+export const M4ExecutionInputSchema = StrictObject({
+  path: PathString(),
+  realpath: PathString(),
+  device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  mode: Type.Integer({ minimum: 0, maximum: 0o7777 }),
+  size: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  digest: Digest(),
+});
+export const M4CommandSpecificationSchema = StrictObject({
+  command_id: Identifier(),
+  command_spec_sha256: Digest(),
+  command_class: StringEnum(["INSPECTION", "TASK", "VERIFICATION"] as const),
+  executable_invocation_path: PathString(),
+  executable_realpath: PathString(),
+  executable_device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  executable_inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  executable_mode: Type.Integer({ minimum: 0, maximum: 0o7777 }),
+  executable_size: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  executable_sha256: Digest(),
+  argv: Type.Array(NonEmptyString(4096), { minItems: 1, maxItems: 128 }),
+  cwd: Type.Union([Type.Literal("REPOSITORY_ROOT"), PathString()]),
+  cwd_realpath: PathString(),
+  cwd_device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  cwd_inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  execution_inputs: Type.Array(M4ExecutionInputSchema, { maxItems: 128 }),
+  environment: Type.Array(M4CommandEnvironmentEntrySchema, { uniqueItems: true, maxItems: 256 }),
+  read_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+  write_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
+  network_policy: Type.Literal("FORBIDDEN"),
+  timeout_ms: Type.Integer({ minimum: 1, maximum: 1_800_000 }),
+  stdout_limit: Type.Integer({ minimum: 0, maximum: 4_194_304 }),
+  stderr_limit: Type.Integer({ minimum: 0, maximum: 4_194_304 }),
+  expected_exit_codes: Type.Array(Type.Integer({ minimum: 0, maximum: 255 }), { minItems: 1, uniqueItems: true, maxItems: 256 }),
+  repository_side_effect: StringEnum(["NONE", "EXACT_PATHS", "GENERATED_ONLY"] as const),
+  claimed_paths: Type.Array(PathString(), { uniqueItems: true, maxItems: 100_000 }),
+  cleanup_paths: Type.Array(PathString(), { uniqueItems: true, maxItems: 100_000 }),
+});
+
+export const M4CommandCatalogSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_command_catalog_v0"),
+    run_id: RunId(),
+    catalog_id: Identifier(),
+    repository_identity_content_sha256: Digest(),
+    tool_policy_content_sha256: Digest(),
+    commands: Type.Array(M4CommandSpecificationSchema, { maxItems: 10_000 }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_command_catalog_v0.schema.json" },
+);
+
+export const M4ToolRequestSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_tool_request_v0"),
+    run_id: RunId(),
+    request_kind: StringEnum(["READ", "LIST", "SEARCH", "INSPECT_GIT", "READ_EVIDENCE", "COMMAND"] as const),
+    requested_at: NonEmptyString(64),
+    state_token_content_sha256: Digest(),
+    tool_policy_content_sha256: Digest(),
+    task_scope_identity: Digest(),
+    path: Type.Union([PathString(), Type.Null()]),
+    command_id: Type.Union([Identifier(), Type.Null()]),
+    secure_fs_capability_content_sha256: NullableDigest(),
+    sandbox_capability_content_sha256: NullableDigest(),
+    command_catalog_content_sha256: NullableDigest(),
+    command_spec_sha256: NullableDigest(),
+    request_metadata_sha256: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_tool_request_v0.schema.json" },
+);
+
+export const M4PatchRequestSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_patch_request_v0"),
+    run_id: RunId(),
+    requested_at: NonEmptyString(64),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    lock_acquisition_content_sha256: Digest(),
+    prior_state_token_content_sha256: Digest(),
+    task_scope_identity: Digest(),
+    tool_policy_content_sha256: Digest(),
+    secure_fs_capability_content_sha256: Digest(),
+    operation: StringEnum(["CREATE", "REPLACE", "DELETE"] as const),
+    path: PathString(),
+    ownership_class: StringEnum(["OWNER_AUTHORITY", "OWNER_ACCEPTED_MUTABLE", "PREEXISTING_UNRELATED", "GENERATED_ACCEPTED_BASELINE"] as const),
+    data_class: StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE", "SECRET", "LARGE_BINARY", "HASH_ONLY"] as const),
+    expected_preimage_exists: Type.Boolean(),
+    expected_preimage_digest: NullableDigest(),
+    expected_preimage_size: NullableSafeIntegerSchema,
+    expected_preimage_mode: NullableSafeIntegerSchema,
+    replacement_digest: NullableDigest(),
+    replacement_byte_count: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+    requested_final_mode: NullableSafeIntegerSchema,
+    patch_format_identity: Type.Literal("exact-bytes-v1"),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_patch_request_v0.schema.json" },
+);
+
+export const M4FileMetadataSchema = StrictObject({
+  digest: NullableDigest(), size: NullableSafeIntegerSchema, mode: NullableSafeIntegerSchema,
+});
+
+export const M4MutationJournalSchema = StrictObject({
+  temporary_file_created: Type.Boolean(),
+  temporary_bytes_written: Type.Integer({ minimum: 0, maximum: 1_048_576 }),
+  temporary_file_fsync_attempted: Type.Boolean(),
+  temporary_file_fsync_completed: Type.Boolean(),
+  atomic_operation: StringEnum(["NONE", "RENAME_NOREPLACE", "RENAME_EXCHANGE", "TOMBSTONE_NOREPLACE"] as const),
+  atomic_rename_attempted: Type.Boolean(),
+  atomic_rename_completed: Type.Boolean(),
+  directory_fsync_attempt_count: Type.Integer({ minimum: 0, maximum: 8 }),
+  directory_fsync_completed_count: Type.Integer({ minimum: 0, maximum: 8 }),
+  preimage_validation: StringEnum(["NOT_RUN", "PASS", "FAIL"] as const),
+  rollback_required: Type.Boolean(),
+  rollback_attempted: Type.Boolean(),
+  rollback_completed: Type.Boolean(),
+  rollback_directory_fsync_completed: Type.Boolean(),
+  final_verification: StringEnum(["NOT_RUN", "PASS", "FAIL"] as const),
+  operation_nonce: Type.Optional(Type.Union([Type.String({ pattern: "^[0-9a-f]{32}$" }), Type.Null()])),
+  temporary_device: Type.Optional(NullableSafeIntegerSchema),
+  temporary_inode: Type.Optional(NullableSafeIntegerSchema),
+  temporary_nlink: Type.Optional(NullableSafeIntegerSchema),
+  tombstone_created: Type.Optional(Type.Boolean()),
+  tombstone_device: Type.Optional(NullableSafeIntegerSchema),
+  tombstone_inode: Type.Optional(NullableSafeIntegerSchema),
+  tombstone_nlink: Type.Optional(NullableSafeIntegerSchema),
+  preimage_device: Type.Optional(NullableSafeIntegerSchema),
+  preimage_inode: Type.Optional(NullableSafeIntegerSchema),
+  preimage_nlink: Type.Optional(NullableSafeIntegerSchema),
+  recovery_attempted: Type.Optional(Type.Boolean()),
+  recovery_outcome: Type.Optional(StringEnum(["NOT_RUN", "SUCCEEDED", "FAILED", "IDENTITY_MISMATCH"] as const)),
+  recovery_residue_count: Type.Optional(NullableSafeIntegerSchema),
+  recovery_target_verification: Type.Optional(StringEnum(["NOT_RUN", "ABSENT", "PREIMAGE", "REPLACEMENT", "MISMATCH", "UNKNOWN"] as const)),
+  recovery_directory_fsync: Type.Optional(StringEnum(["NOT_RUN", "SUCCEEDED", "FAILED"] as const)),
+  recovery_helper_sha256: Type.Optional(NullableDigest()),
+});
+
+export const M4MutationReceiptSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_mutation_receipt_v0"),
+    run_id: RunId(),
+    request_content_sha256: Digest(),
+    operation: StringEnum(["CREATE", "REPLACE", "DELETE"] as const),
+    path: PathString(),
+    before: M4FileMetadataSchema,
+    after: M4FileMetadataSchema,
+    secure_fs_capability_content_sha256: Digest(),
+    lock_acquisition_content_sha256: Digest(),
+    prior_state_token_content_sha256: Digest(),
+    successor_state_token_content_sha256: NullableDigest(),
+    task_scope_identity: Digest(),
+    tool_policy_content_sha256: Digest(),
+    outcome: StringEnum(["APPLIED", "PREIMAGE_MISMATCH", "BLOCKED", "UNCERTAIN"] as const),
+    helper_outcome: StringEnum(["APPLIED", "BLOCKED", "UNCERTAIN", "BLOCKED_AFTER_WRITE"] as const),
+    file_fsync: Type.Boolean(),
+    atomic_rename: Type.Boolean(),
+    directory_fsync: Type.Boolean(),
+    rollback_outcome: StringEnum(["NOT_REQUIRED", "SUCCEEDED", "FAILED", "UNKNOWN"] as const),
+    postflight_content_sha256: NullableDigest(),
+    failure_code: Type.Union([NonEmptyString(128), Type.Null()]),
+    helper_journal: Type.Union([M4MutationJournalSchema, Type.Null()]),
+    completed_at: NonEmptyString(64),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_mutation_receipt_v0.schema.json" },
+);
+
+export const M4ToolResultSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_tool_result_v0"),
+    run_id: RunId(),
+    request_content_sha256: Digest(),
+    result_kind: StringEnum(["READ", "LIST", "SEARCH", "INSPECT_GIT", "READ_EVIDENCE"] as const),
+    state_token_content_sha256: Digest(),
+    path: Type.Union([PathString(), Type.Null()]),
+    data_class: Type.Union([StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE", "SECRET", "LARGE_BINARY", "HASH_ONLY"] as const), Type.Null()]),
+    content_digest: NullableDigest(),
+    byte_count: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+    item_count: Type.Integer({ minimum: 0, maximum: 100_000 }),
+    output_digest: Digest(),
+    outcome: StringEnum(["RAW", "METADATA_ONLY", "PASS"] as const),
+    completed_at: NonEmptyString(64),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_tool_result_v0.schema.json" },
+);
+
+export const M4CommandResultSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_command_result_v0"),
+    run_id: RunId(),
+    request_content_sha256: Digest(),
+    command_catalog_content_sha256: Digest(),
+    command_spec_sha256: Digest(),
+    command_id: Identifier(),
+    command_class: StringEnum(["INSPECTION", "TASK", "VERIFICATION"] as const),
+    state_token_before: Digest(),
+    state_token_after: NullableDigest(),
+    sandbox_capability_content_sha256: Digest(),
+    executable_sha256: Digest(),
+    argv_identity: Digest(),
+    cwd: PathString(),
+    environment_identity: Digest(),
+    started_at: NonEmptyString(64),
+    ended_at: NonEmptyString(64),
+    exit_code: Type.Union([Type.Integer({ minimum: 0, maximum: 255 }), Type.Null()]),
+    signal: Type.Union([NonEmptyString(64), Type.Null()]),
+    stdout_digest: Digest(),
+    stdout_byte_count: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+    stdout_observed_digest: NullableDigest(),
+    stdout_observed_byte_count: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+    stdout_overflowed: Type.Boolean(),
+    stdout_stream_complete: Type.Boolean(),
+    stderr_digest: Digest(),
+    stderr_byte_count: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+    stderr_observed_digest: NullableDigest(),
+    stderr_observed_byte_count: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+    stderr_overflowed: Type.Boolean(),
+    stderr_stream_complete: Type.Boolean(),
+    repository_delta: Type.Array(M3DeltaEntrySchema, { maxItems: 100_000 }),
+    postflight_content_sha256: NullableDigest(),
+    failure_code: Type.Union([StringEnum(["COMMAND_FORBIDDEN", "GENERIC_DISPATCHER_FORBIDDEN", "COMMAND_SPEC_MISMATCH", "EXECUTION_INPUT_DRIFT", "COMMAND_CWD_IDENTITY_DRIFT", "HARDLINK_WRITE_SCOPE_UNSAFE", "COMMAND_SANDBOX_UNAVAILABLE", "NETWORK_SANDBOX_UNAVAILABLE", "COMMAND_TIMEOUT", "COMMAND_OUTPUT_LIMIT", "COMMAND_SIGNALLED", "COMMAND_EXIT_CODE_UNEXPECTED", "COMMAND_UNEXPECTED_REPOSITORY_DELTA"] as const), Type.Null()]),
+    outcome: StringEnum(["PASS", "BLOCKED"] as const),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_command_result_v0.schema.json" },
+);
+
 export const FinalReportSchema = StrictObject(
   {
     ...DocumentFields("pi_gacw_final_report_v0"),
@@ -1375,6 +1713,15 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_postflight_v0", fileName: "pi_gacw_postflight_v0.schema.json", schema: M3PostflightSchema },
   { schemaId: "pi_gacw_terminal_retention_authority_v0", fileName: "pi_gacw_terminal_retention_authority_v0.schema.json", schema: M3TerminalRetentionAuthoritySchema },
   { schemaId: "pi_gacw_retention_result_v0", fileName: "pi_gacw_retention_result_v0.schema.json", schema: M3RetentionResultSchema },
+  { schemaId: "pi_gacw_secure_fs_capability_v0", fileName: "pi_gacw_secure_fs_capability_v0.schema.json", schema: M4SecureFilesystemCapabilitySchema },
+  { schemaId: "pi_gacw_sandbox_capability_v0", fileName: "pi_gacw_sandbox_capability_v0.schema.json", schema: M4SandboxCapabilitySchema },
+  { schemaId: "pi_gacw_scoped_tool_policy_v0", fileName: "pi_gacw_scoped_tool_policy_v0.schema.json", schema: M4ScopedToolPolicySchema },
+  { schemaId: "pi_gacw_command_catalog_v0", fileName: "pi_gacw_command_catalog_v0.schema.json", schema: M4CommandCatalogSchema },
+  { schemaId: "pi_gacw_tool_request_v0", fileName: "pi_gacw_tool_request_v0.schema.json", schema: M4ToolRequestSchema },
+  { schemaId: "pi_gacw_patch_request_v0", fileName: "pi_gacw_patch_request_v0.schema.json", schema: M4PatchRequestSchema },
+  { schemaId: "pi_gacw_mutation_receipt_v0", fileName: "pi_gacw_mutation_receipt_v0.schema.json", schema: M4MutationReceiptSchema },
+  { schemaId: "pi_gacw_tool_result_v0", fileName: "pi_gacw_tool_result_v0.schema.json", schema: M4ToolResultSchema },
+  { schemaId: "pi_gacw_command_result_v0", fileName: "pi_gacw_command_result_v0.schema.json", schema: M4CommandResultSchema },
 ] as const;
 
 // The package-private registry is the sole runtime and emission authority. Every
@@ -1447,3 +1794,17 @@ export type M3DeltaEntry = Static<typeof M3DeltaEntrySchema>;
 export type M3PostflightDocument = Static<typeof M3PostflightSchema>;
 export type M3TerminalRetentionAuthorityDocument = Static<typeof M3TerminalRetentionAuthoritySchema>;
 export type M3RetentionResultDocument = Static<typeof M3RetentionResultSchema>;
+export type M4PathRule = Static<typeof M4PathRuleSchema>;
+export type M4PathAuthority = Static<typeof M4PathAuthoritySchema>;
+export type M4Limits = Static<typeof M4LimitsSchema>;
+export type M4SecureFilesystemCapabilityDocument = Static<typeof M4SecureFilesystemCapabilitySchema>;
+export type M4SandboxCapabilityDocument = Static<typeof M4SandboxCapabilitySchema>;
+export type M4ScopedToolPolicyDocument = Static<typeof M4ScopedToolPolicySchema>;
+export type M4CommandSpecification = Static<typeof M4CommandSpecificationSchema>;
+export type M4CommandCatalogDocument = Static<typeof M4CommandCatalogSchema>;
+export type M4ToolRequestDocument = Static<typeof M4ToolRequestSchema>;
+export type M4PatchRequestDocument = Static<typeof M4PatchRequestSchema>;
+export type M4MutationJournal = Static<typeof M4MutationJournalSchema>;
+export type M4MutationReceiptDocument = Static<typeof M4MutationReceiptSchema>;
+export type M4ToolResultDocument = Static<typeof M4ToolResultSchema>;
+export type M4CommandResultDocument = Static<typeof M4CommandResultSchema>;

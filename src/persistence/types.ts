@@ -70,7 +70,16 @@ export type StoredObjectKind =
   | "M3_POSTFLIGHT"
   | "M3_RETENTION_RESULT"
   | "M3_TERMINAL_RETENTION_AUTHORITY"
-  | "M3_BASELINE_BLOB";
+  | "M3_BASELINE_BLOB"
+  | "M4_SECURE_FS_CAPABILITY"
+  | "M4_SANDBOX_CAPABILITY"
+  | "M4_TOOL_POLICY"
+  | "M4_COMMAND_CATALOG"
+  | "M4_TOOL_REQUEST"
+  | "M4_PATCH_REQUEST"
+  | "M4_TOOL_RESULT"
+  | "M4_MUTATION_RECEIPT"
+  | "M4_COMMAND_RESULT";
 
 export interface InspectedObject {
   readonly kind: StoredObjectKind;

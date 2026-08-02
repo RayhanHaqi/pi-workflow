@@ -1,0 +1,143 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_sandbox_capability_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_sandbox_capability_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "capability_protocol": {
+      "const": "command-sandbox-capability-v1",
+      "type": "string"
+    },
+    "probed_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "probe_evidence_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "helper_protocol_version": {
+      "const": "pi-gacw-command-sandbox-v1",
+      "type": "string"
+    },
+    "helper_invocation_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "helper_realpath": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "helper_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "python_invocation_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "python_realpath": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "python_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "python_version": {
+      "minLength": 1,
+      "maxLength": 255,
+      "type": "string"
+    },
+    "landlock_available": {
+      "type": "boolean"
+    },
+    "landlock_abi": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "maximum": 255,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "filesystem_restrictions": {
+      "type": "boolean"
+    },
+    "child_inheritance": {
+      "type": "boolean"
+    },
+    "no_new_privs": {
+      "type": "boolean"
+    },
+    "seccomp_available": {
+      "type": "boolean"
+    },
+    "network_denial": {
+      "type": "boolean"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "COMMAND_SANDBOX_AVAILABLE",
+        "COMMAND_SANDBOX_UNAVAILABLE"
+      ]
+    },
+    "network_result": {
+      "type": "string",
+      "enum": [
+        "NETWORK_SANDBOX_AVAILABLE",
+        "NETWORK_SANDBOX_UNAVAILABLE"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "capability_protocol",
+    "probed_at",
+    "probe_evidence_sha256",
+    "helper_protocol_version",
+    "helper_invocation_path",
+    "helper_realpath",
+    "helper_sha256",
+    "python_invocation_path",
+    "python_realpath",
+    "python_sha256",
+    "python_version",
+    "landlock_available",
+    "landlock_abi",
+    "filesystem_restrictions",
+    "child_inheritance",
+    "no_new_privs",
+    "seccomp_available",
+    "network_denial",
+    "result",
+    "network_result"
+  ]
+}

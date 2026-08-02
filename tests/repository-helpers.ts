@@ -42,27 +42,32 @@ export interface RepositoryFixture {
 export async function createRepositoryFixture(): Promise<RepositoryFixture> {
   const root = await mkdtemp(join(tmpdir(), "pi-gacw-m3-"));
   await chmod(root, 0o700);
-  const repository = join(root, "repository");
-  const stateRoot = join(root, "state");
-  await mkdir(repository, { mode: 0o700 });
-  await mkdir(stateRoot, { mode: 0o700 });
-  await git(repository, "init", "-b", "main");
-  await git(repository, "config", "user.name", "M3 Test");
-  await git(repository, "config", "user.email", "m3@example.invalid");
-  const trackedPath = join(repository, "tracked.txt");
-  const instructionPath = join(repository, "AGENTS.md");
-  const authorityPath = join(repository, "AUTHORITY.md");
-  await writeFile(trackedPath, "initial\n", { mode: 0o644 });
-  await writeFile(instructionPath, "M3 test instructions\n", { mode: 0o644 });
-  await writeFile(authorityPath, "M3 frozen authority\n", { mode: 0o644 });
-  await git(repository, "add", "tracked.txt", "AGENTS.md", "AUTHORITY.md");
-  await git(repository, "commit", "-m", "fixture baseline");
+  try {
+    const repository = join(root, "repository");
+    const stateRoot = join(root, "state");
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(stateRoot, { mode: 0o700 });
+    await git(repository, "init", "-b", "main");
+    await git(repository, "config", "user.name", "M3 Test");
+    await git(repository, "config", "user.email", "m3@example.invalid");
+    const trackedPath = join(repository, "tracked.txt");
+    const instructionPath = join(repository, "AGENTS.md");
+    const authorityPath = join(repository, "AUTHORITY.md");
+    await writeFile(trackedPath, "initial\n", { mode: 0o644 });
+    await writeFile(instructionPath, "M3 test instructions\n", { mode: 0o644 });
+    await writeFile(authorityPath, "M3 frozen authority\n", { mode: 0o644 });
+    await git(repository, "add", "tracked.txt", "AGENTS.md", "AUTHORITY.md");
+    await git(repository, "commit", "-m", "fixture baseline");
 
-  const policy = makePolicy("DIRECT_LUNA_HIGH");
-  const runId = policy.run_id;
-  const initialState = createInitialState(policy, stateIdentities(policy));
-  const committed = await initializeRunStorage({ stateRoot, runId, policy, initialState, processMetadata });
-  return { root, repository, stateRoot, runId, trackedPath, instructionPath, authorityPath, policy, initialState, committed };
+    const policy = makePolicy("DIRECT_LUNA_HIGH");
+    const runId = policy.run_id;
+    const initialState = createInitialState(policy, stateIdentities(policy));
+    const committed = await initializeRunStorage({ stateRoot, runId, policy, initialState, processMetadata });
+    return { root, repository, stateRoot, runId, trackedPath, instructionPath, authorityPath, policy, initialState, committed };
+  } catch (error: unknown) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function removeRepositoryFixture(fixture: RepositoryFixture): Promise<void> {

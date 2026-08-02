@@ -1,0 +1,401 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_command_result_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_command_result_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "request_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "command_catalog_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "command_spec_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "command_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "command_class": {
+      "type": "string",
+      "enum": [
+        "INSPECTION",
+        "TASK",
+        "VERIFICATION"
+      ]
+    },
+    "state_token_before": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "state_token_after": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sandbox_capability_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "executable_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "argv_identity": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "cwd": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "environment_identity": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "started_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "ended_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "maximum": 255,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "signal": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stdout_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "stdout_byte_count": {
+      "minimum": 0,
+      "maximum": 67108864,
+      "type": "integer"
+    },
+    "stdout_observed_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stdout_observed_byte_count": {
+      "minimum": 0,
+      "maximum": 67108864,
+      "type": "integer"
+    },
+    "stdout_overflowed": {
+      "type": "boolean"
+    },
+    "stdout_stream_complete": {
+      "type": "boolean"
+    },
+    "stderr_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "stderr_byte_count": {
+      "minimum": 0,
+      "maximum": 67108864,
+      "type": "integer"
+    },
+    "stderr_observed_digest": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stderr_observed_byte_count": {
+      "minimum": 0,
+      "maximum": 67108864,
+      "type": "integer"
+    },
+    "stderr_overflowed": {
+      "type": "boolean"
+    },
+    "stderr_stream_complete": {
+      "type": "boolean"
+    },
+    "repository_delta": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "change_kind": {
+            "type": "string",
+            "enum": [
+              "ADDED",
+              "MODIFIED",
+              "DELETED",
+              "TYPE_CHANGED",
+              "MODE_CHANGED",
+              "BASELINE_REVERTED"
+            ]
+          },
+          "before_content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "after_content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "before_type": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "after_type": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "before_mode": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "after_mode": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "staged_status": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unstaged_status": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "untracked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "change_kind",
+          "before_content_sha256",
+          "after_content_sha256",
+          "before_type",
+          "after_type",
+          "before_mode",
+          "after_mode",
+          "staged_status",
+          "unstaged_status",
+          "untracked"
+        ]
+      }
+    },
+    "postflight_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "COMMAND_FORBIDDEN",
+            "GENERIC_DISPATCHER_FORBIDDEN",
+            "COMMAND_SPEC_MISMATCH",
+            "EXECUTION_INPUT_DRIFT",
+            "COMMAND_CWD_IDENTITY_DRIFT",
+            "HARDLINK_WRITE_SCOPE_UNSAFE",
+            "COMMAND_SANDBOX_UNAVAILABLE",
+            "NETWORK_SANDBOX_UNAVAILABLE",
+            "COMMAND_TIMEOUT",
+            "COMMAND_OUTPUT_LIMIT",
+            "COMMAND_SIGNALLED",
+            "COMMAND_EXIT_CODE_UNEXPECTED",
+            "COMMAND_UNEXPECTED_REPOSITORY_DELTA"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "BLOCKED"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "request_content_sha256",
+    "command_catalog_content_sha256",
+    "command_spec_sha256",
+    "command_id",
+    "command_class",
+    "state_token_before",
+    "state_token_after",
+    "sandbox_capability_content_sha256",
+    "executable_sha256",
+    "argv_identity",
+    "cwd",
+    "environment_identity",
+    "started_at",
+    "ended_at",
+    "exit_code",
+    "signal",
+    "stdout_digest",
+    "stdout_byte_count",
+    "stdout_observed_digest",
+    "stdout_observed_byte_count",
+    "stdout_overflowed",
+    "stdout_stream_complete",
+    "stderr_digest",
+    "stderr_byte_count",
+    "stderr_observed_digest",
+    "stderr_observed_byte_count",
+    "stderr_overflowed",
+    "stderr_stream_complete",
+    "repository_delta",
+    "postflight_content_sha256",
+    "failure_code",
+    "outcome"
+  ]
+}
