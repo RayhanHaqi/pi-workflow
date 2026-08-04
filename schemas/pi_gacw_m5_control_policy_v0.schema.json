@@ -1,0 +1,510 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_m5_control_policy_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_m5_control_policy_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "starting_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "objective_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "contract_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "budget_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "reducer_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "authority_lock_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "baseline_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "scope_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "acceptance_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "plan_approval_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task_graph_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tool_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "command_catalog_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_approved": {
+      "type": "boolean"
+    },
+    "production_authority": {
+      "type": "string",
+      "enum": [
+        "OWNER_APPROVED",
+        "TEST_FIXTURE"
+      ]
+    },
+    "requested_mode": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "DIRECT_LUNA_HIGH",
+        "SINGLE_OWNER_SOL",
+        "ROUTED_DAG"
+      ]
+    },
+    "route_facts": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "hard_sol_conditions": {
+          "uniqueItems": true,
+          "maxItems": 7,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "UNRESOLVED_AUTHORITY",
+              "PUBLIC_INTERFACE",
+              "SECURITY_BOUNDARY",
+              "LIFECYCLE_OR_PROVENANCE",
+              "MIGRATION_SEMANTICS",
+              "JUDGMENT_ACCEPTANCE",
+              "INSEPARABLE_HIGH_COUPLING"
+            ]
+          }
+        },
+        "task_count": {
+          "minimum": 0,
+          "maximum": 8,
+          "type": "integer"
+        },
+        "coherent_single_task": {
+          "type": "boolean"
+        },
+        "failure_domain_count": {
+          "minimum": 0,
+          "maximum": 8,
+          "type": "integer"
+        },
+        "deterministic_acceptance": {
+          "type": "boolean"
+        },
+        "ownership_ambiguous": {
+          "type": "boolean"
+        },
+        "leaf_count": {
+          "minimum": 0,
+          "maximum": 8,
+          "type": "integer"
+        },
+        "dag_valid": {
+          "type": "boolean"
+        },
+        "leaves_separable": {
+          "type": "boolean"
+        },
+        "unique_write_ownership": {
+          "type": "boolean"
+        },
+        "leaf_acceptance_machine_checkable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hard_sol_conditions",
+        "task_count",
+        "coherent_single_task",
+        "failure_domain_count",
+        "deterministic_acceptance",
+        "ownership_ambiguous",
+        "leaf_count",
+        "dag_valid",
+        "leaves_separable",
+        "unique_write_ownership",
+        "leaf_acceptance_machine_checkable"
+      ]
+    },
+    "obligations": {
+      "maxItems": 20000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "descriptor_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "declaration": {
+            "minLength": 1,
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "INPUT",
+              "OUTPUT"
+            ]
+          },
+          "stage": {
+            "minimum": 0,
+            "maximum": 1000000,
+            "type": "integer"
+          },
+          "producer": {
+            "minLength": 1,
+            "maxLength": 128,
+            "type": "string"
+          },
+          "consumers": {
+            "minItems": 1,
+            "maxItems": 1024,
+            "uniqueItems": true,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          "grammar": {
+            "type": "string",
+            "enum": [
+              "HEX",
+              "UUID",
+              "INTEGER",
+              "LITERAL",
+              "PREFIXED_LITERAL",
+              "PATH"
+            ]
+          },
+          "evidence_kind": {
+            "type": "string",
+            "enum": [
+              "COMMAND",
+              "FILE",
+              "DIGEST",
+              "OWNER_ACCEPTANCE",
+              "STATE",
+              "CONTEXT"
+            ]
+          },
+          "literal": {
+            "anyOf": [
+              {
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prefix": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "descriptor_sha256",
+          "declaration",
+          "direction",
+          "stage",
+          "producer",
+          "consumers",
+          "grammar",
+          "evidence_kind",
+          "literal",
+          "prefix"
+        ]
+      }
+    },
+    "limits": {
+      "minItems": 8,
+      "maxItems": 8,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "WORKER_INVOCATION",
+              "MODEL_TURN",
+              "PROVIDER_REQUEST",
+              "TOOL_CALL",
+              "INPUT_TOKEN",
+              "OUTPUT_TOKEN",
+              "COST_MICROUSD",
+              "WALL_TIME_MS"
+            ]
+          },
+          "hard_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "soft_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enforcement_class": {
+            "type": "string",
+            "enum": [
+              "HARD_ENFORCEABLE",
+              "SOFT_ENFORCEABLE",
+              "OBSERVABLE_ONLY",
+              "ESTIMATED_ONLY",
+              "UNAVAILABLE"
+            ]
+          }
+        },
+        "required": [
+          "dimension",
+          "hard_limit",
+          "soft_limit",
+          "enforcement_class"
+        ]
+      }
+    },
+    "role_reservation_envelopes": {
+      "maxItems": 16,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "logical_role": {
+            "type": "string",
+            "enum": [
+              "SOL_OWNER",
+              "SOL_PLANNER",
+              "SOL_REPLAN",
+              "SOL_CLOSEOUT",
+              "LUNA_EXECUTOR",
+              "BENCHMARK_VERIFIER",
+              "BENCHMARK_SELECTOR"
+            ]
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "ORDINARY",
+              "REQUIRED_CLOSEOUT"
+            ]
+          },
+          "amounts": {
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "dimension": {
+                  "type": "string",
+                  "enum": [
+                    "WORKER_INVOCATION",
+                    "MODEL_TURN",
+                    "PROVIDER_REQUEST",
+                    "TOOL_CALL",
+                    "INPUT_TOKEN",
+                    "OUTPUT_TOKEN",
+                    "COST_MICROUSD",
+                    "WALL_TIME_MS"
+                  ]
+                },
+                "amount": {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "dimension",
+                "amount"
+              ]
+            }
+          }
+        },
+        "required": [
+          "logical_role",
+          "purpose",
+          "amounts"
+        ]
+      }
+    },
+    "failure_action_table_version": {
+      "const": "m5-failure-actions-v1",
+      "type": "string"
+    },
+    "progress_rule_version": {
+      "const": "m5-progress-v1",
+      "type": "string"
+    },
+    "contract_gate_rule_version": {
+      "const": "m5-contract-gate-v1",
+      "type": "string"
+    },
+    "route_selection_rule_version": {
+      "const": "m5-route-selection-v1",
+      "type": "string"
+    },
+    "insufficient_routing_evidence": {
+      "type": "string",
+      "enum": [
+        "SINGLE_OWNER_SOL",
+        "BLOCK"
+      ]
+    },
+    "maximum_control_decisions": {
+      "minimum": 1,
+      "maximum": 100000,
+      "type": "integer"
+    },
+    "maximum_usage_records": {
+      "minimum": 0,
+      "maximum": 100000,
+      "type": "integer"
+    },
+    "maximum_authority_depth": {
+      "minimum": 1,
+      "maximum": 64,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "repository_identity_content_sha256",
+    "worktree_key",
+    "starting_state_content_sha256",
+    "objective_sha256",
+    "contract_sha256",
+    "budget_sha256",
+    "route_map_sha256",
+    "route_map_approval_sha256",
+    "reducer_policy_content_sha256",
+    "authority_lock_sha256",
+    "baseline_approval_sha256",
+    "scope_sha256",
+    "acceptance_sha256",
+    "plan_approval_sha256",
+    "task_graph_sha256",
+    "tool_policy_content_sha256",
+    "command_catalog_content_sha256",
+    "route_map_approved",
+    "production_authority",
+    "requested_mode",
+    "route_facts",
+    "obligations",
+    "limits",
+    "role_reservation_envelopes",
+    "failure_action_table_version",
+    "progress_rule_version",
+    "contract_gate_rule_version",
+    "route_selection_rule_version",
+    "insufficient_routing_evidence",
+    "maximum_control_decisions",
+    "maximum_usage_records",
+    "maximum_authority_depth"
+  ]
+}

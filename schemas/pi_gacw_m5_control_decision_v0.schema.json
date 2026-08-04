@@ -1,0 +1,952 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_m5_control_decision_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_m5_control_decision_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "objective_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "contract_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "budget_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "reducer_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "scope_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "acceptance_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "tool_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "command_catalog_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "usage_set_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "usage_evidence_content_sha256": {
+      "uniqueItems": true,
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      }
+    },
+    "budget": {
+      "minItems": 8,
+      "maxItems": 8,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "WORKER_INVOCATION",
+              "MODEL_TURN",
+              "PROVIDER_REQUEST",
+              "TOOL_CALL",
+              "INPUT_TOKEN",
+              "OUTPUT_TOKEN",
+              "COST_MICROUSD",
+              "WALL_TIME_MS"
+            ]
+          },
+          "hard_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "soft_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "opening_amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "validated_amount": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "observed_reported_amount": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "estimated_amount": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "active_reservation_amount": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "reconciled_amount": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "effective_charged_amount": {
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "hard_remaining": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "soft_remaining": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enforcement_class": {
+            "type": "string",
+            "enum": [
+              "HARD_ENFORCEABLE",
+              "SOFT_ENFORCEABLE",
+              "OBSERVABLE_ONLY",
+              "ESTIMATED_ONLY",
+              "UNAVAILABLE"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "BELOW_SOFT_LIMIT",
+              "SOFT_LIMIT_REACHED",
+              "HARD_LIMIT_REACHED",
+              "UNAVAILABLE"
+            ]
+          }
+        },
+        "required": [
+          "dimension",
+          "hard_limit",
+          "soft_limit",
+          "opening_amount",
+          "validated_amount",
+          "observed_reported_amount",
+          "estimated_amount",
+          "active_reservation_amount",
+          "reconciled_amount",
+          "effective_charged_amount",
+          "hard_remaining",
+          "soft_remaining",
+          "enforcement_class",
+          "status"
+        ]
+      }
+    },
+    "progress": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "classification": {
+          "type": "string",
+          "enum": [
+            "PROGRESS",
+            "NO_PROGRESS"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "STATE_TRANSITION",
+                "APPROVED_PLAN_REVISION",
+                "VALID_REPOSITORY_DELTA",
+                "NEW_TEST_EVIDENCE",
+                "EVIDENCE_BACKED_DIAGNOSIS",
+                "FAILURE_RECLASSIFICATION",
+                "CONTEXT_RESTORATION",
+                "TERMINAL_RESULT"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "no_progress_reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "IDENTICAL_REPORT",
+                "SAME_NORMALIZED_FAILURE_WITH_NO_DELTA",
+                "REPEATED_TEST_WITH_NO_NEW_EVIDENCE",
+                "OUT_OF_SCOPE_PATCH",
+                "PROSE_WITHOUT_EVIDENCE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prior_state_or_decision_content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_content_sha256": {
+          "uniqueItems": true,
+          "maxItems": 100000,
+          "type": "array",
+          "items": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "evidence_set_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "prior_failure_signature": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_failure_signature": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "classification",
+        "kind",
+        "no_progress_reason",
+        "prior_state_or_decision_content_sha256",
+        "evidence_content_sha256",
+        "evidence_set_sha256",
+        "prior_failure_signature",
+        "current_failure_signature"
+      ]
+    },
+    "failures": {
+      "maxItems": 1024,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "failure_identity": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "source_layer": {
+            "type": "string",
+            "enum": [
+              "M1",
+              "M2",
+              "M3",
+              "M4",
+              "M5",
+              "CONTROLLER"
+            ]
+          },
+          "source_error_code": {
+            "minLength": 1,
+            "maxLength": 128,
+            "type": "string"
+          },
+          "source_record_content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "normalized_signature": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "operation_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "scope_identity": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "path_identity": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "repository_identity": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "worktree_key": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "control_class": {
+            "type": "string",
+            "enum": [
+              "TRANSIENT_TOOL_FAILURE",
+              "LOCAL_IMPLEMENTATION_DEFECT",
+              "COMMAND_CONTRACT_ERROR",
+              "CONTEXT_MISSING",
+              "PLAN_INCORRECT",
+              "AUTHORITY_CONTRADICTION",
+              "SCOPE_EXPANSION_REQUIRED",
+              "STATE_DRIFT",
+              "CONCURRENT_WRITER",
+              "TEST_INTEGRITY_VIOLATION",
+              "CLEANUP_UNCERTAIN",
+              "SAME_FAILURE_TWICE",
+              "CLOSEOUT_DEFECT",
+              "PROCESS_CRASH",
+              "MODEL_UNAVAILABLE",
+              "BUDGET_EXHAUSTED",
+              "CONTRACT_UNSATISFIABLE",
+              "ROUTE_UNAVAILABLE",
+              "CAPABILITY_UNAVAILABLE",
+              "MUTATION_UNCERTAIN",
+              "EVIDENCE_INVALID",
+              "EVIDENCE_PUBLICATION_FAILURE",
+              "STATE_PUBLICATION_FAILURE",
+              "INTERNAL_CONTROL_ERROR"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "CONTINUE_ADMITTED_OPERATION",
+              "RETRY_TRANSIENT_TOOL_ONCE",
+              "SECOND_LUNA_ATTEMPT",
+              "CORRECT_COMMAND_ONCE",
+              "RESTORE_CONTEXT_ONCE",
+              "CONSTRAINED_REPLAN",
+              "RUN_RESERVED_CLOSEOUT",
+              "REQUEST_OWNER_DECISION",
+              "BLOCK"
+            ]
+          },
+          "occurrence_count": {
+            "minimum": 1,
+            "maximum": 100000,
+            "type": "integer"
+          },
+          "resolution_evidence_content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "failure_identity",
+          "source_layer",
+          "source_error_code",
+          "source_record_content_sha256",
+          "normalized_signature",
+          "control_class",
+          "action",
+          "occurrence_count",
+          "resolution_evidence_content_sha256"
+        ]
+      }
+    },
+    "contract_gate": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "SATISFIED",
+            "SATISFIABLE",
+            "CURRENTLY_BLOCKED",
+            "UNSATISFIABLE",
+            "INSUFFICIENT_AUTHORITY"
+          ]
+        },
+        "detections": {
+          "maxItems": 13,
+          "type": "array",
+          "items": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "MISSING_DEPENDENCY",
+                  "CYCLIC_DEPENDENCY",
+                  "MISSING_PRODUCER",
+                  "AMBIGUOUS_PRODUCER",
+                  "FUTURE_STAGE_DEPENDENCY",
+                  "REQUIRED_OUTPUT_UNAVAILABLE",
+                  "IDENTITY_FORMAT_MISMATCH",
+                  "OVERLAPPING_WRITE_OWNERSHIP",
+                  "ACCEPTANCE_WITHOUT_EVIDENCE",
+                  "VERIFICATION_COMMAND_UNAVAILABLE",
+                  "ROUTE_UNAVAILABLE",
+                  "BUDGET_ENVELOPE_INFEASIBLE",
+                  "UNSUPPORTED_CONTRACT_CONSTRUCT"
+                ]
+              },
+              "evidence_content_sha256": {
+                "anyOf": [
+                  {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "evidence_content_sha256"
+            ]
+          }
+        },
+        "satisfied_obligation_descriptor_sha256": {
+          "uniqueItems": true,
+          "maxItems": 100000,
+          "type": "array",
+          "items": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "pending_obligation_descriptor_sha256": {
+          "uniqueItems": true,
+          "maxItems": 100000,
+          "type": "array",
+          "items": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "detections",
+        "satisfied_obligation_descriptor_sha256",
+        "pending_obligation_descriptor_sha256"
+      ]
+    },
+    "obligation_evidence": {
+      "maxItems": 20000,
+      "uniqueItems": true,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "descriptor_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "value": {
+            "minLength": 1,
+            "maxLength": 16384,
+            "type": "string"
+          },
+          "evidence_content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "descriptor_sha256",
+          "value",
+          "evidence_content_sha256"
+        ]
+      }
+    },
+    "available_logical_roles": {
+      "uniqueItems": true,
+      "maxItems": 7,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "SOL_OWNER",
+          "SOL_PLANNER",
+          "SOL_REPLAN",
+          "SOL_CLOSEOUT",
+          "LUNA_EXECUTOR",
+          "BENCHMARK_VERIFIER",
+          "BENCHMARK_SELECTOR"
+        ]
+      }
+    },
+    "operation_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "transition_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "decision_kind": {
+      "type": "string",
+      "enum": [
+        "INITIAL_MODE",
+        "CONTINUATION"
+      ]
+    },
+    "intent": {
+      "type": "string",
+      "enum": [
+        "VALIDATE_CONTRACT",
+        "SELECT_ROUTE",
+        "AUTHORIZE_WORK",
+        "AUTHORIZE_CONTINUATION",
+        "EVALUATE_TERMINAL",
+        "BLOCK"
+      ]
+    },
+    "routes": {
+      "minItems": 3,
+      "maxItems": 9,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "enum": [
+              "DIRECT_LUNA_HIGH",
+              "SINGLE_OWNER_SOL",
+              "ROUTED_DAG",
+              "CONTINUE_ADMITTED_OPERATION",
+              "RETRY_TRANSIENT_TOOL_ONCE",
+              "SECOND_LUNA_ATTEMPT",
+              "CORRECT_COMMAND_ONCE",
+              "RESTORE_CONTEXT_ONCE",
+              "CONSTRAINED_REPLAN",
+              "RUN_RESERVED_CLOSEOUT",
+              "REQUEST_OWNER_DECISION",
+              "BLOCK"
+            ]
+          },
+          "eligibility": {
+            "type": "string",
+            "enum": [
+              "ELIGIBLE",
+              "INELIGIBLE",
+              "MISSING_AUTHORITY"
+            ]
+          },
+          "reasons": {
+            "uniqueItems": true,
+            "maxItems": 32,
+            "type": "array",
+            "items": {
+              "minLength": 1,
+              "maxLength": 128,
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "route",
+          "eligibility",
+          "reasons"
+        ]
+      }
+    },
+    "selected_route": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "DIRECT_LUNA_HIGH",
+            "SINGLE_OWNER_SOL",
+            "ROUTED_DAG",
+            "CONTINUE_ADMITTED_OPERATION",
+            "RETRY_TRANSIENT_TOOL_ONCE",
+            "SECOND_LUNA_ATTEMPT",
+            "CORRECT_COMMAND_ONCE",
+            "RESTORE_CONTEXT_ONCE",
+            "CONSTRAINED_REPLAN",
+            "RUN_RESERVED_CLOSEOUT",
+            "REQUEST_OWNER_DECISION",
+            "BLOCK"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reservation": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "logical_role": {
+              "type": "string",
+              "enum": [
+                "SOL_OWNER",
+                "SOL_PLANNER",
+                "SOL_REPLAN",
+                "SOL_CLOSEOUT",
+                "LUNA_EXECUTOR",
+                "BENCHMARK_VERIFIER",
+                "BENCHMARK_SELECTOR"
+              ]
+            },
+            "purpose": {
+              "type": "string",
+              "enum": [
+                "ORDINARY",
+                "REQUIRED_CLOSEOUT"
+              ]
+            },
+            "future_operation_id": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+              "type": "string"
+            },
+            "reservation_decision_key": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "reserved_state_content_sha256": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "reserved_policy_content_sha256": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "reserved_route": {
+              "type": "string",
+              "enum": [
+                "DIRECT_LUNA_HIGH",
+                "SINGLE_OWNER_SOL",
+                "ROUTED_DAG",
+                "CONTINUE_ADMITTED_OPERATION",
+                "RETRY_TRANSIENT_TOOL_ONCE",
+                "SECOND_LUNA_ATTEMPT",
+                "CORRECT_COMMAND_ONCE",
+                "RESTORE_CONTEXT_ONCE",
+                "CONSTRAINED_REPLAN",
+                "RUN_RESERVED_CLOSEOUT",
+                "REQUEST_OWNER_DECISION",
+                "BLOCK"
+              ]
+            },
+            "amounts": {
+              "minItems": 1,
+              "maxItems": 8,
+              "type": "array",
+              "items": {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "dimension": {
+                    "type": "string",
+                    "enum": [
+                      "WORKER_INVOCATION",
+                      "MODEL_TURN",
+                      "PROVIDER_REQUEST",
+                      "TOOL_CALL",
+                      "INPUT_TOKEN",
+                      "OUTPUT_TOKEN",
+                      "COST_MICROUSD",
+                      "WALL_TIME_MS"
+                    ]
+                  },
+                  "amount": {
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "dimension",
+                  "amount"
+                ]
+              }
+            },
+            "source_envelope_index": {
+              "minimum": 0,
+              "maximum": 15,
+              "type": "integer"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "ACTIVE",
+                "RECONCILED",
+                "RELEASED",
+                "OUTCOME_UNCERTAIN"
+              ]
+            },
+            "reconciliation_evidence_content_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "logical_role",
+            "purpose",
+            "amounts",
+            "source_envelope_index",
+            "status",
+            "reconciliation_evidence_content_sha256"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "AUTHORIZE",
+        "PASS",
+        "BLOCK"
+      ]
+    },
+    "blocking_reason": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "maxLength": 255,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pass_authority": {
+      "type": "boolean"
+    },
+    "transition_event": {
+      "anyOf": [
+        {
+          "$ref": "https://pi-gacw.invalid/schemas/pi_gacw_transition_event_v0.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "predicted_next_state_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "prior_relevant_decision_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "request_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "decision_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "repository_identity_content_sha256",
+    "worktree_key",
+    "current_state_content_sha256",
+    "policy_content_sha256",
+    "objective_sha256",
+    "contract_sha256",
+    "budget_sha256",
+    "route_map_sha256",
+    "route_map_approval_sha256",
+    "reducer_policy_content_sha256",
+    "scope_sha256",
+    "acceptance_sha256",
+    "tool_policy_content_sha256",
+    "command_catalog_content_sha256",
+    "usage_set_sha256",
+    "usage_evidence_content_sha256",
+    "budget",
+    "progress",
+    "failures",
+    "contract_gate",
+    "obligation_evidence",
+    "available_logical_roles",
+    "operation_id",
+    "decision_kind",
+    "intent",
+    "routes",
+    "selected_route",
+    "reservation",
+    "outcome",
+    "blocking_reason",
+    "pass_authority",
+    "transition_event",
+    "predicted_next_state_content_sha256",
+    "prior_relevant_decision_content_sha256",
+    "decision_key"
+  ]
+}

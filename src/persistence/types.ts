@@ -79,7 +79,10 @@ export type StoredObjectKind =
   | "M4_PATCH_REQUEST"
   | "M4_TOOL_RESULT"
   | "M4_MUTATION_RECEIPT"
-  | "M4_COMMAND_RESULT";
+  | "M4_COMMAND_RESULT"
+  | "M5_CONTROL_POLICY"
+  | "M5_USAGE_EVIDENCE"
+  | "M5_CONTROL_DECISION";
 
 export interface InspectedObject {
   readonly kind: StoredObjectKind;

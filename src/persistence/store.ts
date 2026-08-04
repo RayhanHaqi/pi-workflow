@@ -1,8 +1,11 @@
-import { constants, type Stats } from "node:fs";
-import { lstat, open, readFile, readdir } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
+import { constants, readFileSync, type Stats } from "node:fs";
+import { link, lstat, open, readFile, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { canonicalize } from "../canonical-json/index.js";
+import { assertControlPolicyAuthority } from "../control/policy.js";
 import { assertSha256Digest, sha256Bytes, type Sha256Digest } from "../identity/index.js";
 import {
   assertDocumentValid,
@@ -19,6 +22,7 @@ import {
   type M3LockDiagnosticDocument,
   type M3PostflightDocument,
   type M3PreflightDocument,
+  type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
@@ -31,10 +35,16 @@ import {
   type M4SecureFilesystemCapabilityDocument,
   type M4ToolRequestDocument,
   type M4ToolResultDocument,
+  type M5ControlDecisionDocument,
+  type M5ControlPolicyDocument,
+  type M5UsageEvidenceDocument,
   type PersistedStatePointerDocument,
   type ProcessInterruptionDocument,
   type ProcessMetadata,
   type ReducerPolicy,
+  type RouteMapApprovalDocument,
+  type RouteMapDocument,
+  type ContractDocument,
   type SchemaId,
   type StateTransitionCommitDocument,
   type TransitionEvent,
@@ -43,6 +53,7 @@ import {
 import { createInitialState, reduceState } from "../state-machine/index.js";
 import { classifyManagedAuthority } from "./managed-authority.js";
 import { classifyM4Authority } from "./m4-authority.js";
+import { classifyM5Authority } from "./m5-authority.js";
 import {
   assertPrivateDirectory,
   assertRegularPrivateFile,
@@ -51,6 +62,7 @@ import {
   replaceStateFile,
 } from "./atomic.js";
 import { StateStoreError, stateStoreError } from "./errors.js";
+import { m5PersistenceCheckpoint } from "./m5-test-hooks.js";
 import type {
   CommitTransitionInput,
   CommittedRunState,
@@ -106,6 +118,9 @@ interface RunLayout {
   readonly toolResultDirectory: string;
   readonly mutationReceiptDirectory: string;
   readonly commandResultDirectory: string;
+  readonly m5ControlPolicyDirectory: string;
+  readonly m5UsageEvidenceDirectory: string;
+  readonly m5ControlDecisionDirectory: string;
   readonly commitsDirectory: string;
 }
 
@@ -139,6 +154,9 @@ interface JsonKindDefinition {
     | "toolResultDirectory"
     | "mutationReceiptDirectory"
     | "commandResultDirectory"
+    | "m5ControlPolicyDirectory"
+    | "m5UsageEvidenceDirectory"
+    | "m5ControlDecisionDirectory"
     | "commitsDirectory"
   >;
 }
@@ -168,6 +186,9 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M4_TOOL_RESULT", schemaId: "pi_gacw_tool_result_v0", directory: "toolResultDirectory" },
   { kind: "M4_MUTATION_RECEIPT", schemaId: "pi_gacw_mutation_receipt_v0", directory: "mutationReceiptDirectory" },
   { kind: "M4_COMMAND_RESULT", schemaId: "pi_gacw_command_result_v0", directory: "commandResultDirectory" },
+  { kind: "M5_CONTROL_POLICY", schemaId: "pi_gacw_m5_control_policy_v0", directory: "m5ControlPolicyDirectory" },
+  { kind: "M5_USAGE_EVIDENCE", schemaId: "pi_gacw_m5_usage_evidence_v0", directory: "m5UsageEvidenceDirectory" },
+  { kind: "M5_CONTROL_DECISION", schemaId: "pi_gacw_m5_control_decision_v0", directory: "m5ControlDecisionDirectory" },
 ]);
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
@@ -318,8 +339,159 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     toolResultDirectory: join(recordsDirectory, "tool-results"),
     mutationReceiptDirectory: join(recordsDirectory, "mutation-receipts"),
     commandResultDirectory: join(recordsDirectory, "command-results"),
+    m5ControlPolicyDirectory: join(recordsDirectory, "m5-control-policies"),
+    m5UsageEvidenceDirectory: join(recordsDirectory, "m5-usage-evidence"),
+    m5ControlDecisionDirectory: join(recordsDirectory, "m5-control-decisions"),
     commitsDirectory: join(runDirectory, "commits"),
   };
+}
+
+interface RunMutationOwner {
+  readonly pid: number;
+  readonly lock_id: string;
+  readonly process_start_ticks: string;
+  readonly device: bigint;
+  readonly inode: bigint;
+}
+
+const runMutationContext = new AsyncLocalStorage<ReadonlySet<string>>();
+
+function runMutationLockPath(layout: RunLayout): string {
+  const runKey = sha256Bytes(Buffer.from(`pi-gacw-run-mutation:${basename(layout.runDirectory)}`, "utf8"));
+  return join(layout.locksDirectory, `${runKey.slice("sha256:".length)}.lock`);
+}
+
+function processStartTicks(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return undefined;
+    const fields = stat.slice(close + 2).trim().split(/\s+/);
+    const start = fields[19];
+    return start !== undefined && /^[0-9]+$/.test(start) ? start : undefined;
+  } catch { return undefined; }
+}
+
+function isProcessOwnerAlive(owner: Pick<RunMutationOwner, "pid" | "process_start_ticks">): boolean {
+  try { process.kill(owner.pid, 0); }
+  catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; }
+  return processStartTicks(owner.pid) === owner.process_start_ticks;
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY);
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function readRunMutationOwner(path: string): Promise<RunMutationOwner | undefined> {
+  let before: Stats; let after: Stats; let value: unknown;
+  try {
+    before = await lstat(path, { bigint: true }) as unknown as Stats;
+    value = JSON.parse((await readFile(path, "utf8")).trim());
+    after = await lstat(path, { bigint: true }) as unknown as Stats;
+  } catch { return undefined; }
+  const beforeBig = before as unknown as { dev: bigint; ino: bigint; isFile(): boolean; mode: bigint };
+  const afterBig = after as unknown as { dev: bigint; ino: bigint; isFile(): boolean; mode: bigint };
+  if (!beforeBig.isFile() || beforeBig.dev !== afterBig.dev || beforeBig.ino !== afterBig.ino ||
+      value === null || typeof value !== "object" || Array.isArray(value) || canonicalize(Object.keys(value).sort()) !== canonicalize(["lock_id", "pid", "process_start_ticks"]) ||
+      !Number.isInteger((value as Record<string, unknown>)["pid"]) || ((value as Record<string, unknown>)["pid"] as number) < 1 ||
+      typeof (value as Record<string, unknown>)["lock_id"] !== "string" || !/^[0-9a-f]{32}$/.test((value as Record<string, unknown>)["lock_id"] as string) ||
+      typeof (value as Record<string, unknown>)["process_start_ticks"] !== "string" || !/^[0-9]+$/.test((value as Record<string, unknown>)["process_start_ticks"] as string)) return undefined;
+  return { pid: (value as Record<string, unknown>)["pid"] as number, lock_id: (value as Record<string, unknown>)["lock_id"] as string,
+    process_start_ticks: (value as Record<string, unknown>)["process_start_ticks"] as string, device: beforeBig.dev, inode: beforeBig.ino };
+}
+
+async function sameRunMutationOwner(path: string, owner: RunMutationOwner): Promise<boolean> {
+  const current = await readRunMutationOwner(path);
+  return current !== undefined && current.pid === owner.pid && current.lock_id === owner.lock_id &&
+    current.process_start_ticks === owner.process_start_ticks && current.device === owner.device && current.inode === owner.inode;
+}
+
+function runMutationOwnerCandidatePath(layout: RunLayout, lockId: string): string {
+  const digest = sha256Bytes(Buffer.from(`pi-gacw-run-owner:${lockId}`, "utf8")).slice("sha256:".length);
+  return join(layout.locksDirectory, `${digest}.owner.json`);
+}
+
+async function removeStaleOwnerCandidate(layout: RunLayout, owner: RunMutationOwner): Promise<void> {
+  const candidatePath = runMutationOwnerCandidatePath(layout, owner.lock_id);
+  try {
+    const stat = await lstat(candidatePath, { bigint: true }) as unknown as { dev: bigint; ino: bigint; isFile(): boolean };
+    if (!stat.isFile() || stat.dev !== owner.device || stat.ino !== owner.inode) return;
+    await unlink(candidatePath); await syncDirectory(layout.locksDirectory);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function acquireRunMutationLock(layout: RunLayout): Promise<() => Promise<void>> {
+  await assertPrivateDirectory(layout.locksDirectory);
+  const path = runMutationLockPath(layout);
+  const processStart = processStartTicks(process.pid);
+  if (processStart === undefined) throw new StateStoreError("CONCURRENT_WRITER", "Current process start identity is unavailable");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const lockId = randomBytes(16).toString("hex");
+    const candidatePath = runMutationOwnerCandidatePath(layout, lockId);
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(candidatePath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      await m5PersistenceCheckpoint("RUN_LOCK_CANDIDATE_CREATED", candidatePath);
+      await handle.writeFile(`${canonicalize({ lock_id: lockId, pid: process.pid, process_start_ticks: processStart })}\n`, "utf8");
+      await m5PersistenceCheckpoint("RUN_LOCK_OWNER_METADATA_WRITTEN", candidatePath);
+      await handle.sync();
+      await m5PersistenceCheckpoint("RUN_LOCK_CANDIDATE_FSYNCED", candidatePath);
+      await handle.close(); handle = undefined;
+      await m5PersistenceCheckpoint("RUN_LOCK_CANDIDATE_READY", candidatePath);
+      await m5PersistenceCheckpoint("RUN_LOCK_BEFORE_NOREPLACE_PUBLICATION", candidatePath);
+      await link(candidatePath, path);
+      await m5PersistenceCheckpoint("RUN_LOCK_AFTER_NOREPLACE_PUBLICATION", path);
+      await syncDirectory(layout.locksDirectory);
+      const owner = await readRunMutationOwner(path);
+      if (owner === undefined || owner.pid !== process.pid || owner.lock_id !== lockId || owner.process_start_ticks !== processStart) throw new StateStoreError("CONCURRENT_WRITER", "Published run lock owner metadata is incomplete");
+      await unlink(candidatePath); await syncDirectory(layout.locksDirectory);
+      await m5PersistenceCheckpoint("RUN_LOCK_OWNER_PUBLISHED", path);
+      let released = false;
+      return async () => {
+        if (released) return; released = true;
+        if (!await sameRunMutationOwner(path, owner)) throw new StateStoreError("LOCK_RELEASE_FAILED", "Run mutation lock identity changed before release");
+        try { await unlink(path); await syncDirectory(layout.locksDirectory); }
+        catch (error: unknown) { throw stateStoreError("LOCK_RELEASE_FAILED", `Cannot release run mutation lock ${path}`, error); }
+      };
+    } catch (error: unknown) {
+      if (handle !== undefined) try { await handle.close(); } catch { /* preserve primary failure */ }
+      try { await unlink(candidatePath); } catch (cleanup: unknown) { if ((cleanup as NodeJS.ErrnoException).code !== "ENOENT") throw cleanup; }
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const owner = await readRunMutationOwner(path);
+      if (owner === undefined) throw new StateStoreError("CONCURRENT_WRITER", "Run mutation lock owner metadata is malformed or publication is incomplete");
+      if (isProcessOwnerAlive(owner)) throw new StateStoreError("CONCURRENT_WRITER", "Another live process owns the run mutation lock");
+      await m5PersistenceCheckpoint("RUN_LOCK_STALE_OBSERVED", owner.lock_id);
+      await m5PersistenceCheckpoint("RUN_LOCK_BEFORE_STALE_REVALIDATION", owner.lock_id);
+      if (!await sameRunMutationOwner(path, owner)) throw new StateStoreError("CONCURRENT_WRITER", "Stale run mutation lock changed during inspection");
+      await m5PersistenceCheckpoint("RUN_LOCK_AFTER_STALE_REVALIDATION", owner.lock_id);
+      await m5PersistenceCheckpoint("RUN_LOCK_BEFORE_STALE_REMOVE", owner.lock_id);
+      await m5PersistenceCheckpoint("RUN_LOCK_BEFORE_STALE_UNLINK", owner.lock_id);
+      if (!await sameRunMutationOwner(path, owner)) throw new StateStoreError("CONCURRENT_WRITER", "Stale run mutation lock was replaced before removal");
+      try {
+        await unlink(path); await syncDirectory(layout.locksDirectory);
+        await removeStaleOwnerCandidate(layout, owner);
+        await m5PersistenceCheckpoint("RUN_LOCK_AFTER_STALE_UNLINK", owner.lock_id);
+      }
+      catch (unlinkError: unknown) { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw stateStoreError("CONCURRENT_WRITER", "A stale run mutation lock could not be removed", unlinkError); }
+    }
+  }
+  throw new StateStoreError("CONCURRENT_WRITER", "Run mutation lock acquisition was inconclusive");
+}
+
+export async function withRunExclusive<T>(input: RunStorageLocation, operation: () => Promise<T>): Promise<T> {
+  const layout = assertLocation(input);
+  const path = runMutationLockPath(layout);
+  const held = runMutationContext.getStore();
+  if (held?.has(path) === true) return operation();
+  const release = await acquireRunMutationLock(layout);
+  try {
+    return await runMutationContext.run(new Set([...(held ?? []), path]), operation);
+  } finally {
+    await release();
+  }
 }
 
 function digestHex(digest: string): string {
@@ -404,6 +576,9 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.toolResultDirectory);
   await ensurePrivateDirectory(layout.mutationReceiptDirectory);
   await ensurePrivateDirectory(layout.commandResultDirectory);
+  await ensurePrivateDirectory(layout.m5ControlPolicyDirectory);
+  await ensurePrivateDirectory(layout.m5UsageEvidenceDirectory);
+  await ensurePrivateDirectory(layout.m5ControlDecisionDirectory);
   await ensurePrivateDirectory(layout.commitsDirectory);
 }
 
@@ -441,6 +616,9 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
     layout.toolResultDirectory,
     layout.mutationReceiptDirectory,
     layout.commandResultDirectory,
+    layout.m5ControlPolicyDirectory,
+    layout.m5UsageEvidenceDirectory,
+    layout.m5ControlDecisionDirectory,
     layout.commitsDirectory,
   ]) {
     await assertPrivateDirectory(directory);
@@ -1028,6 +1206,9 @@ async function scanLayout(
     "command-results",
     "transition-events",
     "workflow-states",
+    "m5-control-policies",
+    "m5-usage-evidence",
+    "m5-control-decisions",
   ].sort();
   const recordChildren = (await readdir(layout.recordsDirectory)).sort();
   if (canonicalize(recordChildren) !== canonicalize(expectedRecordNames)) {
@@ -1093,7 +1274,9 @@ const M4_MANAGED_KINDS = new Set<StoredObjectKind>([
   "M4_TOOL_REQUEST", "M4_PATCH_REQUEST", "M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT",
 ]);
 
-const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS]);
+const M5_MANAGED_KINDS = new Set<StoredObjectKind>(["M5_CONTROL_POLICY", "M5_USAGE_EVIDENCE", "M5_CONTROL_DECISION"]);
+
+const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS]);
 
 async function terminalAuthorityManagedObjects(
   layout: RunLayout,
@@ -1141,8 +1324,19 @@ async function classifyManagedRecords(
   const toolResults = new Map<string, M4ToolResultDocument>();
   const mutationReceipts = new Map<string, M4MutationReceiptDocument>();
   const commandResults = new Map<string, M4CommandResultDocument>();
+  const workflowStates = new Map<string, WorkflowState>();
+  const reducerPolicies = new Map<string, ReducerPolicy>();
+  const m5Policies = new Map<string, M5ControlPolicyDocument>();
+  const m5Usage = new Map<string, M5UsageEvidenceDocument>();
+  const m5Decisions = new Map<string, M5ControlDecisionDocument>();
+  const transitionEvents = new Map<string, TransitionEvent>();
+  const transitionCommits = new Map<string, StateTransitionCommitDocument>();
   for (const object of objects) {
-    if (object.kind === "M3_BASELINE") baselines.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    if (object.kind === "WORKFLOW_STATE") workflowStates.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "TRANSITION_EVENT") transitionEvents.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "TRANSITION_COMMIT") transitionCommits.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "REDUCER_POLICY") reducerPolicies.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_BASELINE") baselines.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_BASELINE_APPROVAL") approvals.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_LOCK_ACQUISITION") lockAcquisitions.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_LOCK_DIAGNOSTIC") lockDiagnostics.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
@@ -1163,6 +1357,9 @@ async function classifyManagedRecords(
     else if (object.kind === "M4_TOOL_RESULT") toolResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M4_MUTATION_RECEIPT") mutationReceipts.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M4_COMMAND_RESULT") commandResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M5_CONTROL_POLICY") m5Policies.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M5_USAGE_EVIDENCE") m5Usage.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M5_CONTROL_DECISION") m5Decisions.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
       try {
         const bytes = await readRawEvidence(layout, object.contentSha256);
@@ -1198,7 +1395,84 @@ async function classifyManagedRecords(
     runId: basename(layout.runDirectory), objects, m3Classifications: m3, baselines, locks: lockAcquisitions, tokens, postflights,
     secureCapabilities, sandboxCapabilities, policies, catalogs, toolRequests, patchRequests, toolResults, mutationReceipts, commandResults,
   });
-  return [...m3, ...m4].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
+  const reachableRawEvidence = new Set([...graph.reachable.values()].filter((entry) => entry.kind === "RAW_EVIDENCE").map((entry) => entry.contentSha256));
+  const committedWorkflowStateDigests = new Set([...graph.reachable.values()].filter((entry) => entry.kind === "WORKFLOW_STATE").map((entry) => entry.contentSha256));
+  const typedTransitionDecisionDigests = new Set<string>();
+  const runAuthorityValidatedPolicyDigests = new Set<string>();
+  const parseTypedEvidence = async <T>(digest: string, schemaId: SchemaId): Promise<T | undefined> => {
+    try {
+      const bytes = await readRawEvidence(layout, digest);
+      const value: unknown = JSON.parse(bytes.toString("utf8"));
+      assertDocumentValid(schemaId, value);
+      if (!bytes.equals(canonicalJsonBytes(value))) return undefined;
+      return value as T;
+    } catch { return undefined; }
+  };
+  for (const commit of transitionCommits.values()) {
+    const commitObject = objectDescriptor(layout, "TRANSITION_COMMIT", commit.content_sha256 as Sha256Digest);
+    if (!graph.reachable.has(commitObject.relativePath) || commit.commit_kind !== "TRANSITION") continue;
+    const manifest = await readJsonDocument<EvidenceManifestDocument>(layout, "EVIDENCE_MANIFEST", commit.evidence_manifest_content_sha256);
+    let repository: M3RepositoryIdentityDocument | undefined;
+    let contract: ContractDocument | undefined;
+    let routeMap: RouteMapDocument | undefined;
+    let routeMapApproval: RouteMapApprovalDocument | undefined;
+    const decisionEvidence = new Set<string>();
+    for (const entry of manifest.entries) {
+      const metadata = await readJsonDocument<EvidenceMetadataDocument>(layout, "EVIDENCE_METADATA", entry.metadata_content_sha256);
+      if (metadata.media_type === "application/vnd.pi-gacw.m5-control-decision+json") decisionEvidence.add(entry.evidence_sha256);
+      else if (metadata.media_type === "application/vnd.pi-gacw.repository-identity+json") repository = await parseTypedEvidence(entry.evidence_sha256, "pi_gacw_repository_identity_v0");
+      else if (metadata.media_type === "application/vnd.pi-gacw.contract+json") contract = await parseTypedEvidence(entry.evidence_sha256, "pi_gacw_contract_v0");
+      else if (metadata.media_type === "application/vnd.pi-gacw.route-map+json") routeMap = await parseTypedEvidence(entry.evidence_sha256, "pi_gacw_route_map_v0");
+      else if (metadata.media_type === "application/vnd.pi-gacw.route-map-approval+json") routeMapApproval = await parseTypedEvidence(entry.evidence_sha256, "pi_gacw_route_map_approval_v0");
+    }
+    for (const decision of m5Decisions.values()) {
+      if (!decisionEvidence.has(sha256Bytes(canonicalJsonBytes(decision)))) continue;
+      if (decision.run_id !== commit.run_id || decision.transition_id !== commit.transition_id || decision.current_state_content_sha256 !== commit.previous_workflow_state_content_sha256 ||
+          decision.reducer_policy_content_sha256 !== commit.reducer_policy_content_sha256 || decision.transition_event?.content_sha256 !== commit.transition_event_content_sha256 ||
+          decision.predicted_next_state_content_sha256 !== commit.new_workflow_state_content_sha256) continue;
+      const policy = m5Policies.get(decision.policy_content_sha256);
+      const state = workflowStates.get(decision.current_state_content_sha256);
+      const reducer = reducerPolicies.get(decision.reducer_policy_content_sha256);
+      if (policy === undefined || state === undefined || reducer === undefined || repository === undefined || contract === undefined || routeMap === undefined || routeMapApproval === undefined) continue;
+      try {
+        assertControlPolicyAuthority(policy, state, reducer, commit.run_id, false, { repositoryIdentity: repository, contract, routeMap, routeMapApproval });
+        typedTransitionDecisionDigests.add(decision.content_sha256);
+        runAuthorityValidatedPolicyDigests.add(policy.content_sha256);
+      } catch { /* typed bytes without exact immutable run authority remain unrooted */ }
+    }
+  }
+  const authoritative = (kind: StoredObjectKind, digest: string): boolean => [...m3, ...m4].some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest && entry.classification === "AUTHORITATIVE_MANAGED_RECORD");
+  const authoritativeM4Policies = new Map([...policies].filter(([digest]) => authoritative("M4_TOOL_POLICY", digest)));
+  const authoritativeM4Catalogs = new Map([...catalogs].filter(([digest]) => authoritative("M4_COMMAND_CATALOG", digest)));
+  const m5 = classifyM5Authority({
+    runId: basename(layout.runDirectory), workflowState: graph.currentState, workflowStates, objects, priorClassifications: [...m3, ...m4],
+    policies: m5Policies, usage: m5Usage, decisions: m5Decisions, reducerPolicies, m4Policies: authoritativeM4Policies, m4Catalogs: authoritativeM4Catalogs, reachableRawEvidence, typedTransitionDecisionDigests, runAuthorityValidatedPolicyDigests, committedWorkflowStateDigests,
+    authoritativeSources: {
+      m4CommandResults: [...commandResults.values()].filter((entry) => authoritative("M4_COMMAND_RESULT", entry.content_sha256)),
+      m3StateTokens: [...tokens.values()].filter((entry) => authoritative("M3_REPOSITORY_STATE_TOKEN", entry.content_sha256)),
+      m3Postflights: [...postflights.values()].filter((entry) => authoritative("M3_POSTFLIGHT", entry.content_sha256)),
+      workflowStates: [...workflowStates.values()],
+      transitionEvents: [...transitionEvents.values()].filter((entry) => objects.some((object) => object.kind === "TRANSITION_EVENT" && object.contentSha256 === entry.content_sha256 && graph.reachable.has(object.relativePath))),
+      transitionCommits: [...transitionCommits.values()].filter((entry) => objects.some((object) => object.kind === "TRANSITION_COMMIT" && object.contentSha256 === entry.content_sha256 && graph.reachable.has(object.relativePath))),
+    },
+  });
+  const rootedByM5 = new Set<string>();
+  for (const classification of m5) {
+    if (classification.object.kind !== "M5_CONTROL_DECISION" || classification.classification !== "AUTHORITATIVE_MANAGED_RECORD") continue;
+    const decision = m5Decisions.get(classification.object.contentSha256);
+    if (decision === undefined) continue;
+    for (const digest of decision.progress.evidence_content_sha256) rootedByM5.add(digest);
+    for (const failure of decision.failures) rootedByM5.add(failure.source_record_content_sha256);
+    for (const digest of decision.usage_evidence_content_sha256) {
+      const usage = m5Usage.get(digest);
+      if (usage !== undefined) rootedByM5.add(usage.source_record_content_sha256);
+    }
+  }
+  const promote = (classification: ManagedRecordClassification): ManagedRecordClassification =>
+    rootedByM5.has(classification.object.contentSha256) && classification.classification === "UNREFERENCED_MANAGED_RECORD"
+      ? { ...classification, classification: "AUTHORITATIVE_MANAGED_RECORD", detail: "M5 committed decision roots this predecessor authority" }
+      : classification;
+  return [...m3.map(promote), ...m4.map(promote), ...m5].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
 }
 
 function blockedInspection(
@@ -1269,7 +1543,10 @@ async function inspectRunStorageInternal(
     ...scanned.objects.filter((object) => ALL_MANAGED_KINDS.has(object.kind)),
     ...await terminalAuthorityManagedObjects(layout, scanned.objects, graph),
   ].sort((left, right) => compareText(left.relativePath, right.relativePath) || compareText(left.kind, right.kind));
-  const managedRecordClassifications = await classifyManagedRecords(layout, managedObjects, graph);
+  const managedRecordClassifications = await classifyManagedRecords(layout, [
+    ...scanned.objects,
+    ...managedObjects.filter((object) => object.kind === "M3_TERMINAL_RETENTION_AUTHORITY"),
+  ], graph);
   const uncommittedBaselineBlobs = managedRecordClassifications.filter((entry) =>
     entry.object.kind === "M3_BASELINE_BLOB" && entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION",
   ).map((entry) => entry.object);
@@ -1383,6 +1660,80 @@ async function rereadBeforeStateUpdate(
   }
 }
 
+export type M5ManagedRecordKind = "M5_CONTROL_POLICY" | "M5_USAGE_EVIDENCE" | "M5_CONTROL_DECISION";
+
+/** Package-internal M5 publication boundary. It is intentionally absent from ./persistence. */
+export async function publishM5ManagedRecord(input: RunStorageLocation & {
+  readonly kind: M5ManagedRecordKind;
+  readonly document: M5ControlPolicyDocument | M5UsageEvidenceDocument | M5ControlDecisionDocument;
+}): Promise<{ readonly reused: boolean }> {
+  assertRecord(input, "M5 publication input");
+  assertExactKeys(input, ["stateRoot", "runId", "kind", "document"], "M5 publication input");
+  if (!M5_MANAGED_KINDS.has(input.kind)) throw new StateStoreError("INVALID_ARGUMENT", "Unknown M5 record kind");
+  return withRunExclusive(input, async () => {
+    const layout = assertLocation(input);
+    const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+    requireUsableInspection(inspection);
+    if (inspection.workflowState.phase === "PASS" || inspection.workflowState.phase === "BLOCKED") {
+      throw new StateStoreError("TERMINAL_STATE_IMMUTABLE", "Cannot publish M5 authority to a terminal run");
+    }
+    if (input.document.run_id !== input.runId) throw new StateStoreError("RUN_ID_MISMATCH", "M5 record belongs to another run");
+    const existing = await readM5ManagedRecords(input);
+    if (input.kind === "M5_CONTROL_POLICY") {
+      const document = input.document as M5ControlPolicyDocument;
+      const conflicting = existing.policies.find((entry) => entry.run_id === input.runId && entry.starting_state_content_sha256 === document.starting_state_content_sha256 && entry.content_sha256 !== document.content_sha256);
+      if (conflicting !== undefined) throw new StateStoreError("M5_POLICY_CONFLICT", "A different policy already owns this run and starting state");
+    } else if (input.kind === "M5_USAGE_EVIDENCE") {
+      const document = input.document as M5UsageEvidenceDocument;
+      const conflicting = existing.usage.find((entry) => entry.run_id === input.runId && entry.operation_id === document.operation_id && entry.content_sha256 !== document.content_sha256);
+      if (conflicting !== undefined) throw new StateStoreError("M5_USAGE_CONFLICT", "A different usage measurement already owns this operation");
+    } else {
+      const document = input.document as M5ControlDecisionDocument;
+      const conflicting = existing.decisions.find((entry) => entry.run_id === input.runId && entry.decision_key === document.decision_key && entry.content_sha256 !== document.content_sha256);
+      if (conflicting !== undefined) throw new StateStoreError("M5_DECISION_CONFLICT", "A different immutable decision already owns this decision key");
+    }
+    const before = input.kind === "M5_CONTROL_POLICY" ? "BEFORE_POLICY_PUBLICATION" as const
+      : input.kind === "M5_USAGE_EVIDENCE" ? "BEFORE_USAGE_PUBLICATION" as const : "BEFORE_DECISION_PUBLICATION" as const;
+    const after = input.kind === "M5_CONTROL_POLICY" ? "AFTER_POLICY_PUBLICATION" as const
+      : input.kind === "M5_USAGE_EVIDENCE" ? "AFTER_USAGE_PUBLICATION" as const : "AFTER_DECISION_PUBLICATION" as const;
+    await m5PersistenceCheckpoint(before, input.document.content_sha256);
+    const publication = await publishJsonDocument(layout, input.kind, input.document as unknown as Record<string, unknown>);
+    await readJsonDocument(layout, input.kind, input.document.content_sha256);
+    await m5PersistenceCheckpoint(after, input.document.content_sha256);
+    return detachedFrozen(publication);
+  });
+}
+
+/** Package-internal immutable M5 record loader. */
+export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
+  readonly policies: readonly M5ControlPolicyDocument[];
+  readonly usage: readonly M5UsageEvidenceDocument[];
+  readonly decisions: readonly M5ControlDecisionDocument[];
+  readonly toolPolicies: readonly M4ScopedToolPolicyDocument[];
+  readonly commandCatalogs: readonly M4CommandCatalogDocument[];
+  readonly stateTokens: readonly M3RepositoryStateTokenDocument[];
+  readonly postflights: readonly M3PostflightDocument[];
+}> {
+  const layout = assertLocation(input);
+  await assertExistingLayout(layout);
+  const load = async <T extends Record<string, unknown>>(kind: JsonStoredObjectKind): Promise<T[]> => {
+    const definition = JSON_KIND_BY_NAME.get(kind)!;
+    const names = (await readdir(layout[definition.directory])).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
+    const values: T[] = [];
+    for (const name of names) values.push(await readJsonDocument<T>(layout, kind, `sha256:${name.slice(0, -5)}`));
+    return values;
+  };
+  return detachedFrozen({
+    policies: await load<M5ControlPolicyDocument>("M5_CONTROL_POLICY"),
+    usage: await load<M5UsageEvidenceDocument>("M5_USAGE_EVIDENCE"),
+    decisions: await load<M5ControlDecisionDocument>("M5_CONTROL_DECISION"),
+    toolPolicies: await load<M4ScopedToolPolicyDocument>("M4_TOOL_POLICY"),
+    commandCatalogs: await load<M4CommandCatalogDocument>("M4_COMMAND_CATALOG"),
+    stateTokens: await load<M3RepositoryStateTokenDocument>("M3_REPOSITORY_STATE_TOKEN"),
+    postflights: await load<M3PostflightDocument>("M3_POSTFLIGHT"),
+  });
+}
+
 export async function initializeRunStorage(input: InitializeRunStorageInput): Promise<CommittedRunState> {
   assertRecord(input, "initialize input");
   assertExactKeys(input, ["stateRoot", "runId", "policy", "initialState", "processMetadata"], "initialize input");
@@ -1494,11 +1845,13 @@ async function performCommit(input: PerformCommitInput): Promise<CommittedRunSta
   }
 
   // Phase 1: all raw bytes become immutable before any new JSON record.
+  await m5PersistenceCheckpoint("BEFORE_TRANSITION_EVIDENCE_PUBLICATION", input.transitionId);
   const preparedEvidence = await publishEvidenceBytes(layout, input.evidence);
 
   // Phase 2: metadata and every immutable JSON record required by this transition.
   const receipts = await publishEvidenceMetadata(layout, inspection.runId, preparedEvidence);
   const manifest = identifiedManifest(inspection.runId, receipts);
+  await m5PersistenceCheckpoint("AFTER_TRANSITION_EVIDENCE_PUBLICATION", input.transitionId);
   await publishJsonDocument(layout, "REDUCER_POLICY", input.policy as unknown as Record<string, unknown>);
   await publishJsonDocument(layout, "TRANSITION_EVENT", input.event as unknown as Record<string, unknown>);
   await publishJsonDocument(layout, "WORKFLOW_STATE", nextState as unknown as Record<string, unknown>);
@@ -1547,15 +1900,19 @@ async function performCommit(input: PerformCommitInput): Promise<CommittedRunSta
   if (commit.process_assessment_content_sha256 !== null) {
     await readJsonDocument(layout, "PROCESS_ASSESSMENT", commit.process_assessment_content_sha256);
   }
+  await m5PersistenceCheckpoint("BEFORE_TRANSITION_COMMIT_PUBLICATION", input.transitionId);
   await publishJsonDocument(layout, "TRANSITION_COMMIT", commit as unknown as Record<string, unknown>);
   await readJsonDocument(layout, "TRANSITION_COMMIT", commit.content_sha256);
+  await m5PersistenceCheckpoint("AFTER_TRANSITION_COMMIT_PUBLICATION", input.transitionId);
 
   // One-writer precondition still applies; this catches sequentially observed drift.
   await rereadBeforeStateUpdate(layout, inspection.statePointer, inspection.workflowState);
 
   // Phase 4: state.json is the sole mutable authority and is published last.
   const pointer = reconstructPointer(commit);
+  await m5PersistenceCheckpoint("BEFORE_STATE_POINTER_UPDATE", input.transitionId);
   await replaceStateFile(layout.stateFile, canonicalJsonBytes(pointer));
+  await m5PersistenceCheckpoint("AFTER_STATE_POINTER_UPDATE", input.transitionId);
   return detachedFrozen({ statePointer: pointer, workflowState: nextState, transitionCommit: commit, evidence: receipts });
 }
 
@@ -1577,8 +1934,30 @@ export async function commitTransition(input: CommitTransitionInput): Promise<Co
     ["expectedNextWorkflowStateContentSha256", "evidence"],
     "commit input",
   );
+  const capturedEvidence = captureEvidenceInputs(input.evidence === undefined ? [] : input.evidence);
+  return withRunExclusive(input, () => commitTransitionUnlocked(input, capturedEvidence));
+}
+
+async function commitTransitionUnlocked(input: CommitTransitionInput, capturedEvidence: readonly CapturedEvidenceInput[]): Promise<CommittedRunState> {
+  assertRecord(input, "commit input");
+  assertRequiredAndOptionalKeys(
+    input,
+    [
+      "stateRoot",
+      "runId",
+      "expectedRevision",
+      "expectedStatePointerContentSha256",
+      "expectedWorkflowStateContentSha256",
+      "transitionId",
+      "policy",
+      "event",
+      "processMetadata",
+    ],
+    ["expectedNextWorkflowStateContentSha256", "evidence"],
+    "commit input",
+  );
   const layout = assertLocation(input);
-  const evidence = captureEvidenceInputs(input.evidence === undefined ? [] : input.evidence);
+  const evidence = capturedEvidence;
   const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
   requireUsableInspection(inspection);
   assertExpectedAuthority(
@@ -1609,6 +1988,10 @@ export async function commitTransition(input: CommitTransitionInput): Promise<Co
 }
 
 export async function terminalizeProcessCrash(input: TerminalizeProcessCrashInput): Promise<CommittedRunState> {
+  return withRunExclusive(input, () => terminalizeProcessCrashUnlocked(input));
+}
+
+async function terminalizeProcessCrashUnlocked(input: TerminalizeProcessCrashInput): Promise<CommittedRunState> {
   assertRecord(input, "terminalize input");
   assertExactKeys(
     input,

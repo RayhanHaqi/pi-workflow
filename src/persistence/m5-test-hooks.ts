@@ -1,0 +1,51 @@
+export const M5_PUBLICATION_CHECKPOINTS = Object.freeze([
+  "BEFORE_POLICY_PUBLICATION",
+  "DURING_POLICY_TEMPORARY_WRITE",
+  "AFTER_POLICY_PUBLICATION",
+  "BEFORE_USAGE_PUBLICATION",
+  "DURING_USAGE_TEMPORARY_WRITE",
+  "AFTER_USAGE_PUBLICATION",
+  "BEFORE_DECISION_PUBLICATION",
+  "DURING_DECISION_TEMPORARY_WRITE",
+  "AFTER_DECISION_PUBLICATION",
+  "BEFORE_TRANSITION_EVIDENCE_PUBLICATION",
+  "DURING_TRANSITION_EVIDENCE_PUBLICATION",
+  "AFTER_TRANSITION_EVIDENCE_PUBLICATION",
+  "BEFORE_TRANSITION_COMMIT_PUBLICATION",
+  "DURING_TRANSITION_COMMIT_PUBLICATION",
+  "AFTER_TRANSITION_COMMIT_PUBLICATION",
+  "BEFORE_STATE_POINTER_UPDATE",
+  "DURING_STATE_POINTER_UPDATE",
+  "AFTER_STATE_POINTER_UPDATE",
+  "AFTER_COMMITTED_STATE_BEFORE_RESPONSE",
+  "RUN_LOCK_CANDIDATE_CREATED",
+  "RUN_LOCK_OWNER_METADATA_WRITTEN",
+  "RUN_LOCK_CANDIDATE_FSYNCED",
+  "RUN_LOCK_BEFORE_NOREPLACE_PUBLICATION",
+  "RUN_LOCK_AFTER_NOREPLACE_PUBLICATION",
+  "RUN_LOCK_CANDIDATE_READY",
+  "RUN_LOCK_OWNER_PUBLISHED",
+  "RUN_LOCK_STALE_OBSERVED",
+  "RUN_LOCK_BEFORE_STALE_REVALIDATION",
+  "RUN_LOCK_AFTER_STALE_REVALIDATION",
+  "RUN_LOCK_BEFORE_STALE_REMOVE",
+  "RUN_LOCK_BEFORE_STALE_UNLINK",
+  "RUN_LOCK_AFTER_STALE_UNLINK",
+] as const);
+
+export type M5PublicationCheckpoint = (typeof M5_PUBLICATION_CHECKPOINTS)[number];
+
+export interface M5PersistenceTestHooks {
+  readonly checkpoint?: (checkpoint: M5PublicationCheckpoint, detail: string) => void | Promise<void>;
+}
+
+let hooks: M5PersistenceTestHooks | undefined;
+
+/** Package-internal deterministic M5 process-proof seam; no supported entrypoint exports it. */
+export function configureM5PersistenceTestHooks(next: M5PersistenceTestHooks | undefined): void {
+  hooks = next;
+}
+
+export async function m5PersistenceCheckpoint(checkpoint: M5PublicationCheckpoint, detail: string): Promise<void> {
+  await hooks?.checkpoint?.(checkpoint, detail);
+}

@@ -98,6 +98,9 @@ const canonicalSchemaIds = [
   "pi_gacw_mutation_receipt_v0",
   "pi_gacw_tool_result_v0",
   "pi_gacw_command_result_v0",
+  "pi_gacw_m5_control_policy_v0",
+  "pi_gacw_m5_usage_evidence_v0",
+  "pi_gacw_m5_control_decision_v0",
 ] as const;
 
 const removedRuntimeSchemaExports = [
@@ -173,6 +176,16 @@ const removedRuntimeSchemaExports = [
   "M4MutationReceiptSchema",
   "M4ToolResultSchema",
   "M4CommandResultSchema",
+  "M5ControlPolicySchema",
+  "M5UsageEvidenceSchema",
+  "M5ControlDecisionSchema",
+  "M5_BUDGET_DIMENSIONS",
+  "M5_OPERATION_KINDS",
+  "M5_PROGRESS_KINDS",
+  "M5_NO_PROGRESS_REASONS",
+  "M5_FAILURE_CLASSES",
+  "M5_CONTINUATION_ROUTES",
+  "M5_GATE_CODES",
   "SCHEMA_INVENTORY",
   "EXECUTION_MODES",
   "CONCRETE_EXECUTION_MODES",

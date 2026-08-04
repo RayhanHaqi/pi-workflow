@@ -1,0 +1,216 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_m5_usage_evidence_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_m5_usage_evidence_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "originating_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "operation_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "operation_kind": {
+      "type": "string",
+      "enum": [
+        "WORKER_INVOCATION",
+        "MODEL_TURN",
+        "PROVIDER_REQUEST",
+        "TOOL_CALL"
+      ]
+    },
+    "execution_mode": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "DIRECT_LUNA_HIGH",
+            "SINGLE_OWNER_SOL",
+            "ROUTED_DAG"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "logical_role": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "SOL_OWNER",
+            "SOL_PLANNER",
+            "SOL_REPLAN",
+            "SOL_CLOSEOUT",
+            "LUNA_EXECUTOR",
+            "BENCHMARK_VERIFIER",
+            "BENCHMARK_SELECTOR"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reservation_decision_content_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_layer": {
+      "type": "string",
+      "enum": [
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+        "CONTROLLER"
+      ]
+    },
+    "source_kind": {
+      "minLength": 1,
+      "maxLength": 128,
+      "type": "string"
+    },
+    "source_record_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "measurements": {
+      "minItems": 1,
+      "maxItems": 8,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "WORKER_INVOCATION",
+              "MODEL_TURN",
+              "PROVIDER_REQUEST",
+              "TOOL_CALL",
+              "INPUT_TOKEN",
+              "OUTPUT_TOKEN",
+              "COST_MICROUSD",
+              "WALL_TIME_MS"
+            ]
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "VALIDATED",
+              "OBSERVED",
+              "REPORTED",
+              "ESTIMATED",
+              "UNAVAILABLE"
+            ]
+          },
+          "enforcement_class": {
+            "type": "string",
+            "enum": [
+              "HARD_ENFORCEABLE",
+              "SOFT_ENFORCEABLE",
+              "OBSERVABLE_ONLY",
+              "ESTIMATED_ONLY",
+              "UNAVAILABLE"
+            ]
+          }
+        },
+        "required": [
+          "dimension",
+          "amount",
+          "basis",
+          "enforcement_class"
+        ]
+      }
+    },
+    "disposition": {
+      "type": "string",
+      "enum": [
+        "COMPLETED",
+        "NOT_STARTED",
+        "BLOCKED_BEFORE_START",
+        "OUTCOME_UNCERTAIN"
+      ]
+    },
+    "duration_ms": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "policy_content_sha256",
+    "originating_state_content_sha256",
+    "operation_id",
+    "operation_kind",
+    "execution_mode",
+    "logical_role",
+    "reservation_decision_content_sha256",
+    "source_layer",
+    "source_kind",
+    "source_record_content_sha256",
+    "measurements",
+    "disposition",
+    "duration_ms"
+  ]
+}

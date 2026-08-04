@@ -1660,6 +1660,251 @@ export const M4CommandResultSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_command_result_v0.schema.json" },
 );
 
+export const M5_BUDGET_DIMENSIONS = [
+  "WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL",
+  "INPUT_TOKEN", "OUTPUT_TOKEN", "COST_MICROUSD", "WALL_TIME_MS",
+] as const;
+export const M5_OPERATION_KINDS = ["WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL"] as const;
+export const M5_PROGRESS_KINDS = [
+  "STATE_TRANSITION", "APPROVED_PLAN_REVISION", "VALID_REPOSITORY_DELTA", "NEW_TEST_EVIDENCE",
+  "EVIDENCE_BACKED_DIAGNOSIS", "FAILURE_RECLASSIFICATION", "CONTEXT_RESTORATION", "TERMINAL_RESULT",
+] as const;
+export const M5_NO_PROGRESS_REASONS = [
+  "IDENTICAL_REPORT", "SAME_NORMALIZED_FAILURE_WITH_NO_DELTA", "REPEATED_TEST_WITH_NO_NEW_EVIDENCE",
+  "OUT_OF_SCOPE_PATCH", "PROSE_WITHOUT_EVIDENCE",
+] as const;
+export const M5_FAILURE_CLASSES = [
+  "TRANSIENT_TOOL_FAILURE", "LOCAL_IMPLEMENTATION_DEFECT", "COMMAND_CONTRACT_ERROR", "CONTEXT_MISSING",
+  "PLAN_INCORRECT", "AUTHORITY_CONTRADICTION", "SCOPE_EXPANSION_REQUIRED", "STATE_DRIFT",
+  "CONCURRENT_WRITER", "TEST_INTEGRITY_VIOLATION", "CLEANUP_UNCERTAIN", "SAME_FAILURE_TWICE",
+  "CLOSEOUT_DEFECT", "PROCESS_CRASH", "MODEL_UNAVAILABLE", "BUDGET_EXHAUSTED",
+  "CONTRACT_UNSATISFIABLE", "ROUTE_UNAVAILABLE", "CAPABILITY_UNAVAILABLE", "MUTATION_UNCERTAIN",
+  "EVIDENCE_INVALID", "EVIDENCE_PUBLICATION_FAILURE", "STATE_PUBLICATION_FAILURE", "INTERNAL_CONTROL_ERROR",
+] as const;
+export const M5_CONTINUATION_ROUTES = [
+  "CONTINUE_ADMITTED_OPERATION", "RETRY_TRANSIENT_TOOL_ONCE", "SECOND_LUNA_ATTEMPT", "CORRECT_COMMAND_ONCE",
+  "RESTORE_CONTEXT_ONCE", "CONSTRAINED_REPLAN", "RUN_RESERVED_CLOSEOUT", "REQUEST_OWNER_DECISION", "BLOCK",
+] as const;
+export const M5_GATE_CODES = [
+  "MISSING_DEPENDENCY", "CYCLIC_DEPENDENCY", "MISSING_PRODUCER", "AMBIGUOUS_PRODUCER",
+  "FUTURE_STAGE_DEPENDENCY", "REQUIRED_OUTPUT_UNAVAILABLE", "IDENTITY_FORMAT_MISMATCH",
+  "OVERLAPPING_WRITE_OWNERSHIP", "ACCEPTANCE_WITHOUT_EVIDENCE", "VERIFICATION_COMMAND_UNAVAILABLE",
+  "ROUTE_UNAVAILABLE", "BUDGET_ENVELOPE_INFEASIBLE", "UNSUPPORTED_CONTRACT_CONSTRUCT",
+] as const;
+
+const M5BudgetDimensionSchema = StringEnum(M5_BUDGET_DIMENSIONS);
+const M5OperationKindSchema = StringEnum(M5_OPERATION_KINDS);
+const M5ActualOrNullSchema = Type.Union([Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), Type.Null()]);
+const M5DigestListSchema = Type.Array(Digest(), { uniqueItems: true, maxItems: 100_000 });
+
+export const M5ControlPolicySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_m5_control_policy_v0"),
+    run_id: RunId(),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    starting_state_content_sha256: Digest(),
+    objective_sha256: Digest(),
+    contract_sha256: Digest(),
+    budget_sha256: Digest(),
+    route_map_sha256: Digest(),
+    route_map_approval_sha256: Digest(),
+    reducer_policy_content_sha256: Digest(),
+    authority_lock_sha256: Digest(),
+    baseline_approval_sha256: Digest(),
+    scope_sha256: Digest(),
+    acceptance_sha256: Digest(),
+    plan_approval_sha256: NullableDigest(),
+    task_graph_sha256: NullableDigest(),
+    tool_policy_content_sha256: Digest(),
+    command_catalog_content_sha256: Digest(),
+    route_map_approved: Type.Boolean(),
+    production_authority: StringEnum(["OWNER_APPROVED", "TEST_FIXTURE"] as const),
+    requested_mode: ExecutionModeSchema,
+    route_facts: StrictObject({
+      hard_sol_conditions: Type.Array(StringEnum([
+        "UNRESOLVED_AUTHORITY", "PUBLIC_INTERFACE", "SECURITY_BOUNDARY", "LIFECYCLE_OR_PROVENANCE",
+        "MIGRATION_SEMANTICS", "JUDGMENT_ACCEPTANCE", "INSEPARABLE_HIGH_COUPLING",
+      ] as const), { uniqueItems: true, maxItems: 7 }),
+      task_count: Type.Integer({ minimum: 0, maximum: 8 }),
+      coherent_single_task: Type.Boolean(),
+      failure_domain_count: Type.Integer({ minimum: 0, maximum: 8 }),
+      deterministic_acceptance: Type.Boolean(),
+      ownership_ambiguous: Type.Boolean(),
+      leaf_count: Type.Integer({ minimum: 0, maximum: 8 }),
+      dag_valid: Type.Boolean(),
+      leaves_separable: Type.Boolean(),
+      unique_write_ownership: Type.Boolean(),
+      leaf_acceptance_machine_checkable: Type.Boolean(),
+    }),
+    obligations: Type.Array(StrictObject({
+      descriptor_sha256: Digest(),
+      declaration: NonEmptyString(),
+      direction: StringEnum(["INPUT", "OUTPUT"] as const),
+      stage: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
+      producer: NonEmptyString(128),
+      consumers: Type.Array(NonEmptyString(128), { minItems: 1, maxItems: 1024, uniqueItems: true }),
+      grammar: StringEnum(["HEX", "UUID", "INTEGER", "LITERAL", "PREFIXED_LITERAL", "PATH"] as const),
+      evidence_kind: StringEnum(["COMMAND", "FILE", "DIGEST", "OWNER_ACCEPTANCE", "STATE", "CONTEXT"] as const),
+      literal: Type.Union([Type.String({ maxLength: 16_384 }), Type.Null()]),
+      prefix: Type.Union([Type.String({ maxLength: 1024 }), Type.Null()]),
+    }), { maxItems: 20_000 }),
+    limits: Type.Array(StrictObject({
+      dimension: M5BudgetDimensionSchema,
+      hard_limit: M5ActualOrNullSchema,
+      soft_limit: M5ActualOrNullSchema,
+      enforcement_class: StringEnum(ENFORCEMENT_CLASSES),
+    }), { minItems: 8, maxItems: 8 }),
+    role_reservation_envelopes: Type.Array(StrictObject({
+      logical_role: LogicalModelRoleSchema,
+      purpose: StringEnum(["ORDINARY", "REQUIRED_CLOSEOUT"] as const),
+      amounts: Type.Array(StrictObject({ dimension: M5BudgetDimensionSchema, amount: BoundedInteger(Number.MAX_SAFE_INTEGER) }), { maxItems: 8 }),
+    }), { maxItems: 16 }),
+    failure_action_table_version: Type.Literal("m5-failure-actions-v1"),
+    progress_rule_version: Type.Literal("m5-progress-v1"),
+    contract_gate_rule_version: Type.Literal("m5-contract-gate-v1"),
+    route_selection_rule_version: Type.Literal("m5-route-selection-v1"),
+    insufficient_routing_evidence: StringEnum(["SINGLE_OWNER_SOL", "BLOCK"] as const),
+    maximum_control_decisions: Type.Integer({ minimum: 1, maximum: 100_000 }),
+    maximum_usage_records: Type.Integer({ minimum: 0, maximum: 100_000 }),
+    maximum_authority_depth: Type.Integer({ minimum: 1, maximum: 64 }),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m5_control_policy_v0.schema.json" },
+);
+
+export const M5UsageEvidenceSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_m5_usage_evidence_v0"),
+    run_id: RunId(),
+    policy_content_sha256: Digest(),
+    originating_state_content_sha256: Digest(),
+    operation_id: Identifier(),
+    operation_kind: M5OperationKindSchema,
+    execution_mode: Type.Union([ConcreteExecutionModeSchema, Type.Null()]),
+    logical_role: Type.Union([LogicalModelRoleSchema, Type.Null()]),
+    reservation_decision_content_sha256: NullableDigest(),
+    source_layer: StringEnum(["M1", "M2", "M3", "M4", "M5", "CONTROLLER"] as const),
+    source_kind: NonEmptyString(128),
+    source_record_content_sha256: Digest(),
+    measurements: Type.Array(StrictObject({
+      dimension: M5BudgetDimensionSchema,
+      amount: M5ActualOrNullSchema,
+      basis: StringEnum(["VALIDATED", "OBSERVED", "REPORTED", "ESTIMATED", "UNAVAILABLE"] as const),
+      enforcement_class: StringEnum(ENFORCEMENT_CLASSES),
+    }), { minItems: 1, maxItems: 8 }),
+    disposition: StringEnum(["COMPLETED", "NOT_STARTED", "BLOCKED_BEFORE_START", "OUTCOME_UNCERTAIN"] as const),
+    duration_ms: M5ActualOrNullSchema,
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m5_usage_evidence_v0.schema.json" },
+);
+
+const M5BudgetSnapshotEntrySchema = StrictObject({
+  dimension: M5BudgetDimensionSchema,
+  hard_limit: M5ActualOrNullSchema,
+  soft_limit: M5ActualOrNullSchema,
+  opening_amount: M5ActualOrNullSchema,
+  validated_amount: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  observed_reported_amount: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  estimated_amount: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  active_reservation_amount: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  reconciled_amount: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  effective_charged_amount: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  hard_remaining: M5ActualOrNullSchema,
+  soft_remaining: M5ActualOrNullSchema,
+  enforcement_class: StringEnum(ENFORCEMENT_CLASSES),
+  status: StringEnum(["BELOW_SOFT_LIMIT", "SOFT_LIMIT_REACHED", "HARD_LIMIT_REACHED", "UNAVAILABLE"] as const),
+});
+
+export const M5ControlDecisionSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_m5_control_decision_v0"),
+    run_id: RunId(),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    current_state_content_sha256: Digest(),
+    policy_content_sha256: Digest(),
+    objective_sha256: Digest(),
+    contract_sha256: Digest(),
+    budget_sha256: Digest(),
+    route_map_sha256: Digest(),
+    route_map_approval_sha256: Digest(),
+    reducer_policy_content_sha256: Digest(),
+    scope_sha256: Digest(),
+    acceptance_sha256: Digest(),
+    tool_policy_content_sha256: Digest(),
+    command_catalog_content_sha256: Digest(),
+    usage_set_sha256: Digest(),
+    usage_evidence_content_sha256: M5DigestListSchema,
+    budget: Type.Array(M5BudgetSnapshotEntrySchema, { minItems: 8, maxItems: 8 }),
+    progress: StrictObject({
+      classification: StringEnum(["PROGRESS", "NO_PROGRESS"] as const),
+      kind: Type.Union([StringEnum(M5_PROGRESS_KINDS), Type.Null()]),
+      no_progress_reason: Type.Union([StringEnum(M5_NO_PROGRESS_REASONS), Type.Null()]),
+      prior_state_or_decision_content_sha256: NullableDigest(),
+      evidence_content_sha256: M5DigestListSchema,
+      evidence_set_sha256: Digest(),
+      prior_failure_signature: NullableDigest(),
+      current_failure_signature: NullableDigest(),
+    }),
+    failures: Type.Array(StrictObject({
+      failure_identity: Digest(),
+      source_layer: StringEnum(["M1", "M2", "M3", "M4", "M5", "CONTROLLER"] as const),
+      source_error_code: NonEmptyString(128),
+      source_record_content_sha256: Digest(),
+      normalized_signature: Digest(),
+      operation_id: Type.Optional(Identifier()),
+      scope_identity: Type.Optional(Digest()),
+      path_identity: Type.Optional(Digest()),
+      repository_identity: Type.Optional(Digest()),
+      worktree_key: Type.Optional(Digest()),
+      control_class: StringEnum(M5_FAILURE_CLASSES),
+      action: StringEnum(M5_CONTINUATION_ROUTES),
+      occurrence_count: Type.Integer({ minimum: 1, maximum: 100_000 }),
+      resolution_evidence_content_sha256: NullableDigest(),
+    }), { maxItems: 1024 }),
+    contract_gate: StrictObject({
+      status: StringEnum(["SATISFIED", "SATISFIABLE", "CURRENTLY_BLOCKED", "UNSATISFIABLE", "INSUFFICIENT_AUTHORITY"] as const),
+      detections: Type.Array(StrictObject({ code: StringEnum(M5_GATE_CODES), evidence_content_sha256: NullableDigest() }), { maxItems: 13 }),
+      satisfied_obligation_descriptor_sha256: M5DigestListSchema,
+      pending_obligation_descriptor_sha256: M5DigestListSchema,
+    }),
+    obligation_evidence: Type.Array(StrictObject({ descriptor_sha256: Digest(), value: NonEmptyString(), evidence_content_sha256: Digest() }), { maxItems: 20_000, uniqueItems: true }),
+    available_logical_roles: Type.Array(LogicalModelRoleSchema, { uniqueItems: true, maxItems: 7 }),
+    operation_id: Type.Union([Identifier(), Type.Null()]),
+    transition_id: Type.Optional(Identifier()),
+    decision_kind: StringEnum(["INITIAL_MODE", "CONTINUATION"] as const),
+    intent: StringEnum(["VALIDATE_CONTRACT", "SELECT_ROUTE", "AUTHORIZE_WORK", "AUTHORIZE_CONTINUATION", "EVALUATE_TERMINAL", "BLOCK"] as const),
+    routes: Type.Array(StrictObject({
+      route: StringEnum([...CONCRETE_EXECUTION_MODES, ...M5_CONTINUATION_ROUTES] as const),
+      eligibility: StringEnum(["ELIGIBLE", "INELIGIBLE", "MISSING_AUTHORITY"] as const),
+      reasons: Type.Array(NonEmptyString(128), { uniqueItems: true, maxItems: 32 }),
+    }), { minItems: 3, maxItems: 9 }),
+    selected_route: Type.Union([StringEnum([...CONCRETE_EXECUTION_MODES, ...M5_CONTINUATION_ROUTES] as const), Type.Null()]),
+    reservation: Type.Union([StrictObject({
+      logical_role: LogicalModelRoleSchema,
+      purpose: StringEnum(["ORDINARY", "REQUIRED_CLOSEOUT"] as const),
+      future_operation_id: Type.Optional(Identifier()),
+      reservation_decision_key: Type.Optional(Digest()),
+      reserved_state_content_sha256: Type.Optional(Digest()),
+      reserved_policy_content_sha256: Type.Optional(Digest()),
+      reserved_route: Type.Optional(StringEnum([...CONCRETE_EXECUTION_MODES, ...M5_CONTINUATION_ROUTES] as const)),
+      amounts: Type.Array(StrictObject({ dimension: M5BudgetDimensionSchema, amount: BoundedInteger(Number.MAX_SAFE_INTEGER) }), { minItems: 1, maxItems: 8 }),
+      source_envelope_index: Type.Integer({ minimum: 0, maximum: 15 }),
+      status: StringEnum(["ACTIVE", "RECONCILED", "RELEASED", "OUTCOME_UNCERTAIN"] as const),
+      reconciliation_evidence_content_sha256: NullableDigest(),
+    }), Type.Null()]),
+    outcome: StringEnum(["AUTHORIZE", "PASS", "BLOCK"] as const),
+    blocking_reason: Type.Union([NonEmptyString(255), Type.Null()]),
+    pass_authority: Type.Boolean(),
+    transition_event: Type.Union([Type.Ref(TransitionEventSchema), Type.Null()]),
+    predicted_next_state_content_sha256: NullableDigest(),
+    prior_relevant_decision_content_sha256: NullableDigest(),
+    request_key: Type.Optional(Digest()),
+    decision_key: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m5_control_decision_v0.schema.json" },
+);
+
 export const FinalReportSchema = StrictObject(
   {
     ...DocumentFields("pi_gacw_final_report_v0"),
@@ -1722,6 +1967,9 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_mutation_receipt_v0", fileName: "pi_gacw_mutation_receipt_v0.schema.json", schema: M4MutationReceiptSchema },
   { schemaId: "pi_gacw_tool_result_v0", fileName: "pi_gacw_tool_result_v0.schema.json", schema: M4ToolResultSchema },
   { schemaId: "pi_gacw_command_result_v0", fileName: "pi_gacw_command_result_v0.schema.json", schema: M4CommandResultSchema },
+  { schemaId: "pi_gacw_m5_control_policy_v0", fileName: "pi_gacw_m5_control_policy_v0.schema.json", schema: M5ControlPolicySchema },
+  { schemaId: "pi_gacw_m5_usage_evidence_v0", fileName: "pi_gacw_m5_usage_evidence_v0.schema.json", schema: M5UsageEvidenceSchema },
+  { schemaId: "pi_gacw_m5_control_decision_v0", fileName: "pi_gacw_m5_control_decision_v0.schema.json", schema: M5ControlDecisionSchema },
 ] as const;
 
 // The package-private registry is the sole runtime and emission authority. Every
@@ -1808,3 +2056,6 @@ export type M4MutationJournal = Static<typeof M4MutationJournalSchema>;
 export type M4MutationReceiptDocument = Static<typeof M4MutationReceiptSchema>;
 export type M4ToolResultDocument = Static<typeof M4ToolResultSchema>;
 export type M4CommandResultDocument = Static<typeof M4CommandResultSchema>;
+export type M5ControlPolicyDocument = Static<typeof M5ControlPolicySchema>;
+export type M5UsageEvidenceDocument = Static<typeof M5UsageEvidenceSchema>;
+export type M5ControlDecisionDocument = Static<typeof M5ControlDecisionSchema>;

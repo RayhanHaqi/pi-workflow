@@ -17,6 +17,9 @@ import {
   type BaselineDocument,
   type ContractDocument,
   type EvidenceManifestDocument,
+  type M5ControlDecisionDocument,
+  type M5ControlPolicyDocument,
+  type M5UsageEvidenceDocument,
   type ObjectiveDocument,
   type PersistedStatePointerDocument,
   type PlanApprovalDocument,
@@ -1109,6 +1112,114 @@ function assertPersistenceDocumentSemantics(schemaId: SchemaId, value: unknown):
   }
 }
 
+function assertM5PolicyDocumentSemantics(policy: M5ControlPolicyDocument): void {
+  if (!policy.route_map_approved) throw new ContractValidationError("UNAPPROVED_ROUTE_MAP", "M5 policy requires an owner-approved route map");
+  assertUniqueBy(policy.limits, (entry) => entry.dimension, "DUPLICATE_M5_BUDGET_DIMENSION");
+  if (policy.limits.length !== 8) throw new ContractValidationError("MISSING_M5_BUDGET_DIMENSION", "All eight M5 budget dimensions are required");
+  for (const entry of policy.limits) {
+    if (entry.soft_limit !== null && entry.hard_limit !== null && entry.soft_limit > entry.hard_limit) {
+      throw new ContractValidationError("CONTRADICTORY_M5_LIMIT", `${entry.dimension} soft limit exceeds hard limit`);
+    }
+    if (entry.enforcement_class === "UNAVAILABLE" && (entry.soft_limit !== null || entry.hard_limit !== null)) {
+      throw new ContractValidationError("UNAVAILABLE_M5_LIMIT", `${entry.dimension} unavailable authority cannot claim limits`);
+    }
+    if (entry.dimension === "PROVIDER_REQUEST" && entry.enforcement_class === "HARD_ENFORCEABLE") {
+      throw new ContractValidationError("HARD_PROVIDER_REQUEST_FORBIDDEN", "V0 has no hard provider-request admission seam");
+    }
+  }
+  assertUniqueBy(policy.obligations, (entry) => `${entry.direction}\u0000${entry.declaration}`, "DUPLICATE_M5_OBLIGATION");
+  assertUniqueBy(policy.obligations, (entry) => entry.descriptor_sha256, "DUPLICATE_M5_OBLIGATION_IDENTITY");
+  for (const obligation of policy.obligations) {
+    const needsLiteral = obligation.grammar === "LITERAL";
+    const needsPrefix = obligation.grammar === "PREFIXED_LITERAL";
+    if ((obligation.literal !== null) !== (needsLiteral || needsPrefix) || (obligation.prefix !== null) !== needsPrefix) {
+      throw new ContractValidationError("INVALID_M5_OBLIGATION_GRAMMAR", `${obligation.declaration} grammar parameters are inconsistent`);
+    }
+  }
+  assertUniqueBy(policy.role_reservation_envelopes, (entry) => `${entry.logical_role}\u0000${entry.purpose}`, "DUPLICATE_M5_RESERVATION_ENVELOPE");
+  for (const envelope of policy.role_reservation_envelopes) {
+    if (envelope.amounts.length === 0 || envelope.amounts.some((entry) => entry.amount <= 0)) throw new ContractValidationError("INVALID_M5_RESERVATION_ENVELOPE", "A reservation envelope must reserve a positive bounded amount");
+    assertUniqueBy(envelope.amounts, (entry) => entry.dimension, "DUPLICATE_M5_RESERVATION_DIMENSION");
+  }
+  const facts = policy.route_facts;
+  if (facts.coherent_single_task && facts.task_count !== 1) throw new ContractValidationError("CONTRADICTORY_M5_ROUTE_FACTS", "A coherent single task requires task_count=1");
+  if (facts.leaf_count > facts.task_count || facts.unique_write_ownership === facts.ownership_ambiguous) {
+    throw new ContractValidationError("CONTRADICTORY_M5_ROUTE_FACTS", "Leaf/task or ownership facts contradict");
+  }
+}
+
+function assertM5UsageDocumentSemantics(usage: M5UsageEvidenceDocument): void {
+  assertUniqueBy(usage.measurements, (entry) => entry.dimension, "DUPLICATE_M5_USAGE_DIMENSION");
+  if (!usage.measurements.some((entry) => entry.dimension === usage.operation_kind)) throw new ContractValidationError("M5_OPERATION_DIMENSION_MISMATCH", "Operation evidence must include its operation dimension");
+  for (const measurement of usage.measurements) {
+    const unavailable = measurement.basis === "UNAVAILABLE";
+    if (unavailable !== (measurement.amount === null) || unavailable !== (measurement.enforcement_class === "UNAVAILABLE")) {
+      throw new ContractValidationError("M5_USAGE_NULL_MISMATCH", `${measurement.dimension} null, basis and enforcement authority differ`);
+    }
+    if (measurement.basis === "ESTIMATED" && measurement.enforcement_class !== "ESTIMATED_ONLY") {
+      throw new ContractValidationError("M5_ESTIMATE_CLASS_MISMATCH", "Estimated usage must remain ESTIMATED_ONLY");
+    }
+  }
+  const wallMeasurement = usage.measurements.find((entry) => entry.dimension === "WALL_TIME_MS");
+  if ((usage.duration_ms === null) !== !(wallMeasurement !== undefined && wallMeasurement.amount !== null) ||
+      (usage.duration_ms !== null && wallMeasurement?.amount !== usage.duration_ms)) {
+    throw new ContractValidationError("M5_DURATION_MISMATCH", "Duration evidence must match the wall-time measurement");
+  }
+  if ((usage.disposition === "NOT_STARTED" || usage.disposition === "BLOCKED_BEFORE_START") && usage.measurements.some((entry) => entry.amount !== null && entry.amount > 0)) {
+    throw new ContractValidationError("M5_PRESTART_USAGE", "A pre-start operation cannot claim positive usage");
+  }
+  if (usage.disposition === "OUTCOME_UNCERTAIN" && usage.reservation_decision_content_sha256 === null) {
+    throw new ContractValidationError("M5_UNCERTAIN_WITHOUT_RESERVATION", "An uncertain operation must retain its reservation");
+  }
+  if (usage.reservation_decision_content_sha256 !== null && (usage.execution_mode === null || usage.logical_role === null)) {
+    throw new ContractValidationError("M5_RESERVATION_BINDING_REQUIRED", "Reserved usage must bind route and logical role");
+  }
+}
+
+function assertM5DecisionDocumentSemantics(decision: M5ControlDecisionDocument): void {
+  assertUniqueBy(decision.budget, (entry) => entry.dimension, "DUPLICATE_M5_BUDGET_SNAPSHOT_DIMENSION");
+  assertUniqueBy(decision.routes, (entry) => entry.route, "DUPLICATE_M5_ROUTE");
+  assertUniqueBy(decision.failures, (entry) => entry.failure_identity, "DUPLICATE_M5_FAILURE");
+  if (decision.progress.classification === "PROGRESS" ? decision.progress.kind === null || decision.progress.no_progress_reason !== null : decision.progress.kind !== null || decision.progress.no_progress_reason === null) {
+    throw new ContractValidationError("M5_PROGRESS_RESULT_MISMATCH", "Progress classification and reason fields differ");
+  }
+  if ((decision.outcome === "BLOCK") !== (decision.blocking_reason !== null) || (decision.outcome === "PASS") !== decision.pass_authority) {
+    throw new ContractValidationError("M5_OUTCOME_MISMATCH", "Decision outcome, blocking reason and PASS authority differ");
+  }
+  if ((decision.transition_event === null) !== (decision.predicted_next_state_content_sha256 === null)) {
+    throw new ContractValidationError("M5_EVENT_PREDICTION_MISMATCH", "An event and predicted state identity must appear together");
+  }
+  if (decision.selected_route !== null && !decision.routes.some((route) => route.route === decision.selected_route && route.eligibility === "ELIGIBLE")) {
+    throw new ContractValidationError("M5_SELECTED_ROUTE_INELIGIBLE", "Selected route is not uniquely eligible in the inventory");
+  }
+  if (decision.outcome === "AUTHORIZE" && decision.selected_route === null) throw new ContractValidationError("M5_ROUTE_REQUIRED", "Authorization requires a selected route");
+  if (decision.contract_gate.status === "SATISFIED" && decision.contract_gate.pending_obligation_descriptor_sha256.length > 0) {
+    throw new ContractValidationError("M5_GATE_RESULT_MISMATCH", "SATISFIED gate retains pending obligations");
+  }
+  if (decision.obligation_evidence !== undefined) {
+    assertUniqueBy(decision.obligation_evidence, (entry) => entry.descriptor_sha256, "DUPLICATE_M5_OBLIGATION_EVIDENCE");
+  }
+  if (decision.reservation !== null) {
+    const reservation = decision.reservation;
+    assertUniqueBy(reservation.amounts, (entry) => entry.dimension, "DUPLICATE_M5_RESERVATION_DIMENSION");
+    if (reservation.future_operation_id !== undefined && reservation.future_operation_id.length === 0) {
+      throw new ContractValidationError("M5_RESERVATION_OPERATION_INVALID", "A reservation future operation identity must be nonempty");
+    }
+    if (reservation.status === "OUTCOME_UNCERTAIN" && reservation.reconciliation_evidence_content_sha256 !== null) {
+      throw new ContractValidationError("M5_UNCERTAIN_RECONCILIATION", "An uncertain reservation cannot carry a completed reconciliation");
+    }
+    if (reservation.reserved_policy_content_sha256 !== undefined && reservation.reserved_policy_content_sha256 !== decision.policy_content_sha256) {
+      throw new ContractValidationError("M5_RESERVATION_POLICY_MISMATCH", "Reservation policy identity differs from its decision");
+    }
+    if (reservation.reserved_state_content_sha256 !== undefined && reservation.reserved_state_content_sha256 !== decision.current_state_content_sha256) {
+      throw new ContractValidationError("M5_RESERVATION_STATE_MISMATCH", "Reservation state identity differs from its decision");
+    }
+    if (reservation.reservation_decision_key !== undefined && reservation.reservation_decision_key !== decision.decision_key) {
+      throw new ContractValidationError("M5_RESERVATION_DECISION_MISMATCH", "Reservation decision key differs from its decision");
+    }
+  }
+}
+
 function assertDocumentSemantics(schemaId: SchemaId, value: unknown, options: SemanticValidationOptions): void {
   const document = recordOf(value);
   assertDeclaredSetUniqueness(schemaId, document);
@@ -1153,6 +1264,15 @@ function assertDocumentSemantics(schemaId: SchemaId, value: unknown, options: Se
       break;
     case "pi_gacw_reducer_policy_v0":
       assertReducerPolicySemantics(value as ReducerPolicy);
+      break;
+    case "pi_gacw_m5_control_policy_v0":
+      assertM5PolicyDocumentSemantics(value as M5ControlPolicyDocument);
+      break;
+    case "pi_gacw_m5_usage_evidence_v0":
+      assertM5UsageDocumentSemantics(value as M5UsageEvidenceDocument);
+      break;
+    case "pi_gacw_m5_control_decision_v0":
+      assertM5DecisionDocumentSemantics(value as M5ControlDecisionDocument);
       break;
     default:
       break;

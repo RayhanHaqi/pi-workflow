@@ -1,6 +1,6 @@
 # pi-bounded-coding-workflow
 
-Deterministic **V0 M1–M4** foundations for a general-purpose bounded agentic-coding workflow for Pi.
+Deterministic **V0 M1–M5** foundations for a general-purpose bounded agentic-coding workflow for Pi.
 
 The package contains:
 
@@ -11,9 +11,10 @@ The package contains:
 - one pure reducer for `DIRECT_LUNA_HIGH`, `SINGLE_OWNER_SOL`, and `ROUTED_DAG`;
 - an M2 state store with immutable evidence, reducer-derived transition commits, a `state.json` commit pointer, reachability inspection, and bounded process-crash terminalization;
 - an M3 repository guard with deterministic Git/worktree identity, exact clean or approved-dirty baselines, bounded baseline blobs and retention, a Linux `flock` guardian, and full/fast preflight plus postflight ownership accounting; and
-- an M4 descriptor-relative secure filesystem and scoped tool gateway with exact-byte mutation, frozen structured commands, Landlock filesystem confinement, `no_new_privs`, seccomp network denial, and immutable operation evidence.
+- an M4 descriptor-relative secure filesystem and scoped tool gateway with exact-byte mutation, frozen structured commands, Landlock filesystem confinement, `no_new_privs`, seccomp network denial, and immutable operation evidence; and
+- an M5 deterministic control-decision kernel for typed usage budgets, evidence-backed progress, fixed failure actions, contract satisfiability, finite route eligibility/selection, and M2-bound immutable decision authority.
 
-It does **not** register a Pi extension or implement a CLI, event journal, resume/recovery, worker sessions, routing runtime, budget runtime, or any M5+ controller capability.
+It does **not** register a Pi extension or implement a CLI, event journal, resume/recovery, worker sessions, route execution, provider/model selection, fallback, or any M6+ runtime capability.
 
 ## Package foundation
 
@@ -27,7 +28,7 @@ npm test
 npm run build
 ```
 
-Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration remains outside M1–M4.
+Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration remains outside M1–M5.
 
 ## Canonical JSON
 
@@ -95,7 +96,7 @@ The private registry in `src/identity/projections.ts` contains:
 
 Canonical runtime schemas are held in a package-private, deeply frozen registry. Ajv compiles exact serialized clones of that authority, so neither compilation nor public inspection can change it. The supported `./schemas` entrypoint exposes the frozen primitive `SCHEMA_VERSION`, the frozen schema-ID list `SCHEMA_IDS`, and `getSchemaSnapshot(schemaId)` / `listSchemaSnapshots()` for runtime inspection. Each schema snapshot is a fresh, detached, deeply frozen, serializable copy; snapshots inspect but never configure validation. Direct TypeBox objects, shared enum arrays, and the backing registry are not public runtime exports. Document and policy types remain available as compile-time-only TypeScript exports.
 
-The 17 required core schemas are present, plus the pure-reducer policy, five additive M2 persistence schemas, twelve M3 repository schemas, and nine M4 secure-tool schemas (43 emitted schemas total). Ajv enforces structural constraints. Deterministic semantic validators enforce cross-field rules such as canonical scope separation, route-role completeness and effort, verification-only closeout, owner-acceptance placement, graph consistency and caps, unambiguous write ownership, mode/state isolation, counter consistency, frozen identities, and null-only unavailable usage.
+The 17 required core schemas are present, plus the pure-reducer policy, five additive M2 persistence schemas, twelve M3 repository schemas, nine M4 secure-tool schemas, and three M5 control schemas (46 emitted schemas total). Ajv enforces structural constraints. Deterministic semantic validators enforce cross-field rules such as canonical scope separation, route-role completeness and effort, verification-only closeout, owner-acceptance placement, graph consistency and caps, unambiguous write ownership, mode/state isolation, counter consistency, frozen identities, and null-only unavailable usage.
 
 Scope and write-ownership paths use a rejecting repository-relative grammar: no absolute or drive-rooted paths, backslashes, NUL, empty segments, `.`/`..` segments, root aliases, or trailing slash. Paths are already canonical when accepted; no glob interpretation or silent path normalization occurs.
 
@@ -112,6 +113,12 @@ Each state binds `frozen_policy_content_sha256`, the complete independently veri
 - **Routed:** one planner, deterministic ready-leaf ordering, one active writer, two attempts per leaf, two constrained replans, frozen full-policy/DAG/scope/acceptance/budget identities, and one verification-only closeout.
 
 Ready leaves sort by dependency satisfaction, topological rank, integer priority, then lexicographic `task_id`. The unchecked ordering helper is private to the reducer and runs only after `reduceState` has validated the state, event, policy, frozen policy binding, mode, and phase. The public state-machine subpath exports only `TransitionError`, `createInitialState`, and `reduceState`; it exposes no standalone workflow-decision helper. `PASS` and `BLOCKED` are immutable. An ordinary defect discovered at closeout becomes `BLOCKED_CLOSEOUT_DEFECT`; closeout cannot mutate or reopen a leaf.
+
+## M5 control decisions
+
+The supported `./control` entrypoint exports only `ControlDecisionError` and `createControlDecisionKernel`. A kernel validates one immutable policy, reconstructs committed M2 state and managed evidence, aggregates strict operation usage, applies exact integer budget arithmetic, classifies progress and failures, evaluates the bounded contract gate, and selects one finite mode/action or BLOCK. It publishes content-addressed policy, usage, and aggregate decision records. If the decision admits an existing M1 transition, its exact canonical bytes become M2 transition evidence and `commitTransition` remains the only state publication path.
+
+Route facts and production route-map/budget values are external owner authority. M5 never infers them from objective prose, chooses provider/model values, invokes a worker, dispatches a tool, adds a phase, or creates another mutable pointer. `PASS` and `BLOCKED` remain the only terminal phases. Unavailable telemetry remains `null`; estimates never become actual usage; unknown outcomes retain reservations. Public results are detached and recursively frozen, while evaluators, classifiers, publishers, and interruption seams remain package-private.
 
 ## Durable state-commit foundation
 
@@ -145,6 +152,9 @@ A run uses this fixed private layout beneath a caller-supplied absolute state ro
   records/tool-results/<content-sha256>.json
   records/mutation-receipts/<content-sha256>.json
   records/command-results/<content-sha256>.json
+  records/m5-control-policies/<content-sha256>.json
+  records/m5-usage-evidence/<content-sha256>.json
+  records/m5-control-decisions/<content-sha256>.json
   baseline-blobs/sha256/<raw-byte-sha256>
   commits/<content-sha256>.json
 ```

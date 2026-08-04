@@ -2,7 +2,7 @@
   "name": "pi-bounded-coding-workflow",
   "version": "0.1.0",
   "private": true,
-  "description": "Deterministic M1-M4 kernel with durable repository authority, secure filesystem access, and scoped tools",
+  "description": "Deterministic M1-M5 kernel with durable repository authority, scoped tools, and bounded control decisions",
   "type": "module",
   "engines": {
     "node": ">=22 <23"
@@ -16,6 +16,7 @@
   },
   "exports": {
     "./canonical-json": "./dist/src/canonical-json/index.js",
+    "./control": "./dist/src/control/index.js",
     "./identity": "./dist/src/identity/index.js",
     "./persistence": "./dist/src/persistence/index.js",
     "./repository": "./dist/src/repository/index.js",
