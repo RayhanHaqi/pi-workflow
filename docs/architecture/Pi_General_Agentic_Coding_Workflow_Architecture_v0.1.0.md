@@ -91,39 +91,66 @@ target project   → current trusted Git worktree
 
 The source may physically live under an owner-selected directory, including a non-discovered development folder under `~/.pi`, but the architecture does not depend on that location.
 
-## 3. Verified Pi 0.82.1 capability boundary
+## 3. M6 Pi worker capability boundary
 
-The design relies on these Pi 0.82.1 capabilities:
-
-```text
-createAgentSession()
-in-memory sessions
-explicit cwd
-explicit model and thinking level
-custom tools
-disable built-in tools
-event subscription
-abort and dispose
-global extensions
-registerCommand()
-installable local Pi packages
-```
-
-The worker adapter must not rely on Pi defaults for model selection, tools, retry, compaction, resource loading, or project-local extensions.
-
-Pi automatic retry and compaction are disabled for controller-created worker sessions.
-
-A custom resource loader is used so child workers receive only controller-approved:
+### OA-M6-01 — M6 Lower-Level Pi Agent Runtime Boundary
 
 ```text
-system prompt
-repository instruction files
-authority files
-task packet
-custom tools
+STATUS = OWNER_APPROVED
+DECISION = Replace implementation-specific mandatory AgentSession,
+           resource-loader, and unconditional dispose mechanics with
+           a behaviorally equivalent lower-level Agent isolation contract.
 ```
 
-They do not automatically load target-project extensions, skills, prompt templates, or project settings.
+This amendment does not authorize Pi dependency mutation or M6 implementation.
+
+The M6 V0 positive slice uses `@earendil-works/pi-agent-core` `Agent` at the exact owner-approved Pi version. Each invocation constructs one fresh in-memory `Agent` with:
+
+```text
+a controller-generated system prompt
+the exact provider, model, and effort derived from authoritative M5 state
+only controller-owned custom tools
+built-in tools disabled
+no persistent worker conversation
+no model-callable workflow-start or agent-spawn capability
+```
+
+The controller directly assembles only:
+
+```text
+approved system prompt
+approved user/task prompt
+approved instruction resources
+approved authority resources
+approved task-readable target
+```
+
+Every resource is explicit, hash-verified, bounded, controller-selected, non-secret, and within M3/M4 authority. Repository cwd and filesystem authority remain enforced through the repository-bound M3/M4 scoped gateway. The `Agent` receives no raw cwd-based filesystem capability.
+
+No discovery-capable session, settings, extension, prompt-template, skill, project-context, or resource-loader layer is instantiated. A custom resource loader is not instantiated. This is stricter than configuring a discovery-capable loader to return nothing.
+
+Automatic controller retry, SDK retry, and provider retry are disabled. No compaction transform is installed. Provider and model fallback are forbidden. The worker adapter must not rely on Pi defaults for model selection, tools, retry, compaction, resource loading, or project-local extensions.
+
+Lifecycle closure requires:
+
+```text
+abort when active
+await prompt settlement
+await Agent idle settlement
+remove subscriptions
+clear queues
+reset Agent state
+release controller-owned references
+invoke dispose() only when exposed by the selected public runtime
+```
+
+Cleanup uncertainty remains fail-closed as `BLOCKED_CLEANUP_UNCERTAIN`.
+
+`AgentSession` is rejected only for the approved M6 V0 positive slice because it adds unneeded session, settings, extension, resource, compaction, retry, and event-forwarding machinery. This is not a claim that `AgentSession` is universally invalid.
+
+The M5 reservation is authoritative before provider work, and one active writer remains mandatory. OA-M6-01 changes no M1–M5 identity, schema, route, reservation, repository, scoped-tool, budget, failure, V0/V1, or milestone authority. It does not add resume, a journal, fallback, recursive agents, M7 work, or V1 promotion.
+
+The global Pi package and extension continue to rely on global extensions, `registerCommand()`, and installable local Pi packages; OA-M6-01 changes only the M6 worker runtime mechanism.
 
 ## 4. User experience
 

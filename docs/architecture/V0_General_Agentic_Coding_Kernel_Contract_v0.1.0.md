@@ -548,23 +548,41 @@ Unsupported constructs fail closed.
 
 ## 11. Pi worker isolation
 
-Every worker is created with:
+### OA-M6-01 — M6 Lower-Level Pi Agent Runtime Boundary
 
 ```text
-fresh in-memory session
-exact cwd
-exact model
-exact thinking level
-custom resource loader
-built-in tools disabled
-controller-owned custom tools
-automatic retry disabled
-provider retry disabled where configurable
-compaction disabled
-explicit abort and dispose
+STATUS = OWNER_APPROVED
+DECISION = Replace implementation-specific mandatory AgentSession,
+           resource-loader, and unconditional dispose mechanics with
+           a behaviorally equivalent lower-level Agent isolation contract.
 ```
 
-The custom loader must not automatically discover:
+This amendment does not authorize Pi dependency mutation or M6 implementation.
+
+The M6 V0 positive slice uses `@earendil-works/pi-agent-core` `Agent` at the exact owner-approved Pi version. Each invocation constructs one fresh in-memory `Agent` with:
+
+```text
+a controller-generated system prompt
+the exact provider, model, and effort derived from authoritative M5 state
+only controller-owned custom tools
+built-in tools disabled
+no persistent worker conversation
+no model-callable workflow-start or agent-spawn capability
+```
+
+The controller directly assembles only:
+
+```text
+approved system prompt
+approved user/task prompt
+approved instruction resources
+approved authority resources
+approved task-readable target
+```
+
+Every resource is explicit, hash-verified, bounded, controller-selected, non-secret, and within M3/M4 authority. Approved `AGENTS.md` or equivalent instructions are injected explicitly with hashes. Repository cwd and filesystem authority remain enforced through the repository-bound M3/M4 scoped gateway. The `Agent` receives no raw cwd-based filesystem capability.
+
+No discovery-capable session, settings, extension, prompt-template, skill, project-context, or resource-loader layer is instantiated. A custom resource loader is not instantiated. In particular, the worker does not discover:
 
 ```text
 target .pi/extensions
@@ -574,7 +592,28 @@ target .pi/settings.json
 unapproved ancestor context files
 ```
 
-Approved `AGENTS.md` or equivalent instructions are injected explicitly with hashes.
+This is stricter than configuring a discovery-capable loader to return nothing.
+
+Automatic controller retry, SDK retry, and provider retry are disabled. No compaction transform is installed. Provider and model fallback are forbidden.
+
+Lifecycle closure requires:
+
+```text
+abort when active
+await prompt settlement
+await Agent idle settlement
+remove subscriptions
+clear queues
+reset Agent state
+release controller-owned references
+invoke dispose() only when exposed by the selected public runtime
+```
+
+Cleanup uncertainty remains fail-closed as `BLOCKED_CLEANUP_UNCERTAIN`.
+
+`AgentSession` is rejected only for the approved M6 V0 positive slice because it adds unneeded session, settings, extension, resource, compaction, retry, and event-forwarding machinery. This is not a claim that `AgentSession` is universally invalid.
+
+The M5 reservation is authoritative before provider work, and one active writer remains mandatory. OA-M6-01 changes no M1–M5 identity, schema, route, reservation, repository, scoped-tool, budget, failure, V0/V1, or milestone authority. It does not alter `DIRECT_LUNA_HIGH`, the `LUNA_EXECUTOR` role, provider/model/effort derivation, secure read authority, terminal `PASS` or `BLOCKED` behavior, or the prohibition on caller route selection and Slice A mutation tools. It does not add resume, a journal, fallback, recursive agents, M7 work, or V1 promotion. V0 process crashes continue to fail closed as `BLOCKED_PROCESS_CRASH`.
 
 ## 12. Scoped tools
 
