@@ -1,4 +1,5 @@
 import { canonicalize } from "../canonical-json/index.js";
+import { type Sha256Digest } from "../identity/index.js";
 import { assertDocumentValid, type M6WorkerInvocationDocument, type M6WorkerResultDocument } from "../schemas/index.js";
 import type { InspectedObject, ManagedRecordClassification } from "./types.js";
 
@@ -25,21 +26,122 @@ function classification(
   };
 }
 
-const EXPECTED_MODULES = [
-  { specifier: "@earendil-works/pi-agent-core", packageName: "@earendil-works/pi-agent-core" },
-  { specifier: "@earendil-works/pi-ai", packageName: "@earendil-works/pi-ai" },
-  { specifier: "@earendil-works/pi-ai/providers/all", packageName: "@earendil-works/pi-ai" },
+export const M6_RUNTIME_BOUNDARY_POLICY = "OA-M6-02" as const;
+
+export const M6_RUNTIME_MODULES = [
+  {
+    specifier: "@earendil-works/pi-agent-core",
+    package_name: "@earendil-works/pi-agent-core",
+    package_version: "0.83.0",
+    registry_integrity: "sha512-RorGp9OH5l3ElpuC5a5ZQ2eWcchZGXflXRzVGkV99y3y6tT+LLNyxoYIdVKvTKWEObwhExeQbTH0fI2tE4iX4g==",
+    registry_resolved: "https://registry.npmjs.org/@earendil-works/pi-agent-core/-/pi-agent-core-0.83.0.tgz",
+    installed_tree_sha256: "sha256:692dbf9c0d91d85a93f93b2f88b27e2113bcf88ab4384a4927c3cba8e9a1bb5d" as Sha256Digest,
+  },
+  {
+    specifier: "@earendil-works/pi-ai",
+    package_name: "@earendil-works/pi-ai",
+    package_version: "0.83.0",
+    registry_integrity: "sha512-m3IZD4g3er0V8TC9+Vpgw/sjTKqcJlkcIBy/JvsgRubuuik3tAVzyugUg4rVrShIkkOT69mEd34NEqKUIsl6JQ==",
+    registry_resolved: "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-0.83.0.tgz",
+    installed_tree_sha256: "sha256:1411e4d6e549a4accfdffe5da0a1de613c461592a1f0754d5db6c9d7c1721488" as Sha256Digest,
+  },
+  {
+    specifier: "@earendil-works/pi-ai/providers/all",
+    package_name: "@earendil-works/pi-ai",
+    package_version: "0.83.0",
+    registry_integrity: "sha512-m3IZD4g3er0V8TC9+Vpgw/sjTKqcJlkcIBy/JvsgRubuuik3tAVzyugUg4rVrShIkkOT69mEd34NEqKUIsl6JQ==",
+    registry_resolved: "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-0.83.0.tgz",
+    installed_tree_sha256: "sha256:1411e4d6e549a4accfdffe5da0a1de613c461592a1f0754d5db6c9d7c1721488" as Sha256Digest,
+  },
 ] as const;
+
+export const M6_FAILURE_CODES = [
+  "AUTHORITY_REJECTED",
+  "INVOCATION_ALREADY_INCOMPLETE",
+  "SDK_INITIALIZATION_FAILED",
+  "RUNTIME_IDENTITY_INVALID",
+  "RUNTIME_CAPABILITY_INVALID",
+  "PROVIDER_PROTOCOL_INVALID",
+  "TOOL_REQUEST_INVALID",
+  "TOOL_EXECUTION_FAILED",
+  "WORKER_REPORT_INVALID",
+  "WORKER_DEADLINE_EXCEEDED",
+  "WORKER_ABORTED",
+  "RESULT_PERSISTENCE_FAILED",
+  "CLEANUP_UNCERTAIN",
+] as const;
+export type M6FailureCode = (typeof M6_FAILURE_CODES)[number];
+
+export const M6_FAILURE_STAGES = [
+  "WORKER",
+  "M1_M5_ADMISSION",
+  "RUNTIME_IDENTITY",
+  "RUNTIME_GUARD",
+  "SDK_INITIALIZATION",
+  "M6_INVOCATION",
+  "REPLAY",
+  "READ_TOOL",
+  "REPORT_TOOL",
+  "PROVIDER_TURN",
+  "MODEL_TURN",
+  "CREDENTIAL",
+  "TOOL_PROTOCOL",
+  "PROTOCOL",
+  "DEADLINE",
+  "ABORT",
+  "RESULT_PERSISTENCE",
+  "CLEANUP_ABORT",
+  "CLEANUP_PROMPT",
+  "CLEANUP_IDLE",
+  "CLEANUP_SUBSCRIBER",
+  "CLEANUP_QUEUE",
+  "CLEANUP_RESET",
+  "CLEANUP_PROVIDERS",
+] as const;
+export type M6FailureStage = (typeof M6_FAILURE_STAGES)[number];
+
+export const M6_FAILURE_STAGE_BY_CODE = {
+  AUTHORITY_REJECTED: ["M1_M5_ADMISSION", "REPLAY", "CREDENTIAL"],
+  INVOCATION_ALREADY_INCOMPLETE: ["REPLAY"],
+  SDK_INITIALIZATION_FAILED: ["SDK_INITIALIZATION"],
+  RUNTIME_IDENTITY_INVALID: ["RUNTIME_IDENTITY"],
+  RUNTIME_CAPABILITY_INVALID: ["RUNTIME_GUARD"],
+  PROVIDER_PROTOCOL_INVALID: ["PROVIDER_TURN", "MODEL_TURN", "CREDENTIAL", "PROTOCOL", "WORKER"],
+  TOOL_REQUEST_INVALID: ["READ_TOOL", "REPORT_TOOL", "TOOL_PROTOCOL"],
+  TOOL_EXECUTION_FAILED: ["READ_TOOL", "TOOL_PROTOCOL", "WORKER"],
+  WORKER_REPORT_INVALID: ["REPORT_TOOL", "TOOL_PROTOCOL"],
+  WORKER_DEADLINE_EXCEEDED: ["DEADLINE"],
+  WORKER_ABORTED: ["M1_M5_ADMISSION", "M6_INVOCATION", "ABORT"],
+  RESULT_PERSISTENCE_FAILED: ["RESULT_PERSISTENCE"],
+  CLEANUP_UNCERTAIN: ["CLEANUP_ABORT", "CLEANUP_PROMPT", "CLEANUP_IDLE", "CLEANUP_SUBSCRIBER", "CLEANUP_QUEUE", "CLEANUP_RESET", "CLEANUP_PROVIDERS"],
+} as const satisfies Readonly<Record<M6FailureCode, readonly M6FailureStage[]>>;
+
+function expectedResolvedUrl(value: string, expected: (typeof M6_RUNTIME_MODULES)[number]): boolean {
+  try { return value === import.meta.resolve(expected.specifier); }
+  catch { return false; }
+}
+
+function isFailureCode(value: string): value is M6FailureCode {
+  return (M6_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+function isFailureStage(value: string): value is M6FailureStage {
+  return (M6_FAILURE_STAGES as readonly string[]).includes(value);
+}
+
+function failurePairIsValid(code: M6FailureCode, stage: M6FailureStage): boolean {
+  return M6_FAILURE_STAGE_BY_CODE[code].some((candidate) => candidate === stage);
+}
 
 function invocationSemanticError(invocation: M6WorkerInvocationDocument): string | null {
   if (invocation.protocol_id !== "m6-direct-read-v0" || invocation.execution_mode !== "DIRECT_LUNA_HIGH" ||
       invocation.continuation_action !== "CONTINUE_ADMITTED_OPERATION" || invocation.logical_role !== "LUNA_EXECUTOR" ||
-      invocation.effort !== "high" || invocation.runtime_boundary_policy !== "OA-M6-02") return "M6 invocation fixed protocol identity is invalid";
-  if (invocation.pi_modules.length !== EXPECTED_MODULES.length || invocation.pi_modules.some((module, index) => {
-    const expected = EXPECTED_MODULES[index]!;
-    return module.specifier !== expected.specifier || module.package_name !== expected.packageName || module.package_version !== "0.83.0" ||
-      module.registry_integrity.length === 0 || module.registry_resolved.length === 0 || module.resolved_url.length === 0 ||
-      module.installed_tree_sha256.length === 0;
+      invocation.effort !== "high" || invocation.runtime_boundary_policy !== M6_RUNTIME_BOUNDARY_POLICY) return "M6 invocation fixed protocol identity is invalid";
+  if (invocation.pi_modules.length !== M6_RUNTIME_MODULES.length || invocation.pi_modules.some((module, index) => {
+    const expected = M6_RUNTIME_MODULES[index]!;
+    return module.specifier !== expected.specifier || module.package_name !== expected.package_name || module.package_version !== expected.package_version ||
+      module.registry_integrity !== expected.registry_integrity || module.registry_resolved !== expected.registry_resolved ||
+      !expectedResolvedUrl(module.resolved_url, expected) || module.installed_tree_sha256 !== expected.installed_tree_sha256;
   })) return "M6 invocation Pi module identities are invalid";
   if (invocation.pi_modules[2]?.installed_tree_sha256 !== invocation.pi_modules[1]?.installed_tree_sha256) return "M6 providers module is not bound to the verified Pi AI tree";
   const limits = invocation.hard_limits;
@@ -58,6 +160,13 @@ function resultSemanticError(result: M6WorkerResultDocument, invocation: M6Worke
   if (result.invocation_key !== invocation.invocation_key || result.invocation_content_sha256 !== invocation.content_sha256) return "M6 result does not bind its invocation identity";
   const usage = result.usage;
   const settlement = result.settlement;
+  if (result.first_failure_code !== null && !isFailureCode(result.first_failure_code)) return "M6 result has an unknown first failure code";
+  if (result.first_failure_stage !== null && !isFailureStage(result.first_failure_stage)) return "M6 result has an unknown first failure stage";
+  if (result.cleanup_failure_code !== null && !isFailureCode(result.cleanup_failure_code)) return "M6 result has an unknown cleanup failure code";
+  if (result.first_failure_code !== null && result.first_failure_stage !== null &&
+      (!failurePairIsValid(result.first_failure_code, result.first_failure_stage) || result.first_failure_code === "INVOCATION_ALREADY_INCOMPLETE")) {
+    return "M6 result failure code and stage are not a valid persisted result failure";
+  }
   if (!nonnegativeInteger(usage.provider_turns) || !nonnegativeInteger(usage.model_turns) || !nonnegativeInteger(usage.tool_calls) ||
       !nonnegativeInteger(usage.read_calls) || !nonnegativeInteger(usage.report_submissions) || usage.provider_turns > 2 || usage.model_turns > 2 ||
       usage.tool_calls > 2 || usage.read_calls > 1 || usage.report_submissions > 1 || usage.model_turns > usage.provider_turns ||

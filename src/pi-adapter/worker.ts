@@ -15,6 +15,12 @@ import {
   withRunExclusive,
 } from "../persistence/store.js";
 import {
+  M6_RUNTIME_BOUNDARY_POLICY,
+  M6_RUNTIME_MODULES,
+  type M6FailureCode,
+  type M6FailureStage,
+} from "../persistence/m6-authority.js";
+import {
   assertScopedToolGatewayAuthority,
   type ScopedToolGatewayAuthorityExpectation,
 } from "../scoped-tools/gateway.js";
@@ -38,18 +44,11 @@ import type { FingerprintedFileInput, WorktreeLockHandle } from "../repository/i
 import type { M5ImmutableRunAuthoritySources } from "../control/types.js";
 import type { RunStorageLocation } from "../persistence/types.js";
 
-const AGENT_MODULE_SPECIFIER = "@earendil-works/pi-agent-core" as const;
-const AI_MODULE_SPECIFIER = "@earendil-works/pi-ai" as const;
-const PROVIDERS_MODULE_SPECIFIER = "@earendil-works/pi-ai/providers/all" as const;
+const AGENT_MODULE_SPECIFIER = M6_RUNTIME_MODULES[0]!.specifier;
+const AI_MODULE_SPECIFIER = M6_RUNTIME_MODULES[1]!.specifier;
+const PROVIDERS_MODULE_SPECIFIER = M6_RUNTIME_MODULES[2]!.specifier;
 const PROTOCOL_ID = "m6-direct-read-v0";
-const RUNTIME_BOUNDARY_POLICY = "OA-M6-02";
-const EXPECTED_VERSION = "0.83.0";
-const EXPECTED_AGENT_INTEGRITY = "sha512-RorGp9OH5l3ElpuC5a5ZQ2eWcchZGXflXRzVGkV99y3y6tT+LLNyxoYIdVKvTKWEObwhExeQbTH0fI2tE4iX4g==";
-const EXPECTED_AI_INTEGRITY = "sha512-m3IZD4g3er0V8TC9+Vpgw/sjTKqcJlkcIBy/JvsgRubuuik3tAVzyugUg4rVrShIkkOT69mEd34NEqKUIsl6JQ==";
-const EXPECTED_AGENT_TARBALL = "https://registry.npmjs.org/@earendil-works/pi-agent-core/-/pi-agent-core-0.83.0.tgz";
-const EXPECTED_AI_TARBALL = "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-0.83.0.tgz";
-const EXPECTED_AGENT_TREE_SHA256 = "sha256:692dbf9c0d91d85a93f93b2f88b27e2113bcf88ab4384a4927c3cba8e9a1bb5d";
-const EXPECTED_AI_TREE_SHA256 = "sha256:1411e4d6e549a4accfdffe5da0a1de613c461592a1f0754d5db6c9d7c1721488";
+const RUNTIME_BOUNDARY_POLICY = M6_RUNTIME_BOUNDARY_POLICY;
 const MAX_PROMPT_BYTES = 32_768;
 const MAX_READ_BYTES = 65_536;
 const MAX_TOOL_RESULT_BYTES = 69_632;
@@ -59,26 +58,11 @@ const MAX_WALL_TIME_MS = 120_000;
 type JsonRecord = { readonly [key: string]: unknown };
 type UnknownCallable = (...args: readonly unknown[]) => unknown;
 
-type M6FailureCode =
-  | "AUTHORITY_REJECTED"
-  | "INVOCATION_ALREADY_INCOMPLETE"
-  | "SDK_INITIALIZATION_FAILED"
-  | "RUNTIME_IDENTITY_INVALID"
-  | "RUNTIME_CAPABILITY_INVALID"
-  | "PROVIDER_PROTOCOL_INVALID"
-  | "TOOL_REQUEST_INVALID"
-  | "TOOL_EXECUTION_FAILED"
-  | "WORKER_REPORT_INVALID"
-  | "WORKER_DEADLINE_EXCEEDED"
-  | "WORKER_ABORTED"
-  | "RESULT_PERSISTENCE_FAILED"
-  | "CLEANUP_UNCERTAIN";
-
 export class M6WorkerError extends Error {
   public readonly code: M6FailureCode;
-  public readonly stage: string;
+  public readonly stage: M6FailureStage;
 
-  public constructor(code: M6FailureCode, message: string, stage = "WORKER") {
+  public constructor(code: M6FailureCode, message: string, stage: M6FailureStage = "WORKER") {
     super(message);
     this.name = "M6WorkerError";
     this.code = code;
@@ -92,13 +76,22 @@ export interface M6ApprovedResourceInput {
   readonly dataClass: "PUBLIC_SOURCE" | "PRIVATE_SOURCE" | "SENSITIVE" | "HASH_ONLY";
 }
 
+export interface M6TaskReference {
+  readonly task_id: TaskDocument["task_id"];
+  readonly task_sha256: TaskDocument["task_sha256"];
+}
+
+export interface M6TaskAuthorityRunSources extends M5ImmutableRunAuthoritySources {
+  readonly task: TaskDocument;
+}
+
 export interface M6DirectReadOnlyWorkerInput {
   readonly stateRoot: string;
   readonly runId: string;
   readonly reducerPolicy: ReducerPolicy;
   readonly m5Policy: M5ControlPolicyDocument;
   readonly m5Decision: M5ControlDecisionDocument;
-  readonly runAuthority: M5ImmutableRunAuthoritySources;
+  readonly runAuthority: M6TaskAuthorityRunSources;
   readonly repository: M3RepositoryIdentityDocument;
   readonly baseline: M3BaselineRuntimeDocument;
   readonly m3StateToken: M3RepositoryStateTokenDocument;
@@ -108,7 +101,7 @@ export interface M6DirectReadOnlyWorkerInput {
   readonly gateway: ScopedToolGateway;
   readonly m4ToolPolicy: M4ScopedToolPolicyDocument;
   readonly m4CommandCatalog: M4CommandCatalogDocument;
-  readonly task: TaskDocument;
+  readonly task: M6TaskReference;
   readonly approvedResources: readonly M6ApprovedResourceInput[];
   readonly systemPrompt: string;
   readonly userPrompt: string;
@@ -207,11 +200,30 @@ export interface M6FauxRuntimeFactoryInput {
 
 export type M6FauxRuntimeFactory = (input: M6FauxRuntimeFactoryInput) => JsonRecord | undefined;
 
-let fauxRuntimeFactory: M6FauxRuntimeFactory | undefined;
+export interface M6FauxRuntimeRoute {
+  readonly providerId: string;
+  readonly modelId: string;
+}
 
-/** Package-internal test seam. Production never supplies a faux runtime. */
-export function configureM6FauxRuntimeForTests(next: M6FauxRuntimeFactory | undefined): void {
-  fauxRuntimeFactory = next;
+interface M6FauxRuntimeProvenance {
+  readonly route: M6FauxRuntimeRoute;
+  readonly factory: M6FauxRuntimeFactory;
+}
+
+const fauxRuntimeProvenance = new WeakMap<object, M6FauxRuntimeProvenance>();
+let activeFauxRuntimeAuthority: object | undefined;
+
+/** Package-internal test-only constructor. The returned provenance is never caller-supplied to production. */
+export function configureM6FauxRuntimeForTests(route: M6FauxRuntimeRoute | undefined, next?: M6FauxRuntimeFactory): void {
+  activeFauxRuntimeAuthority = undefined;
+  if (route === undefined) {
+    if (next !== undefined) throw new TypeError("A test faux factory requires a fixed route");
+    return;
+  }
+  if (next === undefined) throw new TypeError("A fixed test faux route requires a factory");
+  const authority = Object.freeze(Object.create(null)) as object;
+  fauxRuntimeProvenance.set(authority, { route: Object.freeze({ ...route }), factory: next });
+  activeFauxRuntimeAuthority = authority;
 }
 
 interface Admission {
@@ -241,7 +253,7 @@ interface Admission {
 
 interface FailureLatch {
   readonly code: M6FailureCode;
-  readonly stage: string;
+  readonly stage: M6FailureStage;
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
@@ -302,7 +314,7 @@ function safeDigest(value: unknown, label: string): Sha256Digest {
   return value;
 }
 
-function fail(code: M6FailureCode, message: string, stage: string): never {
+function fail(code: M6FailureCode, message: string, stage: M6FailureStage): never {
   throw new M6WorkerError(code, message, stage);
 }
 
@@ -439,21 +451,22 @@ function lockEntry(lock: JsonRecord, packagePath: string, label: string): JsonRe
 async function verifyPackage(
   target: ResolvedTarget,
   packageName: string,
+  expectedVersion: string,
   expectedIntegrity: string,
   expectedResolved: string,
   expectedTree: Sha256Digest,
   nodeModulesRoot: string,
   lock: JsonRecord,
 ): Promise<PackageIdentity> {
-  const rootPath = await findPackageRoot(target.entryPath, packageName, EXPECTED_VERSION, nodeModulesRoot);
+  const rootPath = await findPackageRoot(target.entryPath, packageName, expectedVersion, nodeModulesRoot);
   const expectedRoot = resolve(nodeModulesRoot, packageName);
   if (rootPath !== expectedRoot || !isWithin(rootPath, nodeModulesRoot)) fail("RUNTIME_IDENTITY_INVALID", `${packageName} package root is unexpected`, "RUNTIME_IDENTITY");
   await canonicalDirectory(rootPath, `${packageName} package root`);
   const packageJson = await readJsonRecord(join(rootPath, "package.json"), `${packageName} package.json`);
   exactString(packageJson["name"], packageName, `${packageName} package name`);
-  exactString(packageJson["version"], EXPECTED_VERSION, `${packageName} package version`);
+  exactString(packageJson["version"], expectedVersion, `${packageName} package version`);
   const entry = lockEntry(lock, `node_modules/${packageName}`, packageName);
-  exactString(entry["version"], EXPECTED_VERSION, `${packageName} lock version`);
+  exactString(entry["version"], expectedVersion, `${packageName} lock version`);
   exactString(entry["resolved"], expectedResolved, `${packageName} lock resolved`);
   exactString(entry["integrity"], expectedIntegrity, `${packageName} lock integrity`);
   const roots = await matchingPackageRoots(nodeModulesRoot, packageName, nodeModulesRoot);
@@ -463,7 +476,7 @@ async function verifyPackage(
   return {
     specifier: target.specifier,
     package_name: packageName,
-    package_version: EXPECTED_VERSION,
+    package_version: expectedVersion,
     registry_integrity: expectedIntegrity,
     registry_resolved: expectedResolved,
     resolved_url: target.url,
@@ -507,15 +520,16 @@ async function loadRuntimeBoundary(): Promise<RuntimeBoundary> {
   const lock = await readJsonRecord(lockPath, "installation package-lock.json");
   const rootEntry = lockEntry(lock, "", "installation lockfile");
   const rootDependencies = record(rootEntry["dependencies"], "installation root dependencies");
-  exactString(rootDependencies["@earendil-works/pi-agent-core"], EXPECTED_VERSION, "root Agent dependency");
-  exactString(rootDependencies["@earendil-works/pi-ai"], EXPECTED_VERSION, "root AI dependency");
-  const agentTarget = await resolvePublicEsm(AGENT_MODULE_SPECIFIER, nodeModulesRoot);
-  const aiTarget = await resolvePublicEsm(AI_MODULE_SPECIFIER, nodeModulesRoot);
-  const providersTarget = await resolvePublicEsm(PROVIDERS_MODULE_SPECIFIER, nodeModulesRoot);
-  const agentIdentity = await verifyPackage(agentTarget, "@earendil-works/pi-agent-core", EXPECTED_AGENT_INTEGRITY, EXPECTED_AGENT_TARBALL, EXPECTED_AGENT_TREE_SHA256, nodeModulesRoot, lock);
-  const aiIdentity = await verifyPackage(aiTarget, "@earendil-works/pi-ai", EXPECTED_AI_INTEGRITY, EXPECTED_AI_TARBALL, EXPECTED_AI_TREE_SHA256, nodeModulesRoot, lock);
+  const [agentExpected, aiExpected, providersExpected] = M6_RUNTIME_MODULES;
+  exactString(rootDependencies[agentExpected.package_name], agentExpected.package_version, "root Agent dependency");
+  exactString(rootDependencies[aiExpected.package_name], aiExpected.package_version, "root AI dependency");
+  const agentTarget = await resolvePublicEsm(agentExpected.specifier, nodeModulesRoot);
+  const aiTarget = await resolvePublicEsm(aiExpected.specifier, nodeModulesRoot);
+  const providersTarget = await resolvePublicEsm(providersExpected.specifier, nodeModulesRoot);
+  const agentIdentity = await verifyPackage(agentTarget, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, nodeModulesRoot, lock);
+  const aiIdentity = await verifyPackage(aiTarget, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, nodeModulesRoot, lock);
   if (!isWithin(providersTarget.entryPath, aiIdentity.rootPath)) fail("RUNTIME_IDENTITY_INVALID", "providers/all is outside the verified Pi AI root", "RUNTIME_IDENTITY");
-  const providersRoot = await findPackageRoot(providersTarget.entryPath, "@earendil-works/pi-ai", EXPECTED_VERSION, nodeModulesRoot);
+  const providersRoot = await findPackageRoot(providersTarget.entryPath, providersExpected.package_name, providersExpected.package_version, nodeModulesRoot);
   if (providersRoot !== aiIdentity.rootPath) fail("RUNTIME_IDENTITY_INVALID", "providers/all root differs from Pi AI root", "RUNTIME_IDENTITY");
 
   type FixedRuntimeSpecifier = typeof AGENT_MODULE_SPECIFIER | typeof AI_MODULE_SPECIFIER | typeof PROVIDERS_MODULE_SPECIFIER;
@@ -532,8 +546,8 @@ async function loadRuntimeBoundary(): Promise<RuntimeBoundary> {
   if (agentAfter.entryPath !== agentTarget.entryPath || aiAfter.entryPath !== aiTarget.entryPath || providersAfter.entryPath !== providersTarget.entryPath) {
     fail("RUNTIME_IDENTITY_INVALID", "ESM entry path changed across import", "RUNTIME_IDENTITY");
   }
-  await verifyPackage(agentAfter, "@earendil-works/pi-agent-core", EXPECTED_AGENT_INTEGRITY, EXPECTED_AGENT_TARBALL, EXPECTED_AGENT_TREE_SHA256, nodeModulesRoot, lock);
-  await verifyPackage(aiAfter, "@earendil-works/pi-ai", EXPECTED_AI_INTEGRITY, EXPECTED_AI_TARBALL, EXPECTED_AI_TREE_SHA256, nodeModulesRoot, lock);
+  await verifyPackage(agentAfter, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, nodeModulesRoot, lock);
+  await verifyPackage(aiAfter, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, nodeModulesRoot, lock);
   const agentExport = readProperty(agentModule, "Agent", "Agent module");
   if (typeof agentExport !== "function") fail("RUNTIME_CAPABILITY_INVALID", "Agent export is not constructible", "RUNTIME_GUARD");
   try { Reflect.construct(String, [], agentExport); }
@@ -686,7 +700,7 @@ function streamOptions(value: unknown): JsonRecord {
   return { ...value, maxRetries: 0, maxRetryDelayMs: 0 };
 }
 
-function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, allowTestRuntime = false): PreparedRuntime {
+function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, fauxAuthority?: object): PreparedRuntime {
   const getSupportedThinkingLevels = method(boundary.aiModule, "getSupportedThinkingLevels", "AI module");
   const builtinModels = method(boundary.providersModule, "builtinModels", "providers module");
   const officialIds = verifyOfficialCatalogue(boundary.providersModule);
@@ -696,8 +710,11 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
   let pendingResponseCount: () => number = () => 0;
   let injectedStreamFn: ((model: unknown, context: unknown, options?: unknown) => unknown) | undefined;
 
-  const injected = allowTestRuntime ? fauxRuntimeFactory?.({ aiModule: boundary.aiModule, providerId, modelId }) : undefined;
-  if (injected !== undefined) {
+  const provenance = fauxAuthority === undefined ? undefined : fauxRuntimeProvenance.get(fauxAuthority);
+  if (fauxAuthority !== undefined && provenance === undefined) fail("AUTHORITY_REJECTED", "Faux runtime provenance is not registered by the test-only constructor", "M1_M5_ADMISSION");
+  if (provenance !== undefined) {
+    const injected = provenance.factory({ aiModule: boundary.aiModule, providerId, modelId });
+    if (injected === undefined) fail("RUNTIME_CAPABILITY_INVALID", "Registered faux runtime did not provide the fixed synthetic route", "RUNTIME_GUARD");
     const prepared = guardFauxRuntime(injected);
     models = prepared.models;
     model = prepared.model;
@@ -738,6 +755,23 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
   };
 }
 
+function assertFauxRuntimeAuthority(admission: Admission, productionAuthority: M5ControlPolicyDocument["production_authority"], fauxAuthority: object | undefined): void {
+  if (fauxAuthority === undefined) {
+    if (productionAuthority === "TEST_FIXTURE") fail("AUTHORITY_REJECTED", "TEST_FIXTURE authority is unavailable to the production worker entrypoint", "M1_M5_ADMISSION");
+    return;
+  }
+  if (productionAuthority !== "TEST_FIXTURE") fail("AUTHORITY_REJECTED", "Faux runtime authority cannot accompany production M5 authority", "M1_M5_ADMISSION");
+  const provenance = fauxRuntimeProvenance.get(fauxAuthority);
+  if (provenance === undefined || provenance.route.providerId !== admission.providerId || provenance.route.modelId !== admission.modelId) {
+    fail("AUTHORITY_REJECTED", "Faux runtime provenance is not bound to the durable M5 route", "M1_M5_ADMISSION");
+  }
+}
+
+function releasePreparedRuntime(runtime: PreparedRuntime): void {
+  runtime.clearProviderState();
+  runtime.models.clearProviders();
+}
+
 function reportResource(resource: M6ApprovedResourceInput): JsonRecord {
   return { path: resource.path, content_sha256: resource.contentSha256, data_class: resource.dataClass };
 }
@@ -763,7 +797,14 @@ function limitFromPolicy(policy: M5ControlPolicyDocument, dimension: string, fal
 
 async function admit(input: M6DirectReadOnlyWorkerInput): Promise<Admission> {
   if (input.signal?.aborted === true) fail("WORKER_ABORTED", "Worker was aborted before admission", "M1_M5_ADMISSION");
-  for (const document of [input.reducerPolicy, input.m5Policy, input.m5Decision, input.runAuthority.repositoryIdentity, input.runAuthority.contract, input.runAuthority.routeMap, input.runAuthority.routeMapApproval, input.repository, input.baseline, input.m3StateToken, input.m4ToolPolicy, input.m4CommandCatalog, input.task]) {
+  const taskReference = record(input.task, "task reference");
+  if (Object.keys(taskReference).length !== 2 || !("task_id" in taskReference) || !("task_sha256" in taskReference)) fail("AUTHORITY_REJECTED", "Task reference contains caller task content instead of only the committed identity", "M1_M5_ADMISSION");
+  const taskReferenceId = string(taskReference["task_id"], "task reference ID");
+  let taskReferenceSha: Sha256Digest;
+  try { taskReferenceSha = safeDigest(taskReference["task_sha256"], "task reference identity"); }
+  catch { fail("AUTHORITY_REJECTED", "Task reference identity is invalid", "M1_M5_ADMISSION"); }
+  const committedTask = input.runAuthority.task;
+  for (const document of [input.reducerPolicy, input.m5Policy, input.m5Decision, input.runAuthority.repositoryIdentity, input.runAuthority.contract, input.runAuthority.routeMap, input.runAuthority.routeMapApproval, committedTask, input.repository, input.baseline, input.m3StateToken, input.m4ToolPolicy, input.m4CommandCatalog]) {
     if (document === undefined) fail("AUTHORITY_REJECTED", "Required authority document is absent", "M1_M5_ADMISSION");
   }
   try {
@@ -775,13 +816,13 @@ async function admit(input: M6DirectReadOnlyWorkerInput): Promise<Admission> {
     assertDocumentValid("pi_gacw_repository_state_token_v0", input.m3StateToken);
     assertDocumentValid("pi_gacw_scoped_tool_policy_v0", input.m4ToolPolicy);
     assertDocumentValid("pi_gacw_command_catalog_v0", input.m4CommandCatalog);
-    assertDocumentValid("pi_gacw_task_v0", input.task);
+    assertDocumentValid("pi_gacw_task_v0", committedTask);
   } catch (error: unknown) {
     fail("AUTHORITY_REJECTED", `M1-M5 authority failed validation: ${error instanceof Error ? error.message : String(error)}`, "M1_M5_ADMISSION");
   }
   if (input.repository.content_sha256 !== input.runAuthority.repositoryIdentity.content_sha256) fail("AUTHORITY_REJECTED", "Repository authority differs from M5 authority", "M1_M5_ADMISSION");
   if (input.baseline.repository.content_sha256 !== input.repository.content_sha256 || input.m3StateToken.repository_identity_content_sha256 !== input.repository.content_sha256) fail("AUTHORITY_REJECTED", "M3 repository provenance differs", "M1_M5_ADMISSION");
-  if (input.baseline.run_id !== input.runId || input.m3StateToken.run_id !== input.runId || input.m4ToolPolicy.run_id !== input.runId || input.m4CommandCatalog.run_id !== input.runId || input.task.content_sha256 === undefined) fail("AUTHORITY_REJECTED", "M3/M4/task run identity differs", "M1_M5_ADMISSION");
+  if (input.baseline.run_id !== input.runId || input.m3StateToken.run_id !== input.runId || input.m4ToolPolicy.run_id !== input.runId || input.m4CommandCatalog.run_id !== input.runId || taskReferenceId !== committedTask.task_id || taskReferenceSha !== committedTask.task_sha256) fail("AUTHORITY_REJECTED", "Task reference does not identify the committed TaskDocument", "M1_M5_ADMISSION");
   assertResources(input);
   if (input.systemPrompt.length === 0 || input.userPrompt.length === 0 || Buffer.byteLength(input.systemPrompt, "utf8") + Buffer.byteLength(input.userPrompt, "utf8") > MAX_PROMPT_BYTES) fail("AUTHORITY_REJECTED", "Prompt envelope is empty or exceeds its bound", "M1_M5_ADMISSION");
   const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
@@ -811,14 +852,14 @@ async function admit(input: M6DirectReadOnlyWorkerInput): Promise<Admission> {
   if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted during admission", "M1_M5_ADMISSION");
   const state = committedInspection.workflowState;
   const commit = committedInspection.transitionCommit;
-  if (state.execution_mode !== "DIRECT_LUNA_HIGH" || state.phase !== "DIRECT_ATTEMPT_RUNNING" || state.active_task_id !== input.task.task_id) fail("AUTHORITY_REJECTED", "Current state is not the direct running task phase", "M1_M5_ADMISSION");
-  const runtimeTask = state.tasks.find((task) => task.task_id === input.task.task_id);
+  if (state.execution_mode !== "DIRECT_LUNA_HIGH" || state.phase !== "DIRECT_ATTEMPT_RUNNING" || state.active_task_id !== committedTask.task_id) fail("AUTHORITY_REJECTED", "Current state is not the direct running task phase", "M1_M5_ADMISSION");
+  const runtimeTask = state.tasks.find((task) => task.task_id === committedTask.task_id);
   if (runtimeTask === undefined || runtimeTask.status !== "RUNNING" || runtimeTask.attempts !== 1 || runtimeTask.verification_completed || runtimeTask.postflight_completed) fail("AUTHORITY_REJECTED", "Active task lifecycle is not the first running attempt", "M1_M5_ADMISSION");
-  const reducerTask = input.reducerPolicy.tasks.find((task) => task.task_id === input.task.task_id);
-  const taskAuthorityMatches = reducerTask !== undefined && input.task.assigned_role === "LUNA_EXECUTOR" && input.task.topological_rank === reducerTask.topological_rank && input.task.priority === reducerTask.priority && canonicalize(input.task.dependencies) === canonicalize(reducerTask.dependencies);
+  const reducerTask = input.reducerPolicy.tasks.find((task) => task.task_id === committedTask.task_id);
+  const taskAuthorityMatches = reducerTask !== undefined && committedTask.task_id === reducerTask.task_id && committedTask.assigned_role === "LUNA_EXECUTOR" && committedTask.topological_rank === reducerTask.topological_rank && committedTask.priority === reducerTask.priority && canonicalize(committedTask.dependencies) === canonicalize(reducerTask.dependencies);
   if (!taskAuthorityMatches) fail("AUTHORITY_REJECTED", "Task is not the exact committed M1/M5 LUNA_EXECUTOR task identity", "M1_M5_ADMISSION");
-  if (input.task.scope.readable_paths.length !== 1) fail("AUTHORITY_REJECTED", "Read-only task does not have exactly one readable target", "M1_M5_ADMISSION");
-  const taskPath = input.task.scope.readable_paths[0];
+  if (committedTask.scope.readable_paths.length !== 1) fail("AUTHORITY_REJECTED", "Read-only task does not have exactly one readable target", "M1_M5_ADMISSION");
+  const taskPath = committedTask.scope.readable_paths[0];
   if (taskPath === undefined || !input.m4ToolPolicy.readable_paths.some((rule) => rule.kind === "EXACT" && rule.path === taskPath)) fail("AUTHORITY_REJECTED", "The sole task target is not an exact M4 readable path", "M1_M5_ADMISSION");
   const route = input.runAuthority.routeMap.routes.find((candidate) => candidate.logical_role === "LUNA_EXECUTOR");
   if (route === undefined || route.effort !== "high" || route.provider_id.length === 0 || route.model_id.length === 0) fail("AUTHORITY_REJECTED", "LUNA_EXECUTOR route authority is invalid", "M1_M5_ADMISSION");
@@ -831,7 +872,7 @@ async function admit(input: M6DirectReadOnlyWorkerInput): Promise<Admission> {
   const transitionEventContentSha256 = safeDigest(commit.transition_event_content_sha256, "M5 transition event");
   const predictedNextStateContentSha256 = safeDigest(decision.predicted_next_state_content_sha256, "M5 predicted state");
   const taskScopeIdentity = safeDigest(input.m3StateToken.task_scope_identity, "M3 task scope identity");
-  if (m3ScopeIdentity(input.task.scope.editable_paths, input.task.scope.frozen_paths) !== taskScopeIdentity || m5Policy.scope_sha256 !== taskScopeIdentity) fail("AUTHORITY_REJECTED", "Task scope identity differs from M3/M5 authority", "M1_M5_ADMISSION");
+  if (m3ScopeIdentity(committedTask.scope.editable_paths, committedTask.scope.frozen_paths) !== taskScopeIdentity || m5Policy.scope_sha256 !== taskScopeIdentity) fail("AUTHORITY_REJECTED", "Task scope identity differs from M3/M5 authority", "M1_M5_ADMISSION");
   if (m5Policy.tool_policy_content_sha256 !== input.m4ToolPolicy.content_sha256 || m5Policy.command_catalog_content_sha256 !== input.m4CommandCatalog.content_sha256) fail("AUTHORITY_REJECTED", "M5 policy does not bind the supplied M4 authorities", "M1_M5_ADMISSION");
   const reservationDecisionKey = reservation.reservation_decision_key === undefined ? null : safeDigest(reservation.reservation_decision_key, "M5 reservation decision key");
   const workerReservation = reservation.amounts.find((entry) => entry.dimension === "WORKER_INVOCATION");
@@ -848,8 +889,8 @@ async function admit(input: M6DirectReadOnlyWorkerInput): Promise<Admission> {
     commandCatalog: input.m4CommandCatalog,
     instructionFiles: input.instructionFiles,
     authorityFiles: input.authorityFiles,
-    editablePaths: input.task.scope.editable_paths,
-    frozenPaths: input.task.scope.frozen_paths,
+    editablePaths: committedTask.scope.editable_paths,
+    frozenPaths: committedTask.scope.frozen_paths,
   };
   await assertScopedToolGatewayAuthority(input.gateway, gatewayExpectation, input.instructionFiles.concat(input.authorityFiles));
   const hardWall = limitFromPolicy(m5Policy, "WALL_TIME_MS", MAX_WALL_TIME_MS);
@@ -860,7 +901,7 @@ async function admit(input: M6DirectReadOnlyWorkerInput): Promise<Admission> {
     inspection: committedInspection,
     m5Policy,
     m5Decision,
-    task: input.task,
+    task: committedTask,
     m5AuthorityClassified,
     providerId: route.provider_id,
     modelId: route.model_id,
@@ -933,7 +974,7 @@ function workerTools(
   input: M6DirectReadOnlyWorkerInput,
   admission: Admission,
   state: { readResult: M4ReadMemory | undefined; report: JsonRecord | undefined; readCalls: number; reportCalls: number },
-  latch: (code: M6FailureCode, stage: string) => void,
+  latch: (code: M6FailureCode, stage: M6FailureStage) => void,
 ): readonly ToolRuntime[] {
   const readTool: ToolRuntime = {
     name: "read_scoped",
@@ -1011,7 +1052,7 @@ function firstErrorCode(error: unknown): M6FailureCode {
   return "PROVIDER_PROTOCOL_INVALID";
 }
 
-function firstErrorStage(error: unknown): string {
+function firstErrorStage(error: unknown): M6FailureStage {
   return error instanceof M6WorkerError ? error.stage : "WORKER";
 }
 
@@ -1160,15 +1201,22 @@ interface M4ReadMemory {
   readonly content: string;
 }
 
-export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerInput): Promise<M6WorkerExecutionResult> {
+type WorkerReservation =
+  | { readonly replay: { readonly invocation: M6WorkerInvocationDocument; readonly result: M6WorkerResultDocument } }
+  | { readonly runtime: PreparedRuntime };
+
+async function runWorker(input: M6DirectReadOnlyWorkerInput, fauxAuthority: object | undefined): Promise<M6WorkerExecutionResult> {
   const startedAt = Date.now();
+  if (fauxAuthority === undefined && input.m5Policy.production_authority === "TEST_FIXTURE") fail("AUTHORITY_REJECTED", "TEST_FIXTURE authority is unavailable to the production worker entrypoint", "M1_M5_ADMISSION");
+  if (fauxAuthority !== undefined && input.m5Policy.production_authority !== "TEST_FIXTURE") fail("AUTHORITY_REJECTED", "Faux runtime authority cannot accompany production M5 authority", "M1_M5_ADMISSION");
   const admission = await admit(input);
+  assertFauxRuntimeAuthority(admission, input.m5Policy.production_authority, fauxAuthority);
   if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted after admission", "M1_M5_ADMISSION");
   const runtimeBoundary = await loadRuntimeBoundary();
   if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before invocation construction", "M6_INVOCATION");
   const invocation = buildInvocation(input, admission, runtimeBoundary);
   const location: RunStorageLocation = { stateRoot: input.stateRoot, runId: input.runId };
-  const replay = await withRunExclusive(location, async () => {
+  const reservation: WorkerReservation = await withRunExclusive(location, async (): Promise<WorkerReservation> => {
     const records = await readM6WorkerRecords(location);
     const inspection = await inspectRunStorage(location);
     const isAuthoritative = (kind: string, digest: string): boolean => inspection.status === "HEALTHY" && inspection.managedRecordClassifications.some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest && entry.classification === "AUTHORITATIVE_MANAGED_RECORD");
@@ -1176,7 +1224,7 @@ export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerI
     if (existingResult !== undefined) {
       const existingInvocation = records.invocations.find((value) => value.content_sha256 === existingResult.invocation_content_sha256);
       if (existingInvocation === undefined || existingInvocation.invocation_key !== invocation.invocation_key || !isAuthoritative("M6_WORKER_INVOCATION", existingInvocation.content_sha256) || !isAuthoritative("M6_WORKER_RESULT", existingResult.content_sha256)) fail("AUTHORITY_REJECTED", "Completed M6 result has an invalid invocation predecessor", "REPLAY");
-      return { invocation: existingInvocation, result: existingResult };
+      return { replay: { invocation: existingInvocation, result: existingResult } };
     }
     const existingInvocation = records.invocations.find((value) => value.invocation_key === invocation.invocation_key);
     if (existingInvocation !== undefined) {
@@ -1196,14 +1244,27 @@ export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerI
       fail("AUTHORITY_REJECTED", "A conflicting incomplete M6 invocation already owns this authoritative operation", "REPLAY");
     }
     if (!admission.m5AuthorityClassified) fail("AUTHORITY_REJECTED", "M5 policy or decision is not authoritative for a new M6 invocation", "M1_M5_ADMISSION");
-    if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before invocation publication", "M6_INVOCATION");
-    await publishM6WorkerRecord({ ...location, kind: "M6_WORKER_INVOCATION", document: invocation });
-    return undefined;
+    let prepared: PreparedRuntime | undefined;
+    try {
+      if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before runtime preparation", "M6_INVOCATION");
+      prepared = prepareRuntime(runtimeBoundary, admission.providerId, admission.modelId, fauxAuthority);
+      if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before invocation publication", "M6_INVOCATION");
+      await publishM6WorkerRecord({ ...location, kind: "M6_WORKER_INVOCATION", document: invocation });
+      return { runtime: prepared };
+    } catch (error: unknown) {
+      if (prepared !== undefined) {
+        try { releasePreparedRuntime(prepared); } catch { /* preserve the admission/publication error */ }
+      }
+      throw error;
+    }
   });
-  if (replay !== undefined) return { invocation: replay.invocation, result: replay.result, replayed: true };
-  if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before Agent construction", "M6_INVOCATION");
+  if ("replay" in reservation) return { invocation: reservation.replay.invocation, result: reservation.replay.result, replayed: true };
+  const runtime = reservation.runtime;
+  if (input.signal?.aborted) {
+    try { releasePreparedRuntime(runtime); } catch { /* no durable result exists to classify */ }
+    fail("WORKER_ABORTED", "Worker was aborted before Agent construction", "M6_INVOCATION");
+  }
 
-  let runtime: PreparedRuntime | undefined;
   let agent: AgentRuntime | undefined;
   let unsubscribe: (() => void) | undefined;
   let deadlineTimer: NodeJS.Timeout | undefined;
@@ -1224,9 +1285,8 @@ export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerI
   const toolState: { readResult: M4ReadMemory | undefined; report: JsonRecord | undefined; readCalls: number; reportCalls: number } = { readResult: undefined, report: undefined, readCalls: 0, reportCalls: 0 };
   let firstFailure: FailureLatch | undefined;
   let cleanupFailure: FailureLatch | undefined;
-  const latch = (code: M6FailureCode, stage: string): void => { firstFailure ??= { code, stage }; };
+  const latch = (code: M6FailureCode, stage: M6FailureStage): void => { firstFailure ??= { code, stage }; };
   try {
-    runtime = prepareRuntime(runtimeBoundary, admission.providerId, admission.modelId, admission.m5Policy.production_authority === "TEST_FIXTURE");
     let abortAgent: (() => void) | undefined;
     const tools = workerTools(input, admission, toolState, latch);
     const toolCallNames: string[] = [];
@@ -1239,7 +1299,7 @@ export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerI
           fail("PROVIDER_PROTOCOL_INVALID", "A third provider turn was requested", "PROVIDER_TURN");
         }
         providerTurns += 1;
-        return runtime?.streamFn(model, context, optionsValue);
+        return runtime.streamFn(model, context, optionsValue);
       },
       getApiKey: async (provider: string): Promise<string | undefined> => {
         if (provider !== admission.providerId) fail("AUTHORITY_REJECTED", "Credential callback received the wrong provider ID", "CREDENTIAL");
@@ -1329,7 +1389,7 @@ export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerI
   const prePublicationQueuesEmpty = agent === undefined;
   const prePublicationResetCompleted = agent === undefined;
   const prePublicationTimersCleared = deadlineTimer === undefined;
-  const prePublicationProviderCollectionCleared = runtime === undefined;
+  const prePublicationProviderCollectionCleared = false;
   let result: M6WorkerResultDocument | undefined;
   let publicationFailure: M6WorkerError | undefined;
   try {
@@ -1380,4 +1440,16 @@ export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerI
   if (result === undefined) throw new M6WorkerError("RESULT_PERSISTENCE_FAILED", "M6 terminal result was not constructed", "RESULT_PERSISTENCE");
   if (cleanupFailure !== undefined) throw new M6WorkerError("CLEANUP_UNCERTAIN", "M6 cleanup certainty was not established", cleanupFailure.stage);
   return { invocation, result, replayed: false };
+}
+
+export async function runDirectReadOnlyLunaWorker(input: M6DirectReadOnlyWorkerInput): Promise<M6WorkerExecutionResult> {
+  return runWorker(input, undefined);
+}
+
+/** Package-internal test-only entrypoint; production callers cannot supply faux provenance. */
+export async function runDirectReadOnlyLunaWorkerForTests(input: M6DirectReadOnlyWorkerInput): Promise<M6WorkerExecutionResult> {
+  if (activeFauxRuntimeAuthority === undefined || !fauxRuntimeProvenance.has(activeFauxRuntimeAuthority)) {
+    fail("AUTHORITY_REJECTED", "No registered test-only faux runtime provenance is active", "M1_M5_ADMISSION");
+  }
+  return runWorker(input, activeFauxRuntimeAuthority);
 }

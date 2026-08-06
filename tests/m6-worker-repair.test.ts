@@ -6,7 +6,7 @@ import { createControlDecisionKernel } from "../src/control/index.js";
 import { inspectRunStorage, readM6WorkerRecords } from "../src/persistence/store.js";
 import { configurePersistenceTestHooks } from "../src/persistence/test-hooks.js";
 import { acquireWorktreeLock, releaseWorktreeLock, runFullPreflight } from "../src/repository/index.js";
-import { configureM6FauxRuntimeForTests, runDirectReadOnlyLunaWorker } from "../src/pi-adapter/worker.js";
+import { configureM6FauxRuntimeForTests, runDirectReadOnlyLunaWorker, runDirectReadOnlyLunaWorkerForTests } from "../src/pi-adapter/worker.js";
 import type { M6DirectReadOnlyWorkerInput } from "../src/pi-adapter/worker.js";
 import { identifyContractDocument, type M3BaselineRuntimeDocument, type M3RepositoryIdentityDocument, type M3RepositoryStateTokenDocument, type M4CommandCatalogDocument, type M4ScopedToolPolicyDocument, type M5ControlDecisionDocument, type TaskDocument } from "../src/schemas/index.js";
 import { createScopedToolGateway } from "../src/scoped-tools/index.js";
@@ -23,8 +23,9 @@ const editable = ["tracked.txt"] as const;
 const frozen = ["AGENTS.md", "AUTHORITY.md"] as const;
 const taskScopeIdentity = m3ScopeIdentity(editable, frozen);
 
-type Mode = "SUCCESS" | "TEXT_ONLY" | "UNKNOWN_TOOL" | "SECOND_READ" | "REPORT_BEFORE_READ" | "PROVIDER_FAILURE" | "CLEANUP_FAILURE";
+type Mode = "SUCCESS" | "TEXT_ONLY" | "UNKNOWN_TOOL" | "SECOND_READ" | "REPORT_BEFORE_READ" | "PROVIDER_FAILURE" | "ACTIVE_ABORT" | "CLEANUP_FAILURE";
 let mode: Mode = "SUCCESS";
+let activeAbortController: AbortController | undefined;
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} is not an object`);
@@ -52,7 +53,7 @@ function secondSuccess(aiModule: Record<string, unknown>, contextValue: unknown)
 
 function installFauxRuntime(nextMode: Mode): void {
   mode = nextMode;
-  configureM6FauxRuntimeForTests(({ aiModule, providerId, modelId }) => {
+  configureM6FauxRuntimeForTests({ providerId: "provider-primary", modelId: "luna-high" }, ({ aiModule, providerId, modelId }) => {
     if (providerId !== "provider-primary" || modelId !== "luna-high") return undefined;
     const faux = objectValue(methodValue(aiModule, "fauxProvider", "AI module")({ api: "m6-repair-faux-api", provider: providerId, models: [{ id: modelId, name: modelId, reasoning: true, input: ["text"] }], tokensPerSecond: 0 }), "faux provider");
     const models = objectValue(methodValue(aiModule, "createModels", "AI module")(), "models");
@@ -72,6 +73,10 @@ function installFauxRuntime(nextMode: Mode): void {
       model,
       streamFn: (streamModel: unknown, context: unknown, options?: unknown): unknown => {
         if (mode === "PROVIDER_FAILURE") throw new Error("provider stream failure");
+        if (mode === "ACTIVE_ABORT") {
+          activeAbortController?.abort();
+          throw new Error("provider stream aborted");
+        }
         return streamSimple(streamModel, context, options);
       },
       clearProviderState: (): void => {
@@ -110,9 +115,9 @@ function buildInput(value: {
 }): M6DirectReadOnlyWorkerInput {
   return {
     stateRoot: value.fixture.stateRoot, runId: value.fixture.runId, reducerPolicy: value.fixture.reducer, m5Policy: value.policy, m5Decision: value.decision,
-    runAuthority: value.fixture.runAuthority, repository: value.repository, baseline: value.baseline, m3StateToken: value.m3StateToken, lock: value.lock,
+    runAuthority: { ...value.fixture.runAuthority, task: value.task }, repository: value.repository, baseline: value.baseline, m3StateToken: value.m3StateToken, lock: value.lock,
     instructionFiles: [value.instruction], authorityFiles: [value.authority], gateway: value.gateway, m4ToolPolicy: value.m4Policy, m4CommandCatalog: value.m4Catalog,
-    task: value.task, approvedResources: [{ path: value.instruction.path, contentSha256: value.instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" as const }, { path: value.authority.path, contentSha256: value.authority.expectedSha256, dataClass: "PUBLIC_SOURCE" as const }],
+    task: { task_id: value.task.task_id, task_sha256: value.task.task_sha256 }, approvedResources: [{ path: value.instruction.path, contentSha256: value.instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" as const }, { path: value.authority.path, contentSha256: value.authority.expectedSha256, dataClass: "PUBLIC_SOURCE" as const }],
     systemPrompt: "Bounded repair worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialCallback: () => { value.credentials.value += 1; return "m6-repair-faux-key"; },
   };
 }
@@ -161,6 +166,7 @@ async function createScenario(): Promise<Scenario> {
 async function cleanupScenario(scenario: Scenario): Promise<void> {
   configurePersistenceTestHooks(undefined);
   configureM6FauxRuntimeForTests(undefined);
+  activeAbortController = undefined;
   await releaseWorktreeLock(scenario.lock).catch(() => undefined);
   await removeM5R3Fixture(scenario.fixture);
 }
@@ -170,12 +176,80 @@ function errorCode(error: unknown): unknown {
 }
 
 test("M6 production-path protocol and lifecycle negatives remain bounded", async (t) => {
+  await t.test("production entrypoint rejects TEST_FIXTURE authority before any work", async () => {
+    const scenario = await createScenario(); installFauxRuntime("SUCCESS");
+    try {
+      await assert.rejects(runDirectReadOnlyLunaWorker(scenario.input), (error: unknown) => errorCode(error) === "AUTHORITY_REJECTED");
+      const records = await readM6WorkerRecords(scenario.input);
+      assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
+    } finally { await cleanupScenario(scenario); }
+  });
+
+  await t.test("wrong faux route provenance is rejected before publication", async () => {
+    const scenario = await createScenario();
+    configureM6FauxRuntimeForTests({ providerId: "wrong-provider", modelId: "wrong-model" }, () => undefined);
+    try {
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests(scenario.input), (error: unknown) => errorCode(error) === "AUTHORITY_REJECTED");
+      const records = await readM6WorkerRecords(scenario.input);
+      assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
+    } finally { await cleanupScenario(scenario); }
+  });
+
+  await t.test("authoritative pre-seeded incomplete invocation refuses provider work", async () => {
+    const scenario = await createScenario(); installFauxRuntime("SUCCESS");
+    try {
+      await runDirectReadOnlyLunaWorkerForTests(scenario.input);
+      const first = await readM6WorkerRecords(scenario.input);
+      const result = first.results[0]; assert.ok(result);
+      await unlink(join(scenario.input.stateRoot, "runs", scenario.input.runId, "records", "m6-worker-results", `${result.content_sha256.slice("sha256:".length)}.json`));
+      const beforeCredentials = scenario.credentials.value;
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests(scenario.input), (error: unknown) => errorCode(error) === "INVOCATION_ALREADY_INCOMPLETE");
+      const after = await readM6WorkerRecords(scenario.input);
+      assert.equal(after.invocations.length, 1); assert.equal(after.results.length, 0); assert.equal(scenario.credentials.value, beforeCredentials);
+    } finally { await cleanupScenario(scenario); }
+  });
+
+  await t.test("abort during admission publishes no M6 record", async () => {
+    const scenario = await createScenario(); installFauxRuntime("SUCCESS");
+    let reads = 0;
+    const signal = { get aborted(): boolean { reads += 1; return reads > 1; } } as unknown as AbortSignal;
+    try {
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...scenario.input, signal }), (error: unknown) => errorCode(error) === "WORKER_ABORTED");
+      const records = await readM6WorkerRecords(scenario.input);
+      assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
+    } finally { await cleanupScenario(scenario); }
+  });
+
+  await t.test("abort after invocation publication leaves no provider work", async () => {
+    const scenario = await createScenario(); installFauxRuntime("SUCCESS");
+    const controller = new AbortController();
+    configurePersistenceTestHooks({ checkpoint: async (checkpoint, finalPath) => {
+      if (checkpoint === "RECORD_DIRECTORY_SYNCED" && finalPath.includes("m6-worker-invocations")) controller.abort();
+    } });
+    try {
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...scenario.input, signal: controller.signal }), (error: unknown) => errorCode(error) === "WORKER_ABORTED");
+      const records = await readM6WorkerRecords(scenario.input);
+      assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
+    } finally { await cleanupScenario(scenario); }
+  });
+
+  await t.test("active-provider abort settles a blocked result and cleans up", async () => {
+    const scenario = await createScenario(); installFauxRuntime("ACTIVE_ABORT");
+    const controller = new AbortController(); activeAbortController = controller;
+    try {
+      const execution = await runDirectReadOnlyLunaWorkerForTests({ ...scenario.input, signal: controller.signal });
+      assert.equal(execution.result.outcome, "BLOCKED"); assert.equal(execution.result.first_failure_code, "WORKER_ABORTED");
+      assert.equal(execution.result.provider_work_started, true); assert.equal(execution.result.settlement.pending_tool_calls, 0);
+      assert.equal((await readM6WorkerRecords(scenario.input)).results.length, 1);
+    } finally { await cleanupScenario(scenario); }
+  });
+
   for (const negative of ["TEXT_ONLY", "UNKNOWN_TOOL", "SECOND_READ", "REPORT_BEFORE_READ"] as const) {
     await t.test(`${negative} is rejected without a completed result`, async () => {
       const scenario = await createScenario();
       installFauxRuntime(negative);
       try {
-        const execution = await runDirectReadOnlyLunaWorker(scenario.input);
+        const execution = await runDirectReadOnlyLunaWorkerForTests(scenario.input);
         assert.equal(execution.result.outcome, "BLOCKED");
         assert.notEqual(execution.result.first_failure_code, null);
         assert.equal((await readM6WorkerRecords(scenario.input)).results.length, 1);
@@ -186,7 +260,7 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
   await t.test("provider failure preserves the first operational error", async () => {
     const scenario = await createScenario(); installFauxRuntime("PROVIDER_FAILURE");
     try {
-      const execution = await runDirectReadOnlyLunaWorker(scenario.input);
+      const execution = await runDirectReadOnlyLunaWorkerForTests(scenario.input);
       assert.equal(execution.result.outcome, "BLOCKED"); assert.equal(execution.result.first_failure_code, "PROVIDER_PROTOCOL_INVALID"); assert.equal(execution.result.provider_work_started, true);
     } finally { await cleanupScenario(scenario); }
   });
@@ -195,7 +269,7 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
     const scenario = await createScenario(); installFauxRuntime("SUCCESS");
     configurePersistenceTestHooks({ checkpoint: async (checkpoint, finalPath) => { if (checkpoint === "RECORD_DIRECTORY_SYNCED" && finalPath.includes("m6-worker-invocations")) await unlink(scenario.targetPath); } });
     try {
-      const execution = await runDirectReadOnlyLunaWorker(scenario.input);
+      const execution = await runDirectReadOnlyLunaWorkerForTests(scenario.input);
       assert.equal(execution.result.outcome, "BLOCKED"); assert.equal(execution.result.first_failure_code, "TOOL_EXECUTION_FAILED"); assert.equal(execution.result.usage.read_calls, 0);
     } finally { await cleanupScenario(scenario); }
   });
@@ -204,7 +278,7 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
     const scenario = await createScenario(); installFauxRuntime("SUCCESS");
     configurePersistenceTestHooks({ checkpoint: async (checkpoint, finalPath) => { if (checkpoint === "RECORD_TEMP_WRITTEN" && finalPath.includes("m6-worker-results")) throw new Error("injected result publication failure"); } });
     try {
-      await assert.rejects(runDirectReadOnlyLunaWorker(scenario.input), (error: unknown) => errorCode(error) === "RESULT_PERSISTENCE_FAILED");
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests(scenario.input), (error: unknown) => errorCode(error) === "RESULT_PERSISTENCE_FAILED");
       const records = await readM6WorkerRecords(scenario.input); assert.equal(records.results.length, 0); assert.equal(records.invocations.length, 1);
     } finally { await cleanupScenario(scenario); }
   });
@@ -212,7 +286,7 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
   await t.test("cleanup uncertainty after result publication does not rewrite the result", async () => {
     const scenario = await createScenario(); installFauxRuntime("CLEANUP_FAILURE");
     try {
-      await assert.rejects(runDirectReadOnlyLunaWorker(scenario.input), (error: unknown) => errorCode(error) === "CLEANUP_UNCERTAIN");
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests(scenario.input), (error: unknown) => errorCode(error) === "CLEANUP_UNCERTAIN");
       const records = await readM6WorkerRecords(scenario.input); assert.equal(records.results.length, 1); assert.equal(records.results[0]?.outcome, "COMPLETED"); assert.equal(records.results[0]?.cleanup_failure_code, null); assert.equal(records.results[0]?.settlement.cleanup_certain, false);
       const inspection = await inspectRunStorage({ stateRoot: scenario.input.stateRoot, runId: scenario.input.runId }); assert.equal(inspection.managedRecordClassifications.filter((entry) => entry.object.kind === "M6_WORKER_RESULT" && entry.classification === "AUTHORITATIVE_MANAGED_RECORD").length, 1);
     } finally { await cleanupScenario(scenario); }

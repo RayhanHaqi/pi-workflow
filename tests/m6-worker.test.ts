@@ -8,7 +8,7 @@ import { acquireWorktreeLock, releaseWorktreeLock, runFullPreflight } from "../s
 import { requiredEnvironment, fingerprintInput } from "./repository-helpers.js";
 import { identifyContractDocument, assertDocumentValid, type M3BaselineRuntimeDocument, type M4CommandCatalogDocument, type M4ScopedToolPolicyDocument, type TaskDocument } from "../src/schemas/index.js";
 import { createScopedToolGateway } from "../src/scoped-tools/index.js";
-import { configureM6FauxRuntimeForTests, runDirectReadOnlyLunaWorker } from "../src/pi-adapter/worker.js";
+import { configureM6FauxRuntimeForTests, runDirectReadOnlyLunaWorker, runDirectReadOnlyLunaWorkerForTests } from "../src/pi-adapter/worker.js";
 import { configurePersistenceTestHooks } from "../src/persistence/test-hooks.js";
 import { classifyM6Authority } from "../src/persistence/m6-authority.js";
 import { createM5R3Fixture, directFastPreflightFixture, m5Policy, removeM5R3Fixture, r3ProcessMetadata } from "./m5-r3-fixtures.js";
@@ -61,7 +61,7 @@ function installFauxRuntime(events: string[], responses: readonly FauxResponse[]
   fauxEvents.length = 0;
   fauxEvents.push(...events);
   fauxResponses = responses;
-  configureM6FauxRuntimeForTests(({ aiModule, providerId, modelId }) => {
+  configureM6FauxRuntimeForTests({ providerId: "provider-primary", modelId: "luna-high" }, ({ aiModule, providerId, modelId }) => {
     if (providerId !== "provider-primary" || modelId !== "luna-high") return undefined;
     const faux = objectValue(methodValue(aiModule, "fauxProvider", "AI module")({
       api: "m6-direct-faux-api", provider: providerId, models: [{ id: modelId, name: modelId, reasoning: true, input: ["text"] }], tokensPerSecond: 0,
@@ -144,9 +144,9 @@ test("M6 direct read-only worker executes once and replays its immutable result"
       }
     } });
     let credentials = 0;
-    const workerInput = { stateRoot: fixture.stateRoot, runId: fixture.runId, reducerPolicy: fixture.reducer, m5Policy: policy, m5Decision: decisionResult.decision, runAuthority: fixture.runAuthority, repository, baseline, m3StateToken: m3StateToken, lock, instructionFiles: [instruction], authorityFiles: [authority], gateway, m4ToolPolicy: m4Policy, m4CommandCatalog: m4Catalog, task: task as TaskDocument, approvedResources: [{ path: instruction.path, contentSha256: instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" }, { path: authority.path, contentSha256: authority.expectedSha256, dataClass: "PUBLIC_SOURCE" }], systemPrompt: "Bounded smoke worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialCallback: () => { credentials += 1; return "m6-faux-test-key"; } } as const;
+    const workerInput = { stateRoot: fixture.stateRoot, runId: fixture.runId, reducerPolicy: fixture.reducer, m5Policy: policy, m5Decision: decisionResult.decision, runAuthority: { ...fixture.runAuthority, task: task as TaskDocument }, repository, baseline, m3StateToken: m3StateToken, lock, instructionFiles: [instruction], authorityFiles: [authority], gateway, m4ToolPolicy: m4Policy, m4CommandCatalog: m4Catalog, task: { task_id: task.task_id, task_sha256: task.task_sha256 }, approvedResources: [{ path: instruction.path, contentSha256: instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" }, { path: authority.path, contentSha256: authority.expectedSha256, dataClass: "PUBLIC_SOURCE" }], systemPrompt: "Bounded smoke worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialCallback: () => { credentials += 1; return "m6-faux-test-key"; } } as const;
     const assertAuthorityRejectedWithoutWork = async (candidate: typeof workerInput): Promise<void> => {
-      await assert.rejects(runDirectReadOnlyLunaWorker(candidate), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "AUTHORITY_REJECTED");
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests(candidate), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "AUTHORITY_REJECTED");
       const records = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
       const after = await inspectRunStorage({ stateRoot: fixture.stateRoot, runId: fixture.runId });
       assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0);
@@ -157,15 +157,23 @@ test("M6 direct read-only worker executes once and replays its immutable result"
       await assertAuthorityRejectedWithoutWork({ ...workerInput, m5Decision: { ...decisionResult.decision, operation_id: "forged-operation" } as typeof decisionResult.decision });
     });
     await t.test("modified task content and wrong task identity are rejected before publication", async () => {
-      await assertAuthorityRejectedWithoutWork({ ...workerInput, task: { ...workerInput.task, objective: "forged objective" } });
+      await assertAuthorityRejectedWithoutWork({ ...workerInput, task: { ...workerInput.task, task_sha256: digest(998) } });
+      for (const fields of [
+        { assigned_role: "SOL_OWNER" },
+        { dependencies: ["other-task"] },
+        { scope: { readable_paths: ["other.txt"] } },
+      ] as const) {
+        await assertAuthorityRejectedWithoutWork({ ...workerInput, task: { ...workerInput.task, ...fields } as unknown as typeof workerInput.task });
+      }
+      await assertAuthorityRejectedWithoutWork({ ...workerInput, approvedResources: [{ ...workerInput.approvedResources[0]!, contentSha256: digest(999) }, workerInput.approvedResources[1]!] });
     });
     await t.test("pre-admission abort performs no provider, M4, or M6 work", async () => {
       const controller = new AbortController(); controller.abort();
-      await assert.rejects(runDirectReadOnlyLunaWorker({ ...workerInput, signal: controller.signal }), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "WORKER_ABORTED");
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...workerInput, signal: controller.signal }), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "WORKER_ABORTED");
       const records = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
       assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(credentials, 0);
     });
-    const result = await runDirectReadOnlyLunaWorker(workerInput);
+    const result = await runDirectReadOnlyLunaWorkerForTests(workerInput);
     assert.equal(result.result.outcome, "COMPLETED"); assert.equal(result.result.usage.provider_turns, 2); assert.equal(result.result.usage.read_calls, 1); assert.equal(result.result.usage.report_submissions, 1); assert.equal(result.result.settlement.cleanup_certain, false); assert.equal(credentials, 2);
     assert.ok(fauxEvents.indexOf("invocation-written") >= 0);
     assert.ok(fauxEvents.indexOf("invocation-written") < fauxEvents.indexOf("provider-call"));
@@ -180,11 +188,11 @@ test("M6 direct read-only worker executes once and replays its immutable result"
     assert.equal(inspection.managedRecordClassifications.filter((entry) => entry.object.kind === "M6_WORKER_INVOCATION" && entry.classification === "AUTHORITATIVE_MANAGED_RECORD").length, 1);
     assert.equal(inspection.managedRecordClassifications.filter((entry) => entry.object.kind === "M6_WORKER_RESULT" && entry.classification === "AUTHORITATIVE_MANAGED_RECORD").length, 1);
     await t.test("completed authority conflict is rejected before a new invocation publication", async () => {
-      await assert.rejects(runDirectReadOnlyLunaWorker({ ...workerInput, userPrompt: "A conflicting prompt identity." }), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "AUTHORITY_REJECTED");
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...workerInput, userPrompt: "A conflicting prompt identity." }), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "AUTHORITY_REJECTED");
       const records = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
       assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 1); assert.equal(credentials, 2);
     });
-    const replay = await runDirectReadOnlyLunaWorker(workerInput);
+    const replay = await runDirectReadOnlyLunaWorkerForTests(workerInput);
     assert.equal(replay.replayed, true); assert.equal(replay.result.content_sha256, result.result.content_sha256); assert.equal(credentials, 2);
     await t.test("semantic M6 classifier rejects schema-valid contradictory terminal records", async () => {
       const invalidResult = (patch: Record<string, unknown>): typeof result.result => {
@@ -203,6 +211,29 @@ test("M6 direct read-only worker executes once and replays its immutable result"
         });
         assert.equal(classifications.find((entry) => entry.object.kind === "M6_WORKER_RESULT")?.classification, "INVALID_MANAGED_RECORD");
       };
+      const invalidInvocation = (patch: Record<string, unknown>): typeof result.invocation => {
+        const { content_sha256: _contentSha256, ...body } = structuredClone(result.invocation) as Record<string, unknown>;
+        return identifyContractDocument("pi_gacw_m6_worker_invocation_v0", { ...body, ...patch }) as typeof result.invocation;
+      };
+      const assertInvalidInvocation = (candidate: typeof result.invocation): void => {
+        const classifications = classifyM6Authority({
+          runId: fixture.runId,
+          objects: [
+            { kind: "M6_WORKER_INVOCATION", contentSha256: candidate.content_sha256 as Sha256Digest, relativePath: "records/m6-worker-invocations/invocation.json" },
+            { kind: "M6_WORKER_RESULT", contentSha256: result.result.content_sha256 as Sha256Digest, relativePath: "records/m6-worker-results/result.json" },
+          ],
+          invocations: new Map([[candidate.content_sha256, candidate]]),
+          results: new Map([[result.result.content_sha256, result.result]]),
+        });
+        assert.equal(classifications.find((entry) => entry.object.kind === "M6_WORKER_INVOCATION")?.classification, "INVALID_MANAGED_RECORD");
+      };
+      const changedModules = (index: number, patch: Record<string, unknown>): readonly Record<string, unknown>[] => result.invocation.pi_modules.map((module, moduleIndex) => moduleIndex === index ? { ...module, ...patch } : { ...module });
+      assertInvalidInvocation(invalidInvocation({ pi_modules: changedModules(1, { package_version: "0.82.0" }) }));
+      assertInvalidInvocation(invalidInvocation({ pi_modules: changedModules(1, { registry_integrity: "sha512-substituted" }) }));
+      assertInvalidInvocation(invalidInvocation({ pi_modules: changedModules(1, { installed_tree_sha256: digest(991) }) }));
+      assertInvalidInvocation(invalidInvocation({ pi_modules: changedModules(2, { specifier: "@earendil-works/pi-ai" }) }));
+      assertInvalidInvocation(invalidInvocation({ pi_modules: changedModules(1, { resolved_url: "file:///wrong.js" }) }));
+      assertInvalid(invalidResult({ outcome: "BLOCKED", first_failure_code: "UNKNOWN_FAILURE", first_failure_stage: "PROTOCOL" }));
       assertInvalid(invalidResult({ first_failure_code: "AUTHORITY_REJECTED", first_failure_stage: "FORGED" }));
       assertInvalid(invalidResult({ outcome: "BLOCKED", first_failure_code: null, first_failure_stage: null }));
       assertInvalid(invalidResult({ provider_work_started: false, outcome: "BLOCKED", first_failure_code: "WORKER_ABORTED", first_failure_stage: "ABORT", usage: { ...result.result.usage, provider_turns: 1 } }));
