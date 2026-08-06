@@ -152,6 +152,156 @@ The M5 reservation is authoritative before provider work, and one active writer 
 
 The global Pi package and extension continue to rely on global extensions, `registerCommand()`, and installable local Pi packages; OA-M6-01 changes only the M6 worker runtime mechanism.
 
+### OA-M6-02 — Verified Dynamic Pi Runtime Boundary
+
+```text
+STATUS = OWNER_APPROVED
+DECISION = Replace mandatory static Pi declaration imports with a strict
+           repository-owned dynamic ESM runtime boundary, verified against
+           exact official Pi packages before provider work.
+```
+
+OA-M6-01 remains authoritative for M6 behavior. Its clause selecting `@earendil-works/pi-agent-core` `Agent` at the exact owner-approved Pi version selects the official low-level runtime and does not require a static TypeScript import. OA-M6-02 replaces only the compile-time and runtime-package trust mechanism used to realize that behavior. It does not restore `AgentSession` or change worker, tool, persistence, replay, cleanup, retry, fallback, route, or failure behavior.
+
+Direct static imports of the supported Pi root declarations produced eight upstream declaration diagnostics under each of TypeScript 5.8.3, 6.0.3, and 7.0.2 with `moduleResolution = NodeNext`, strict checking, and `skipLibCheck = false`. OA-M6-02 does not claim those upstream declarations were repaired. It replaces reliance on them as the sole SDK authority with:
+
+```text
+strict repository-owned boundary
++ exact package identity
++ pre-import integrity verification
++ runtime capability guards
++ bounded behavioral evidence
+```
+
+#### Dynamic module boundary
+
+M6 uses the official low-level Pi `Agent` runtime through a strict, controller-owned dynamic ESM boundary. The controller loads only these fixed public package specifiers:
+
+```text
+@earendil-works/pi-agent-core
+@earendil-works/pi-ai
+@earendil-works/pi-ai/providers/all
+```
+
+The specifiers are controller constants. They must not originate from the caller, task packet, route map, model output, environment, configuration discovery, fallback list, or a runtime-generated package name.
+
+Canonical source must not statically import Pi runtime declarations while the supported official declaration graph remains incompatible with the required strict NodeNext build. Every dynamically imported value begins as `unknown` and may enter a repository-owned narrow interface only after runtime guards establish every capability M6 actually uses. That interface may model only the used `Agent`, model/provider, catalogue, tool, event, and lifecycle capabilities. It must not reproduce the complete Pi SDK declarations, provider SDK types, transcript implementation, or unused event union.
+
+The canonical repository remains compiled with strict TypeScript and `skipLibCheck = false`. This boundary does not authorize a declaration shim, ambient declaration, unchecked cast from `unknown`, `any`-based SDK facade, `ts-ignore`, `ts-nocheck`, `node_modules` patch, postinstall patch, unsupported internal import, or CommonJS resolution fallback through `createRequire` or `require.resolve`.
+
+#### Package identity boundary
+
+Before executing Pi package code, the controller must verify exact owner-approved package identities through Node ESM semantics. The identity gate must:
+
+- use `import.meta.resolve` for each fixed public specifier;
+- require a file URL with no authority, query, or fragment;
+- require an existing, regular, non-symlinked canonical target;
+- require containment within the approved `node_modules` root;
+- discover the nearest package root through a bounded upward walk;
+- require the exact package name and version;
+- verify the exact committed lockfile entry and registry integrity;
+- verify the owner-approved installed-tree digest;
+- reject duplicate package roots;
+- require `providers/all` to share the verified Pi AI root;
+- require the validated URL to equal the URL resolved immediately before and after dynamic import; and
+- revalidate package, lockfile, and tree identity after import.
+
+Any identity failure must occur before provider work or model-callable tool execution. The initially proven package graph is:
+
+```text
+@earendil-works/pi-agent-core@0.83.0
+@earendil-works/pi-ai@0.83.0
+```
+
+A future version change requires explicit owner approval and fresh strict compile and runtime evidence. Canonical authority must not depend on a temporary fixture path.
+
+#### Runtime capability boundary
+
+After identity verification, the controller guards only the runtime capabilities required by the approved M6 positive slice. The guard must establish:
+
+- a constructible `Agent`;
+- `prompt`, `abort`, `waitForIdle`, `subscribe`, queue-clear, queue-state, `reset`, and guarded state capabilities;
+- model/provider collection construction and exact lookup;
+- provider catalogue enumeration and exact selection;
+- stream-function capability;
+- supported thinking-level inspection;
+- exactly the two fixed tools; and
+- lifecycle cleanup capabilities.
+
+A method name alone is insufficient when an inert behavioral check can be performed without provider work. Malformed, substituted, incomplete, duplicated, or identity-mismatched capabilities must fail before provider work. This amendment authorizes neither a general capability registry nor a new durable capability record.
+
+#### Provider and credential authority
+
+Authority remains separated as follows:
+
+```text
+provider authority source:
+  owner-approved M5 route map
+
+provider implementation source:
+  verified official Pi provider catalogue
+  or separately owner-approved controller-owned provider implementation
+
+credential source:
+  controller/Pi credential boundary
+  never the route map, task packet, caller, or model
+
+test provider:
+  controller-owned faux provider
+```
+
+Catalogue capability proof is not M5 production-route acceptance. A synthetic test route is not official production provider/model identity, and synthetic identifiers are not required to exist in the official catalogue. Production provider, model, and effort still derive exactly from immutable M5 authority. Provider or model fallback, substitution, and caller selection remain forbidden.
+
+The `Agent` may invoke an explicitly supplied, controller-owned credential callback such as `getApiKey` before each provider turn. This is not ambient credential discovery when the callback receives the exact M5-derived provider ID, uses only the approved credential boundary, and does not inspect arbitrary environment or project files. Its output must never be persisted, logged, placed in prompts, copied into M6 records, or exposed to model-callable tools. Tests may return a fixed non-secret sentinel through this callback. Production credentials remain private to the approved controller/Pi credential boundary. Ambient environment credential discovery, ambient credential-file discovery, and credential copying into M6 records are forbidden.
+
+#### Preserved worker protocol and cleanup
+
+OA-M6-02 preserves all OA-M6-01 worker requirements, including:
+
+```text
+one fresh low-level Agent
+one tool-loop owner
+exactly read_scoped and submit_worker_report
+two provider turns
+one genuine M4 read
+one structured terminal report
+terminate after the report
+no third provider turn
+exactly M6_WORKER_INVOCATION and M6_WORKER_RESULT
+persist invocation before provider work
+reuse a completed result
+refuse an incomplete invocation
+no resume
+no retry
+no fallback
+no compaction
+no event bridge
+no AgentSession
+```
+
+All runtime protocol assertions and failures must pass through `finally` or an equivalent structured cleanup owner. Cleanup must abort when active; await prompt settlement and `Agent` idle; unsubscribe; clear queues; verify no queued messages; reset the `Agent`; clear timers and provider collections; and release module, `Agent`, provider, model, tool, prompt, and credential-callback references. The controller preserves the first chronological operational failure separately from any cleanup failure. Cleanup uncertainty remains fail-closed as `BLOCKED_CLEANUP_UNCERTAIN`.
+
+#### Security, package, and proof boundary
+
+The M6 boundary forbids caller- or model-controlled module specifiers, generic plugin or package loading, module/provider/model fallback, runtime `eval`, `Function` constructor invocation, unsupported package internals, static Pi type imports, unchecked `unknown` casts, an `any`-based SDK facade, declaration shims, package patches, ambient credential discovery, and real provider execution during capability guarding.
+
+Package identity failure, runtime capability-guard failure, M5 authority failure, provider/model identity failure, unsupported thinking level, malformed tool registration, or inability to establish cleanup ownership must result in zero provider work.
+
+The canonical public package surface remains nine subpaths, with zero new M6 public subpaths. The dynamic Pi loader and runtime boundary remain package-internal, and internal M6 paths remain blocked by the package exports map. The package must not expose Pi module handles, the provider catalogue, credential callbacks, runtime-guard internals, or M6 invocation or execution APIs until M7 defines an explicitly approved public surface.
+
+A controlled Pi fork is `REJECTED FOR CURRENT M6 SLICE`. The verified official dynamic boundary satisfies strict compilation, package identity, catalogue access, the two-turn protocol, credential isolation, negative guards, and cleanup without fork ownership, vendored release machinery, or parallel SDK authority. Forks are not universally forbidden; a later owner may reconsider one only if an official runtime loses a required supported public capability and no bounded official dynamic boundary remains.
+
+Accepted proof authority:
+
+```text
+archive = /home/tilakoid/archives/pi-bounded-coding-workflow/m6-credential-corrected-dynamic-proof-pass-20260806T075326Z
+manifest = f4ce15f60049966c74dff50a000f3ecc884ef9340863bbaf8ac8807d376b774b
+classification = M6_DYNAMIC_BOUNDARY_CAPABILITY_EVIDENCE
+not = PRODUCTION_IMPLEMENTATION | MILESTONE_ACCEPTANCE
+```
+
+This amendment authorizes architecture only. This invocation does not authorize `package.json` mutation, `package-lock.json` mutation, production dependency installation, or M6 source implementation. A later Luna Max implementation authorization may approve exactly `@earendil-works/pi-agent-core@0.83.0` and `@earendil-works/pi-ai@0.83.0` and the resulting reviewed lockfile mutation.
+
 ## 4. User experience
 
 From any trusted Git repository:
