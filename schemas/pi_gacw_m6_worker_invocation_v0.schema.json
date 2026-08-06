@@ -1,0 +1,385 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_m6_worker_invocation_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_m6_worker_invocation_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "invocation_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "protocol_id": {
+      "const": "m6-direct-read-v0",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
+    },
+    "state_pointer_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "predecessor_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "transition_commit_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "m5_decision_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "m5_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "m5_reservation_decision_key": {
+      "anyOf": [
+        {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "operation_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "transition_event_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "predicted_next_state_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "execution_mode": {
+      "const": "DIRECT_LUNA_HIGH",
+      "type": "string"
+    },
+    "continuation_action": {
+      "const": "CONTINUE_ADMITTED_OPERATION",
+      "type": "string"
+    },
+    "logical_role": {
+      "const": "LUNA_EXECUTOR",
+      "type": "string"
+    },
+    "repository_identity_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "worktree_key": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "m3_state_token_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "m4_tool_policy_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "m4_command_catalog_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "task_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "task_scope_identity": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "route_map_approval_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "model_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "effort": {
+      "const": "high",
+      "type": "string"
+    },
+    "runtime_boundary_policy": {
+      "const": "OA-M6-02",
+      "type": "string"
+    },
+    "pi_modules": {
+      "minItems": 3,
+      "maxItems": 3,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "specifier": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "package_name": {
+            "minLength": 1,
+            "maxLength": 255,
+            "type": "string"
+          },
+          "package_version": {
+            "minLength": 1,
+            "maxLength": 64,
+            "type": "string"
+          },
+          "registry_integrity": {
+            "minLength": 1,
+            "maxLength": 512,
+            "type": "string"
+          },
+          "registry_resolved": {
+            "minLength": 1,
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "resolved_url": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "installed_tree_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "specifier",
+          "package_name",
+          "package_version",
+          "registry_integrity",
+          "registry_resolved",
+          "resolved_url",
+          "installed_tree_sha256"
+        ]
+      }
+    },
+    "approved_resources": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "path": {
+            "minLength": 1,
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "content_sha256": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "data_class": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_SOURCE",
+              "PRIVATE_SOURCE",
+              "SENSITIVE",
+              "HASH_ONLY"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "content_sha256",
+          "data_class"
+        ]
+      }
+    },
+    "system_prompt_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "user_prompt_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "read_path": {
+      "minLength": 1,
+      "maxLength": 4096,
+      "type": "string"
+    },
+    "read_offset": {
+      "minimum": 0,
+      "maximum": 65536,
+      "type": "integer"
+    },
+    "read_length": {
+      "minimum": 1,
+      "maximum": 65536,
+      "type": "integer"
+    },
+    "hard_limits": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "provider_turns": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "model_turns": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "read_calls": {
+          "minimum": 1,
+          "maximum": 1,
+          "type": "integer"
+        },
+        "tool_calls": {
+          "minimum": 1,
+          "maximum": 2,
+          "type": "integer"
+        },
+        "report_submissions": {
+          "minimum": 1,
+          "maximum": 1,
+          "type": "integer"
+        },
+        "prompt_bytes": {
+          "minimum": 1,
+          "maximum": 32768,
+          "type": "integer"
+        },
+        "read_bytes": {
+          "minimum": 1,
+          "maximum": 65536,
+          "type": "integer"
+        },
+        "tool_result_bytes": {
+          "minimum": 1,
+          "maximum": 69632,
+          "type": "integer"
+        },
+        "report_canonical_bytes": {
+          "minimum": 1,
+          "maximum": 4096,
+          "type": "integer"
+        },
+        "wall_deadline_ms": {
+          "minimum": 1,
+          "maximum": 120000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider_turns",
+        "model_turns",
+        "read_calls",
+        "tool_calls",
+        "report_submissions",
+        "prompt_bytes",
+        "read_bytes",
+        "tool_result_bytes",
+        "report_canonical_bytes",
+        "wall_deadline_ms"
+      ]
+    },
+    "attempt_number": {
+      "minimum": 1,
+      "maximum": 2,
+      "type": "integer"
+    },
+    "admitted_at": {
+      "minLength": 1,
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "invocation_key",
+    "protocol_id",
+    "run_id",
+    "revision",
+    "state_pointer_content_sha256",
+    "current_state_content_sha256",
+    "predecessor_state_content_sha256",
+    "transition_commit_content_sha256",
+    "m5_decision_content_sha256",
+    "m5_policy_content_sha256",
+    "m5_reservation_decision_key",
+    "operation_id",
+    "transition_event_content_sha256",
+    "predicted_next_state_content_sha256",
+    "execution_mode",
+    "continuation_action",
+    "logical_role",
+    "repository_identity_content_sha256",
+    "worktree_key",
+    "m3_state_token_content_sha256",
+    "m4_tool_policy_content_sha256",
+    "m4_command_catalog_content_sha256",
+    "task_content_sha256",
+    "task_scope_identity",
+    "route_map_sha256",
+    "route_map_approval_sha256",
+    "provider_id",
+    "model_id",
+    "effort",
+    "runtime_boundary_policy",
+    "pi_modules",
+    "approved_resources",
+    "system_prompt_sha256",
+    "user_prompt_sha256",
+    "read_path",
+    "read_offset",
+    "read_length",
+    "hard_limits",
+    "attempt_number",
+    "admitted_at"
+  ]
+}

@@ -43,6 +43,8 @@ export type {
   M5ControlDecisionDocument,
   M5ControlPolicyDocument,
   M5UsageEvidenceDocument,
+  M6WorkerInvocationDocument,
+  M6WorkerResultDocument,
   ObjectiveDocument,
   OwnerDecisionsDocument,
   PersistedStatePointerDocument,

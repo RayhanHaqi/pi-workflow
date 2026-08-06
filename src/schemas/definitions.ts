@@ -1905,6 +1905,137 @@ export const M5ControlDecisionSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m5_control_decision_v0.schema.json" },
 );
 
+const M6ModuleIdentitySchema = StrictObject({
+  specifier: NonEmptyString(255),
+  package_name: NonEmptyString(255),
+  package_version: NonEmptyString(64),
+  registry_integrity: NonEmptyString(512),
+  registry_resolved: NonEmptyString(2048),
+  resolved_url: NonEmptyString(4096),
+  installed_tree_sha256: Digest(),
+});
+
+const M6ApprovedResourceSchema = StrictObject({
+  path: PathString(),
+  content_sha256: Digest(),
+  data_class: StringEnum(["PUBLIC_SOURCE", "PRIVATE_SOURCE", "SENSITIVE", "HASH_ONLY"] as const),
+});
+
+const M6HardLimitsSchema = StrictObject({
+  provider_turns: Type.Integer({ minimum: 1, maximum: 2 }),
+  model_turns: Type.Integer({ minimum: 1, maximum: 2 }),
+  read_calls: Type.Integer({ minimum: 1, maximum: 1 }),
+  tool_calls: Type.Integer({ minimum: 1, maximum: 2 }),
+  report_submissions: Type.Integer({ minimum: 1, maximum: 1 }),
+  prompt_bytes: Type.Integer({ minimum: 1, maximum: 32_768 }),
+  read_bytes: Type.Integer({ minimum: 1, maximum: 65_536 }),
+  tool_result_bytes: Type.Integer({ minimum: 1, maximum: 69_632 }),
+  report_canonical_bytes: Type.Integer({ minimum: 1, maximum: 4_096 }),
+  wall_deadline_ms: Type.Integer({ minimum: 1, maximum: 120_000 }),
+});
+
+export const M6WorkerInvocationSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_m6_worker_invocation_v0"),
+    invocation_key: Digest(),
+    protocol_id: Type.Literal("m6-direct-read-v0"),
+    run_id: RunId(),
+    revision: BoundedInteger(Number.MAX_SAFE_INTEGER),
+    state_pointer_content_sha256: Digest(),
+    current_state_content_sha256: Digest(),
+    predecessor_state_content_sha256: Digest(),
+    transition_commit_content_sha256: Digest(),
+    m5_decision_content_sha256: Digest(),
+    m5_policy_content_sha256: Digest(),
+    m5_reservation_decision_key: NullableDigest(),
+    operation_id: Identifier(),
+    transition_event_content_sha256: Digest(),
+    predicted_next_state_content_sha256: Digest(),
+    execution_mode: Type.Literal("DIRECT_LUNA_HIGH"),
+    continuation_action: Type.Literal("CONTINUE_ADMITTED_OPERATION"),
+    logical_role: Type.Literal("LUNA_EXECUTOR"),
+    repository_identity_content_sha256: Digest(),
+    worktree_key: Digest(),
+    m3_state_token_content_sha256: Digest(),
+    m4_tool_policy_content_sha256: Digest(),
+    m4_command_catalog_content_sha256: Digest(),
+    task_content_sha256: Digest(),
+    task_scope_identity: Digest(),
+    route_map_sha256: Digest(),
+    route_map_approval_sha256: Digest(),
+    provider_id: Identifier(),
+    model_id: Identifier(),
+    effort: Type.Literal("high"),
+    runtime_boundary_policy: Type.Literal("OA-M6-02"),
+    pi_modules: Type.Array(M6ModuleIdentitySchema, { minItems: 3, maxItems: 3 }),
+    approved_resources: Type.Array(M6ApprovedResourceSchema, { maxItems: 10_000 }),
+    system_prompt_sha256: Digest(),
+    user_prompt_sha256: Digest(),
+    read_path: PathString(),
+    read_offset: Type.Integer({ minimum: 0, maximum: 65_536 }),
+    read_length: Type.Integer({ minimum: 1, maximum: 65_536 }),
+    hard_limits: M6HardLimitsSchema,
+    attempt_number: Type.Integer({ minimum: 1, maximum: 2 }),
+    admitted_at: NonEmptyString(64),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m6_worker_invocation_v0.schema.json" },
+);
+
+const M6WorkerReportSchema = StrictObject({
+  status: Type.Literal("COMPLETED"),
+  summary: NonEmptyString(2_048),
+  evidence_content_sha256: Type.Array(Digest(), { minItems: 1, maxItems: 1, uniqueItems: true }),
+});
+
+const M6UsageSummarySchema = StrictObject({
+  provider_turns: Type.Integer({ minimum: 0, maximum: 2 }),
+  model_turns: Type.Integer({ minimum: 0, maximum: 2 }),
+  provider_requests: Type.Union([Type.Integer({ minimum: 0, maximum: 2 }), Type.Null()]),
+  tool_calls: Type.Integer({ minimum: 0, maximum: 2 }),
+  read_calls: Type.Integer({ minimum: 0, maximum: 1 }),
+  report_submissions: Type.Integer({ minimum: 0, maximum: 1 }),
+  input_tokens: Type.Union([Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), Type.Null()]),
+  output_tokens: Type.Union([Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), Type.Null()]),
+  cost_microusd: Type.Union([Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), Type.Null()]),
+  wall_time_ms: Type.Union([Type.Integer({ minimum: 0, maximum: 120_000 }), Type.Null()]),
+});
+
+const M6SettlementSchema = StrictObject({
+  prompt_settled: Type.Boolean(),
+  agent_idle: Type.Boolean(),
+  pending_tool_calls: Type.Integer({ minimum: 0, maximum: 2 }),
+  subscriber_removed: Type.Boolean(),
+  queues_empty: Type.Boolean(),
+  reset_completed: Type.Boolean(),
+  timers_cleared: Type.Boolean(),
+  provider_collection_cleared: Type.Boolean(),
+  owned_provider_streams: Type.Integer({ minimum: 0, maximum: 1 }),
+  owned_child_processes: Type.Integer({ minimum: 0, maximum: 1 }),
+  owned_sockets: Type.Integer({ minimum: 0, maximum: 1 }),
+  owned_fifos: Type.Integer({ minimum: 0, maximum: 1 }),
+  cleanup_certain: Type.Boolean(),
+});
+
+export const M6WorkerResultSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_m6_worker_result_v0"),
+    invocation_key: Digest(),
+    invocation_content_sha256: Digest(),
+    run_id: RunId(),
+    outcome: Type.Union([Type.Literal("COMPLETED"), Type.Literal("BLOCKED")]),
+    provider_work_started: Type.Boolean(),
+    first_failure_code: Type.Union([NonEmptyString(128), Type.Null()]),
+    first_failure_stage: Type.Union([NonEmptyString(128), Type.Null()]),
+    worker_report: Type.Union([M6WorkerReportSchema, Type.Null()]),
+    m4_result_content_sha256: NullableDigest(),
+    usage: M6UsageSummarySchema,
+    settlement: M6SettlementSchema,
+    cleanup_failure_code: Type.Union([NonEmptyString(128), Type.Null()]),
+    completed_at: NonEmptyString(64),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m6_worker_result_v0.schema.json" },
+);
+
 export const FinalReportSchema = StrictObject(
   {
     ...DocumentFields("pi_gacw_final_report_v0"),
@@ -1970,6 +2101,8 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_m5_control_policy_v0", fileName: "pi_gacw_m5_control_policy_v0.schema.json", schema: M5ControlPolicySchema },
   { schemaId: "pi_gacw_m5_usage_evidence_v0", fileName: "pi_gacw_m5_usage_evidence_v0.schema.json", schema: M5UsageEvidenceSchema },
   { schemaId: "pi_gacw_m5_control_decision_v0", fileName: "pi_gacw_m5_control_decision_v0.schema.json", schema: M5ControlDecisionSchema },
+  { schemaId: "pi_gacw_m6_worker_invocation_v0", fileName: "pi_gacw_m6_worker_invocation_v0.schema.json", schema: M6WorkerInvocationSchema },
+  { schemaId: "pi_gacw_m6_worker_result_v0", fileName: "pi_gacw_m6_worker_result_v0.schema.json", schema: M6WorkerResultSchema },
 ] as const;
 
 // The package-private registry is the sole runtime and emission authority. Every
@@ -2059,3 +2192,5 @@ export type M4CommandResultDocument = Static<typeof M4CommandResultSchema>;
 export type M5ControlPolicyDocument = Static<typeof M5ControlPolicySchema>;
 export type M5UsageEvidenceDocument = Static<typeof M5UsageEvidenceSchema>;
 export type M5ControlDecisionDocument = Static<typeof M5ControlDecisionSchema>;
+export type M6WorkerInvocationDocument = Static<typeof M6WorkerInvocationSchema>;
+export type M6WorkerResultDocument = Static<typeof M6WorkerResultSchema>;

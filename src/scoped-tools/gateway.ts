@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonicalize } from "../canonical-json/index.js";
 import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../identity/index.js";
 import { inspectRunStorage } from "../persistence/index.js";
+import { lockMatchesRepository } from "../repository/lock.js";
 import {
   assertWorktreeLockHeld,
   runFastPreflight,
@@ -31,10 +32,12 @@ import {
   type M3BaselineRuntimeDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
+  type M4CommandCatalogDocument,
   type M4CommandResultDocument,
   type M4MutationReceiptDocument,
   type M4PatchRequestDocument,
   type M4SandboxCapabilityDocument,
+  type M4ScopedToolPolicyDocument,
   type M4SecureFilesystemCapabilityDocument,
   type M4ToolRequestDocument,
 } from "../schemas/index.js";
@@ -104,6 +107,25 @@ function stateFor(gateway: ScopedToolGateway): GatewayState {
   const state = gatewayStates.get(gateway as object);
   if (state === undefined) throw new ScopedToolGatewayError("STATE_TOKEN_PROVENANCE_INVALID", "Scoped gateway handle is invalid");
   return state;
+}
+
+export interface ScopedToolGatewayAuthorityExpectation {
+  readonly stateRoot: string;
+  readonly runId: string;
+  readonly repository: M3RepositoryIdentityDocument;
+  readonly baseline: M3BaselineRuntimeDocument;
+  readonly acceptedState: M3RepositoryStateTokenDocument;
+  readonly taskScopeIdentity: Sha256Digest;
+  readonly toolPolicy: M4ScopedToolPolicyDocument;
+  readonly commandCatalog: M4CommandCatalogDocument;
+  readonly instructionFiles: readonly FingerprintedFileInput[];
+  readonly authorityFiles: readonly FingerprintedFileInput[];
+  readonly editablePaths: readonly string[];
+  readonly frozenPaths: readonly string[];
+}
+
+function sameFingerprintInputs(left: readonly FingerprintedFileInput[], right: readonly FingerprintedFileInput[]): boolean {
+  return canonicalize(left) === canonicalize(right);
 }
 
 function mapSecurityError(error: unknown): ScopedToolGatewayError {
@@ -581,6 +603,49 @@ class ScopedToolGatewayImpl implements ScopedToolGateway {
 }
 
 function pathsOverlap(left: string, right: string): boolean { return left === right || pathWithin(left, right) || pathWithin(right, left); }
+
+export async function assertScopedToolGatewayAuthority(
+  gateway: ScopedToolGateway,
+  expected: ScopedToolGatewayAuthorityExpectation,
+  approvedResources: readonly FingerprintedFileInput[],
+): Promise<void> {
+  const state = stateFor(gateway);
+  if (
+    state.location.stateRoot !== expected.stateRoot ||
+    state.location.runId !== expected.runId ||
+    canonicalize(state.repository) !== canonicalize(expected.repository) ||
+    canonicalize(state.baseline) !== canonicalize(expected.baseline) ||
+    canonicalize(state.acceptedState) !== canonicalize(expected.acceptedState) ||
+    state.taskScopeIdentity !== expected.taskScopeIdentity ||
+    canonicalize(state.policy.document) !== canonicalize(expected.toolPolicy) ||
+    canonicalize(state.catalog.document) !== canonicalize(expected.commandCatalog) ||
+    canonicalize(state.editablePaths) !== canonicalize(expected.editablePaths) ||
+    canonicalize(state.frozenPaths) !== canonicalize(expected.frozenPaths) ||
+    !sameFingerprintInputs(state.instructions, expected.instructionFiles) ||
+    !sameFingerprintInputs(state.authorities, expected.authorityFiles) ||
+    !sameFingerprintInputs([...state.instructions, ...state.authorities], approvedResources)
+  ) {
+    throw new ScopedToolGatewayError("STATE_TOKEN_PROVENANCE_INVALID", "Scoped gateway authority differs from the expected M3/M4 provenance");
+  }
+  try {
+    await assertWorktreeLockHeld(state.lock);
+    if (!lockMatchesRepository(state.lock, expected.repository)) {
+      throw new ScopedToolGatewayError("LOCK_LOST", "Scoped gateway lock does not match the expected repository");
+    }
+    await runFastPreflight({
+      stateRoot: state.location.stateRoot,
+      runId: state.location.runId,
+      acceptedState: state.acceptedState,
+      baseline: state.baseline,
+      instructionFiles: state.instructions,
+      authorityFiles: state.authorities,
+      taskScopeIdentity: state.taskScopeIdentity,
+      lock: state.lock,
+    });
+  } catch (error: unknown) {
+    throw mapSecurityError(error);
+  }
+}
 
 export async function createScopedToolGateway(input: CreateScopedToolGatewayInput): Promise<ScopedToolGateway> {
   exactInput(input, ["stateRoot", "runId", "repository", "baseline", "acceptedState", "lock", "instructionFiles", "authorityFiles", "editablePaths", "frozenPaths", "taskScopeIdentity", "toolPolicy", "commandCatalog", "temporaryRoot"], "createScopedToolGateway input");

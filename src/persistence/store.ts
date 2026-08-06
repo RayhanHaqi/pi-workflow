@@ -38,6 +38,8 @@ import {
   type M5ControlDecisionDocument,
   type M5ControlPolicyDocument,
   type M5UsageEvidenceDocument,
+  type M6WorkerInvocationDocument,
+  type M6WorkerResultDocument,
   type PersistedStatePointerDocument,
   type ProcessInterruptionDocument,
   type ProcessMetadata,
@@ -54,6 +56,7 @@ import { createInitialState, reduceState } from "../state-machine/index.js";
 import { classifyManagedAuthority } from "./managed-authority.js";
 import { classifyM4Authority } from "./m4-authority.js";
 import { classifyM5Authority } from "./m5-authority.js";
+import { classifyM6Authority } from "./m6-authority.js";
 import {
   assertPrivateDirectory,
   assertRegularPrivateFile,
@@ -121,6 +124,8 @@ interface RunLayout {
   readonly m5ControlPolicyDirectory: string;
   readonly m5UsageEvidenceDirectory: string;
   readonly m5ControlDecisionDirectory: string;
+  readonly m6WorkerInvocationDirectory: string;
+  readonly m6WorkerResultDirectory: string;
   readonly commitsDirectory: string;
 }
 
@@ -157,6 +162,8 @@ interface JsonKindDefinition {
     | "m5ControlPolicyDirectory"
     | "m5UsageEvidenceDirectory"
     | "m5ControlDecisionDirectory"
+    | "m6WorkerInvocationDirectory"
+    | "m6WorkerResultDirectory"
     | "commitsDirectory"
   >;
 }
@@ -189,6 +196,8 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M5_CONTROL_POLICY", schemaId: "pi_gacw_m5_control_policy_v0", directory: "m5ControlPolicyDirectory" },
   { kind: "M5_USAGE_EVIDENCE", schemaId: "pi_gacw_m5_usage_evidence_v0", directory: "m5UsageEvidenceDirectory" },
   { kind: "M5_CONTROL_DECISION", schemaId: "pi_gacw_m5_control_decision_v0", directory: "m5ControlDecisionDirectory" },
+  { kind: "M6_WORKER_INVOCATION", schemaId: "pi_gacw_m6_worker_invocation_v0", directory: "m6WorkerInvocationDirectory" },
+  { kind: "M6_WORKER_RESULT", schemaId: "pi_gacw_m6_worker_result_v0", directory: "m6WorkerResultDirectory" },
 ]);
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
@@ -342,6 +351,8 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     m5ControlPolicyDirectory: join(recordsDirectory, "m5-control-policies"),
     m5UsageEvidenceDirectory: join(recordsDirectory, "m5-usage-evidence"),
     m5ControlDecisionDirectory: join(recordsDirectory, "m5-control-decisions"),
+    m6WorkerInvocationDirectory: join(recordsDirectory, "m6-worker-invocations"),
+    m6WorkerResultDirectory: join(recordsDirectory, "m6-worker-results"),
     commitsDirectory: join(runDirectory, "commits"),
   };
 }
@@ -579,6 +590,8 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.m5ControlPolicyDirectory);
   await ensurePrivateDirectory(layout.m5UsageEvidenceDirectory);
   await ensurePrivateDirectory(layout.m5ControlDecisionDirectory);
+  await ensurePrivateDirectory(layout.m6WorkerInvocationDirectory);
+  await ensurePrivateDirectory(layout.m6WorkerResultDirectory);
   await ensurePrivateDirectory(layout.commitsDirectory);
 }
 
@@ -619,6 +632,8 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
     layout.m5ControlPolicyDirectory,
     layout.m5UsageEvidenceDirectory,
     layout.m5ControlDecisionDirectory,
+    layout.m6WorkerInvocationDirectory,
+    layout.m6WorkerResultDirectory,
     layout.commitsDirectory,
   ]) {
     await assertPrivateDirectory(directory);
@@ -1209,6 +1224,8 @@ async function scanLayout(
     "m5-control-policies",
     "m5-usage-evidence",
     "m5-control-decisions",
+    "m6-worker-invocations",
+    "m6-worker-results",
   ].sort();
   const recordChildren = (await readdir(layout.recordsDirectory)).sort();
   if (canonicalize(recordChildren) !== canonicalize(expectedRecordNames)) {
@@ -1275,8 +1292,9 @@ const M4_MANAGED_KINDS = new Set<StoredObjectKind>([
 ]);
 
 const M5_MANAGED_KINDS = new Set<StoredObjectKind>(["M5_CONTROL_POLICY", "M5_USAGE_EVIDENCE", "M5_CONTROL_DECISION"]);
+const M6_MANAGED_KINDS = new Set<StoredObjectKind>(["M6_WORKER_INVOCATION", "M6_WORKER_RESULT"]);
 
-const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS]);
+const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS, ...M6_MANAGED_KINDS]);
 
 async function terminalAuthorityManagedObjects(
   layout: RunLayout,
@@ -1329,6 +1347,8 @@ async function classifyManagedRecords(
   const m5Policies = new Map<string, M5ControlPolicyDocument>();
   const m5Usage = new Map<string, M5UsageEvidenceDocument>();
   const m5Decisions = new Map<string, M5ControlDecisionDocument>();
+  const m6Invocations = new Map<string, M6WorkerInvocationDocument>();
+  const m6Results = new Map<string, M6WorkerResultDocument>();
   const transitionEvents = new Map<string, TransitionEvent>();
   const transitionCommits = new Map<string, StateTransitionCommitDocument>();
   for (const object of objects) {
@@ -1360,6 +1380,8 @@ async function classifyManagedRecords(
     else if (object.kind === "M5_CONTROL_POLICY") m5Policies.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M5_USAGE_EVIDENCE") m5Usage.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M5_CONTROL_DECISION") m5Decisions.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M6_WORKER_INVOCATION") m6Invocations.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M6_WORKER_RESULT") m6Results.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
       try {
         const bytes = await readRawEvidence(layout, object.contentSha256);
@@ -1472,7 +1494,13 @@ async function classifyManagedRecords(
     rootedByM5.has(classification.object.contentSha256) && classification.classification === "UNREFERENCED_MANAGED_RECORD"
       ? { ...classification, classification: "AUTHORITATIVE_MANAGED_RECORD", detail: "M5 committed decision roots this predecessor authority" }
       : classification;
-  return [...m3.map(promote), ...m4.map(promote), ...m5].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
+  const m6 = classifyM6Authority({
+    runId: basename(layout.runDirectory),
+    objects: objects.filter((object) => M6_MANAGED_KINDS.has(object.kind)),
+    invocations: m6Invocations,
+    results: m6Results,
+  });
+  return [...m3.map(promote), ...m4.map(promote), ...m5, ...m6].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
 }
 
 function blockedInspection(
@@ -1731,6 +1759,70 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
     commandCatalogs: await load<M4CommandCatalogDocument>("M4_COMMAND_CATALOG"),
     stateTokens: await load<M3RepositoryStateTokenDocument>("M3_REPOSITORY_STATE_TOKEN"),
     postflights: await load<M3PostflightDocument>("M3_POSTFLIGHT"),
+  });
+}
+
+export type M6WorkerRecordKind = "M6_WORKER_INVOCATION" | "M6_WORKER_RESULT";
+type M6WorkerPublicationInput = RunStorageLocation & (
+  | { readonly kind: "M6_WORKER_INVOCATION"; readonly document: M6WorkerInvocationDocument }
+  | { readonly kind: "M6_WORKER_RESULT"; readonly document: M6WorkerResultDocument }
+);
+
+export async function publishM6WorkerRecord(input: M6WorkerPublicationInput): Promise<{ readonly reused: boolean }> {
+  assertRecord(input, "M6 publication input");
+  assertExactKeys(input, ["stateRoot", "runId", "kind", "document"], "M6 publication input");
+  if (!M6_MANAGED_KINDS.has(input.kind)) throw new StateStoreError("INVALID_ARGUMENT", "Unknown M6 record kind");
+  const document = input.document;
+  assertRecord(document, "M6 publication document");
+  if (input.kind === "M6_WORKER_INVOCATION") assertDocumentValid("pi_gacw_m6_worker_invocation_v0", document);
+  else assertDocumentValid("pi_gacw_m6_worker_result_v0", document);
+  if (document.run_id !== input.runId) throw new StateStoreError("RUN_ID_MISMATCH", "M6 record belongs to another run");
+  return withRunExclusive(input, async () => {
+    const layout = assertLocation(input);
+    const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+    requireUsableInspection(inspection);
+    if (inspection.workflowState.phase === "PASS" || inspection.workflowState.phase === "BLOCKED") throw new StateStoreError("TERMINAL_STATE_IMMUTABLE", "Cannot publish M6 authority to a terminal run");
+    if (input.kind === "M6_WORKER_INVOCATION" && inspection.workflowState.content_sha256 !== input.document.current_state_content_sha256) throw new StateStoreError("M6_STATE_DRIFT", "M6 invocation state differs from the current authoritative state");
+    const existing = await readM6WorkerRecords(input);
+    const invocationKey = document.invocation_key;
+    const sameKind = input.kind === "M6_WORKER_INVOCATION" ? existing.invocations : existing.results;
+    const sameKey = sameKind.find((entry) => entry.invocation_key === invocationKey);
+    if (sameKey !== undefined) {
+      if (sameKey.content_sha256 !== document.content_sha256 || canonicalize(sameKey) !== canonicalize(document)) {
+        throw new StateStoreError("M6_RECORD_CONFLICT", "A different immutable M6 record already owns this invocation key");
+      }
+      return { reused: true };
+    }
+    if (input.kind === "M6_WORKER_RESULT") {
+      const invocation = existing.invocations.find((entry) => entry.content_sha256 === input.document.invocation_content_sha256);
+      const invocationIsAuthoritative = invocation !== undefined && inspection.managedRecordClassifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" && entry.object.contentSha256 === input.document.invocation_content_sha256 && entry.classification === "AUTHORITATIVE_MANAGED_RECORD");
+      if (invocation === undefined || !invocationIsAuthoritative || invocation.invocation_key !== input.document.invocation_key) {
+        throw new StateStoreError("M6_INVOCATION_MISSING", "M6 result does not have its exact immutable invocation predecessor");
+      }
+    }
+    const publication = await publishJsonDocument(layout, input.kind, document);
+    await readJsonDocument(layout, input.kind, document.content_sha256);
+    return detachedFrozen(publication);
+  });
+}
+
+export async function readM6WorkerRecords(input: RunStorageLocation): Promise<{
+  readonly invocations: readonly M6WorkerInvocationDocument[];
+  readonly results: readonly M6WorkerResultDocument[];
+}> {
+  const layout = assertLocation(input);
+  await assertExistingLayout(layout);
+  const load = async <T extends Record<string, unknown>>(kind: JsonStoredObjectKind): Promise<T[]> => {
+    const definition = JSON_KIND_BY_NAME.get(kind);
+    if (definition === undefined) throw new StateStoreError("UNKNOWN_OBJECT_KIND", kind);
+    const names = (await readdir(layout[definition.directory])).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
+    const values: T[] = [];
+    for (const name of names) values.push(await readJsonDocument<T>(layout, kind, `sha256:${name.slice(0, -5)}`));
+    return values;
+  };
+  return detachedFrozen({
+    invocations: await load<M6WorkerInvocationDocument>("M6_WORKER_INVOCATION"),
+    results: await load<M6WorkerResultDocument>("M6_WORKER_RESULT"),
   });
 }
 

@@ -33,6 +33,8 @@
     "README.md"
   ],
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
     "@sinclair/typebox": "0.34.41",
     "ajv": "8.17.1"
   },
