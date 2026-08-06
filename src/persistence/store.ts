@@ -1768,6 +1768,14 @@ type M6WorkerPublicationInput = RunStorageLocation & (
   | { readonly kind: "M6_WORKER_RESULT"; readonly document: M6WorkerResultDocument }
 );
 
+async function assertPublishedM6Authority(input: M6WorkerPublicationInput): Promise<void> {
+  const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+  const classification = inspection.managedRecordClassifications.find((entry) => entry.object.kind === input.kind && entry.object.contentSha256 === input.document.content_sha256);
+  if (inspection.status !== "HEALTHY" || classification?.classification !== "AUTHORITATIVE_MANAGED_RECORD") {
+    throw new StateStoreError("M6_RECORD_NOT_AUTHORITATIVE", `${input.kind} publication was not classified as authoritative after reread`);
+  }
+}
+
 export async function publishM6WorkerRecord(input: M6WorkerPublicationInput): Promise<{ readonly reused: boolean }> {
   assertRecord(input, "M6 publication input");
   assertExactKeys(input, ["stateRoot", "runId", "kind", "document"], "M6 publication input");
@@ -1802,6 +1810,7 @@ export async function publishM6WorkerRecord(input: M6WorkerPublicationInput): Pr
     }
     const publication = await publishJsonDocument(layout, input.kind, document);
     await readJsonDocument(layout, input.kind, document.content_sha256);
+    await assertPublishedM6Authority(input);
     return detachedFrozen(publication);
   });
 }
