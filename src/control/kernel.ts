@@ -1,9 +1,18 @@
 import { canonicalize } from "../canonical-json/index.js";
 import { type Sha256Digest } from "../identity/index.js";
 import { commitTransition, inspectRunStorage } from "../persistence/index.js";
-import { publishM5ManagedRecord, readM5ManagedRecords, withRunExclusive } from "../persistence/store.js";
+import { publishM5ManagedRecord, putEvidence, readM5ManagedRecords, withRunExclusive } from "../persistence/store.js";
 import { m5PersistenceCheckpoint } from "../persistence/m5-test-hooks.js";
-import { assertDocumentValid, type M5ControlDecisionDocument, type M5ControlPolicyDocument, type M5UsageEvidenceDocument } from "../schemas/index.js";
+import {
+  assertDocumentValid,
+  type BudgetDocument,
+  type ContractDocument,
+  type M5ControlDecisionDocument,
+  type M5ControlPolicyDocument,
+  type M5UsageEvidenceDocument,
+  type RouteMapApprovalDocument,
+  type RouteMapDocument,
+} from "../schemas/index.js";
 import { controlError, ControlDecisionError } from "./errors.js";
 import { assertAuthoritativeSources, controlRequestKey, evaluateAuthority, orderDecisionHistory } from "./evaluate.js";
 import { assertControlPolicyAuthority, deepFreezeDetached } from "./policy.js";
@@ -39,21 +48,101 @@ function lostResponseRequestKey(decision: M5ControlDecisionDocument, request: Ev
 type RunInspection = Awaited<ReturnType<typeof inspectRunStorage>>;
 type M5Records = Awaited<ReturnType<typeof readM5ManagedRecords>>;
 
+function isPreProviderM4Classification(
+  inspection: RunInspection,
+  kind: "M4_TOOL_POLICY" | "M4_COMMAND_CATALOG",
+  digest: string,
+): boolean {
+  return inspection.managedRecordClassifications.some((classification) => classification.object.kind === kind && classification.object.contentSha256 === digest &&
+    (classification.classification === "AUTHORITATIVE_MANAGED_RECORD" || classification.classification === "UNREFERENCED_MANAGED_RECORD"));
+}
+
+function uniquePersistedSource<T>(values: readonly T[], identity: (value: T) => string, expected: string): T | undefined {
+  const matches = values.filter((value) => identity(value) === expected);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function resolvePersistedSources(
   policy: M5ControlPolicyDocument,
   inspection: RunInspection,
   records: M5Records,
+  strict: boolean,
 ): M5AuthoritativeSources {
-  const isAuthoritative = (kind: string, digest: string): boolean => inspection.managedRecordClassifications.some((classification) =>
-    classification.object.kind === kind && classification.object.contentSha256 === digest && classification.classification === "AUTHORITATIVE_MANAGED_RECORD");
-  const m4ToolPolicy = records.toolPolicies.find((entry) => entry.content_sha256 === policy.tool_policy_content_sha256 && isAuthoritative("M4_TOOL_POLICY", entry.content_sha256));
-  const m4CommandCatalog = records.commandCatalogs.find((entry) => entry.content_sha256 === policy.command_catalog_content_sha256 && isAuthoritative("M4_COMMAND_CATALOG", entry.content_sha256));
+  const m4Classification = (kind: "M4_TOOL_POLICY" | "M4_COMMAND_CATALOG", digest: string): boolean => strict
+    ? isPreProviderM4Classification(inspection, kind, digest)
+    : inspection.managedRecordClassifications.some((classification) => classification.object.kind === kind && classification.object.contentSha256 === digest && classification.classification === "AUTHORITATIVE_MANAGED_RECORD");
+  const m4ToolPolicy = records.toolPolicies.find((entry) => entry.content_sha256 === policy.tool_policy_content_sha256 &&
+    m4Classification("M4_TOOL_POLICY", entry.content_sha256));
+  const m4CommandCatalog = records.commandCatalogs.find((entry) => entry.content_sha256 === policy.command_catalog_content_sha256 &&
+    m4Classification("M4_COMMAND_CATALOG", entry.content_sha256));
+  const contract = strict ? uniquePersistedSource(records.contracts, (entry: ContractDocument) => entry.contract_sha256, policy.contract_sha256) : undefined;
+  const budget = strict ? uniquePersistedSource(records.budgets, (entry: BudgetDocument) => entry.budget_sha256, policy.budget_sha256) : undefined;
+  const routeMap = strict ? uniquePersistedSource(records.routeMaps, (entry: RouteMapDocument) => entry.route_map_sha256, policy.route_map_sha256) : undefined;
+  const routeMapApproval = strict ? uniquePersistedSource(records.routeMapApprovals, (entry: RouteMapApprovalDocument) => entry.route_map_approval_sha256, policy.route_map_approval_sha256) : undefined;
   return {
+    ...(contract === undefined ? {} : { contract }),
+    ...(budget === undefined ? {} : { budget }),
     ...(m4ToolPolicy === undefined ? {} : { m4ToolPolicy }),
     ...(m4CommandCatalog === undefined ? {} : { m4CommandCatalog }),
-    m3StateTokens: records.stateTokens.filter((entry) => isAuthoritative("M3_REPOSITORY_STATE_TOKEN", entry.content_sha256)),
-    m3Postflights: records.postflights.filter((entry) => isAuthoritative("M3_POSTFLIGHT", entry.content_sha256)),
+    ...(routeMap === undefined ? {} : { routeMap }),
+    ...(routeMapApproval === undefined ? {} : { routeMapApproval }),
+    m3StateTokens: records.stateTokens.filter((entry) => inspection.managedRecordClassifications.some((classification) =>
+      classification.object.kind === "M3_REPOSITORY_STATE_TOKEN" && classification.object.contentSha256 === entry.content_sha256 && classification.classification === "AUTHORITATIVE_MANAGED_RECORD")),
+    m3Postflights: records.postflights.filter((entry) => inspection.managedRecordClassifications.some((classification) =>
+      classification.object.kind === "M3_POSTFLIGHT" && classification.object.contentSha256 === entry.content_sha256 && classification.classification === "AUTHORITATIVE_MANAGED_RECORD")),
   };
+}
+
+function withRunAuthoritySources(
+  authority: ControlDecisionKernelOptions["runAuthority"],
+  sources: M5AuthoritativeSources | undefined,
+): M5AuthoritativeSources | undefined {
+  const immutable: M5AuthoritativeSources = authority === undefined ? {} : {
+    contract: authority.contract,
+    routeMap: authority.routeMap,
+    routeMapApproval: authority.routeMapApproval,
+  };
+  for (const field of ["contract", "routeMap", "routeMapApproval"] as const) {
+    const left = immutable[field]; const right = sources?.[field];
+    if (left !== undefined && right !== undefined && canonicalize(left) !== canonicalize(right)) {
+      throw controlError("M5_AUTHORITY_INCOMPLETE", `${field} differs between immutable run authority and M5 source authority`);
+    }
+  }
+  const merged = { ...immutable, ...(sources ?? {}) };
+  return Object.keys(merged).length === 0 ? undefined : merged;
+}
+
+/** OWNER_APPROVED source documents are persisted through the existing evidence boundary before M5 publication. */
+async function publishStrictSourceEvidence(
+  location: { readonly stateRoot: string; readonly runId: string },
+  sources: M5AuthoritativeSources | undefined,
+): Promise<void> {
+  if (sources === undefined) return;
+  const entries = [
+    [sources.contract, "application/vnd.pi-gacw.contract+json"],
+    [sources.budget, "application/vnd.pi-gacw.budget+json"],
+    [sources.routeMap, "application/vnd.pi-gacw.route-map+json"],
+    [sources.routeMapApproval, "application/vnd.pi-gacw.route-map-approval+json"],
+  ] as const;
+  for (const [document, mediaType] of entries) if (document !== undefined) {
+    await putEvidence({ ...location, bytes: canonicalBytes(document), mediaType });
+  }
+}
+
+function assertSuppliedStrictSourcesArePersisted(
+  supplied: M5AuthoritativeSources | undefined,
+  persisted: M5AuthoritativeSources,
+  strict: boolean,
+): void {
+  if (!strict || supplied === undefined) return;
+  for (const field of ["contract", "budget", "m4ToolPolicy", "m4CommandCatalog", "routeMap", "routeMapApproval"] as const) {
+    const candidate = supplied[field];
+    if (candidate === undefined) continue;
+    const durable = persisted[field];
+    if (durable === undefined || canonicalize(candidate) !== canonicalize(durable)) {
+      throw controlError("M5_AUTHORITY_INCOMPLETE", `${field} is not an exact durably reconstructed predecessor`);
+    }
+  }
 }
 
 function effectivePersistedSources(
@@ -67,6 +156,8 @@ function effectivePersistedSources(
   assertAuthoritativeSources(policy, requested, false);
   assertSuppliedM3AuthorityIsPersisted(captured, persisted);
   assertSuppliedM3AuthorityIsPersisted(requested, persisted);
+  assertSuppliedStrictSourcesArePersisted(captured, persisted, strict);
+  assertSuppliedStrictSourcesArePersisted(requested, persisted, strict);
   const effective: M5AuthoritativeSources = {
     ...persisted,
     ...(captured ?? {}),
@@ -123,10 +214,21 @@ export function createControlDecisionKernel(options: ControlDecisionKernelOption
       }
       const incomingUsageIds = incomingUsage.map((entry) => entry.content_sha256 as Sha256Digest).sort();
       const strictSources = captured.production === true || captured.policy.production_authority === "OWNER_APPROVED";
+      const capturedSources = strictSources ? withRunAuthoritySources(captured.runAuthority, captured.authoritativeSources) : captured.authoritativeSources;
+      const requestedSources = strictSources ? withRunAuthoritySources(captured.runAuthority, request.authoritativeSources) : request.authoritativeSources;
+      let persistedSources = resolvePersistedSources(captured.policy, inspection, records, strictSources);
+      if (strictSources) {
+        const suppliedSources: M5AuthoritativeSources = { ...persistedSources, ...(capturedSources ?? {}), ...(requestedSources ?? {}) };
+        assertAuthoritativeSources(captured.policy, suppliedSources, true);
+        await publishStrictSourceEvidence(location, suppliedSources);
+        inspection = await inspectRunStorage(location);
+        records = await readM5ManagedRecords(location);
+        if (inspection.workflowState === null || inspection.statePointer === null || inspection.revision === null) throw controlError("M5_AUTHORITY_INCOMPLETE", "Committed state is unavailable");
+        persistedSources = resolvePersistedSources(captured.policy, inspection, records, strictSources);
+      }
       const decisionHistory = orderDecisionHistory(records.decisions.filter((entry) =>
         entry.run_id === captured.runId && entry.policy_content_sha256 === captured.policy.content_sha256));
-      const persistedSources = resolvePersistedSources(captured.policy, inspection, records);
-      const authoritativeSources = effectivePersistedSources(captured.policy, persistedSources, captured.authoritativeSources, request.authoritativeSources, strictSources);
+      const authoritativeSources = effectivePersistedSources(captured.policy, persistedSources, capturedSources, requestedSources, strictSources);
       if (request.intent === "AUTHORIZE_WORK" && (authoritativeSources.m3StateTokens?.length ?? 0) === 0) {
         throw controlError("M5_AUTHORITY_INCOMPLETE", "Repository-affecting work requires exact persisted M3 repository/worktree token authority");
       }
@@ -190,6 +292,7 @@ export function createControlDecisionKernel(options: ControlDecisionKernelOption
               { bytes: canonicalBytes(decision), mediaType: "application/vnd.pi-gacw.m5-control-decision+json" },
               { bytes: canonicalBytes(captured.runAuthority!.repositoryIdentity), mediaType: "application/vnd.pi-gacw.repository-identity+json" },
               { bytes: canonicalBytes(captured.runAuthority!.contract), mediaType: "application/vnd.pi-gacw.contract+json" },
+              ...(authoritativeSources.budget === undefined ? [] : [{ bytes: canonicalBytes(authoritativeSources.budget), mediaType: "application/vnd.pi-gacw.budget+json" }]),
               { bytes: canonicalBytes(captured.runAuthority!.routeMap), mediaType: "application/vnd.pi-gacw.route-map+json" },
               { bytes: canonicalBytes(captured.runAuthority!.routeMapApproval), mediaType: "application/vnd.pi-gacw.route-map-approval+json" },
             ], processMetadata: request.processMetadata });
@@ -212,9 +315,10 @@ export function createControlDecisionKernel(options: ControlDecisionKernelOption
         const [inspection, records] = await Promise.all([inspectRunStorage(location), readM5ManagedRecords(location)]);
         if (inspection.workflowState === null) throw controlError("M5_AUTHORITY_INCOMPLETE", "Committed state is unavailable");
         assertControlPolicyAuthority(captured.policy, inspection.workflowState, captured.reducerPolicy, captured.runId, captured.production ?? false, captured.runAuthority);
-        const persistedSources = resolvePersistedSources(captured.policy, inspection, records);
-        effectivePersistedSources(captured.policy, persistedSources, captured.authoritativeSources, undefined,
-          captured.production === true || captured.policy.production_authority === "OWNER_APPROVED");
+        const strictSources = captured.production === true || captured.policy.production_authority === "OWNER_APPROVED";
+        const persistedSources = resolvePersistedSources(captured.policy, inspection, records, strictSources);
+        const capturedSources = strictSources ? withRunAuthoritySources(captured.runAuthority, captured.authoritativeSources) : captured.authoritativeSources;
+        effectivePersistedSources(captured.policy, persistedSources, capturedSources, undefined, strictSources);
         const policyClassification = inspection.managedRecordClassifications.find((entry) => entry.object.kind === "M5_CONTROL_POLICY" && entry.object.contentSha256 === captured.policy.content_sha256)?.classification ?? "ABSENT";
         return deepFreezeDetached({ currentState: inspection.workflowState, decisions: records.decisions, usageEvidence: records.usage, policyClassification });
       } catch (error: unknown) { wrap(error); }

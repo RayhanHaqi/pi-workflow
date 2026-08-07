@@ -5,6 +5,7 @@ import { link, lstat, open, readFile, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { canonicalize } from "../canonical-json/index.js";
+import type { M5AuthoritativeSources } from "../control/types.js";
 import { assertControlPolicyAuthority } from "../control/policy.js";
 import { assertSha256Digest, sha256Bytes, type Sha256Digest } from "../identity/index.js";
 import {
@@ -38,6 +39,7 @@ import {
   type M5ControlDecisionDocument,
   type M5ControlPolicyDocument,
   type M5UsageEvidenceDocument,
+  type BudgetDocument,
   type M6WorkerInvocationDocument,
   type M6WorkerResultDocument,
   type PersistedStatePointerDocument,
@@ -713,6 +715,129 @@ async function readRawEvidence(layout: RunLayout, evidenceSha256: string): Promi
     throw new StateStoreError("EVIDENCE_HASH_MISMATCH", `Raw evidence hash mismatch: ${toRelative(layout, path)}`);
   }
   return bytes;
+}
+
+interface M5SourceEvidenceReference {
+  readonly value: ContractDocument | BudgetDocument | RouteMapDocument | RouteMapApprovalDocument;
+  readonly metadataRelativePath: string;
+  readonly evidenceRelativePath: string;
+}
+
+interface M5SourceCandidates {
+  readonly contracts: readonly ContractDocument[];
+  readonly budgets: readonly BudgetDocument[];
+  readonly routeMaps: readonly RouteMapDocument[];
+  readonly routeMapApprovals: readonly RouteMapApprovalDocument[];
+  readonly references: readonly M5SourceEvidenceReference[];
+}
+
+function sortSourceCandidates<T extends { readonly content_sha256: string }>(values: ReadonlyMap<string, T>): readonly T[] {
+  return [...values.values()].sort((left, right) => compareText(left.content_sha256, right.content_sha256));
+}
+
+async function readM5SourceCandidates(
+  layout: RunLayout,
+  available: ReadonlyMap<string, InspectedObject>,
+): Promise<M5SourceCandidates> {
+  const candidates = {
+    contracts: new Map<string, ContractDocument>(),
+    budgets: new Map<string, BudgetDocument>(),
+    routeMaps: new Map<string, RouteMapDocument>(),
+    routeMapApprovals: new Map<string, RouteMapApprovalDocument>(),
+  };
+  const references: M5SourceEvidenceReference[] = [];
+  const parse = async <T extends Record<string, unknown>>(entry: InspectedObject, schemaId: SchemaId): Promise<T | undefined> => {
+    try {
+      const bytes = await readRawEvidence(layout, entry.contentSha256);
+      const value: unknown = JSON.parse(bytes.toString("utf8"));
+      assertDocumentValid(schemaId, value);
+      if (!bytes.equals(canonicalJsonBytes(value))) return undefined;
+      return value as T;
+    } catch {
+      return undefined;
+    }
+  };
+  for (const object of available.values()) {
+    if (object.kind !== "EVIDENCE_METADATA") continue;
+    let metadata: EvidenceMetadataDocument;
+    try { metadata = await readJsonDocument<EvidenceMetadataDocument>(layout, "EVIDENCE_METADATA", object.contentSha256); }
+    catch { continue; }
+    const evidence = available.get(objectDescriptor(layout, "RAW_EVIDENCE", metadata.evidence_sha256 as Sha256Digest).relativePath);
+    if (evidence === undefined) continue;
+    if (metadata.media_type === "application/vnd.pi-gacw.contract+json") {
+      const value = await parse<ContractDocument>(evidence, "pi_gacw_contract_v0");
+      if (value !== undefined) { candidates.contracts.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    } else if (metadata.media_type === "application/vnd.pi-gacw.budget+json") {
+      const value = await parse<BudgetDocument>(evidence, "pi_gacw_budget_v0");
+      if (value !== undefined) { candidates.budgets.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    } else if (metadata.media_type === "application/vnd.pi-gacw.route-map+json") {
+      const value = await parse<RouteMapDocument>(evidence, "pi_gacw_route_map_v0");
+      if (value !== undefined) { candidates.routeMaps.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    } else if (metadata.media_type === "application/vnd.pi-gacw.route-map-approval+json") {
+      const value = await parse<RouteMapApprovalDocument>(evidence, "pi_gacw_route_map_approval_v0");
+      if (value !== undefined) { candidates.routeMapApprovals.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    }
+  }
+  return {
+    contracts: sortSourceCandidates(candidates.contracts),
+    budgets: sortSourceCandidates(candidates.budgets),
+    routeMaps: sortSourceCandidates(candidates.routeMaps),
+    routeMapApprovals: sortSourceCandidates(candidates.routeMapApprovals),
+    references: references.sort((left, right) => compareText(left.metadataRelativePath, right.metadataRelativePath)),
+  };
+}
+
+function selectM5Source<T>(values: readonly T[], identity: (value: T) => string, expected: string): T | undefined {
+  const matches = values.filter((value) => identity(value) === expected);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function selectM5Sources(policy: M5ControlPolicyDocument, candidates: M5SourceCandidates): M5AuthoritativeSources {
+  const contract = selectM5Source(candidates.contracts, (value) => value.contract_sha256, policy.contract_sha256);
+  const budget = selectM5Source(candidates.budgets, (value) => value.budget_sha256, policy.budget_sha256);
+  const routeMap = selectM5Source(candidates.routeMaps, (value) => value.route_map_sha256, policy.route_map_sha256);
+  const routeMapApproval = selectM5Source(candidates.routeMapApprovals, (value) => value.route_map_approval_sha256, policy.route_map_approval_sha256);
+  return {
+    ...(contract === undefined ? {} : { contract }),
+    ...(budget === undefined ? {} : { budget }),
+    ...(routeMap === undefined ? {} : { routeMap }),
+    ...(routeMapApproval === undefined ? {} : { routeMapApproval }),
+  };
+}
+
+function sourceReferenceMatchesPolicy(reference: M5SourceEvidenceReference, policy: M5ControlPolicyDocument): boolean {
+  const value = reference.value;
+  if (value.schema_id === "pi_gacw_contract_v0") return value.contract_sha256 === policy.contract_sha256;
+  if (value.schema_id === "pi_gacw_budget_v0") return value.budget_sha256 === policy.budget_sha256;
+  if (value.schema_id === "pi_gacw_route_map_v0") return value.route_map_sha256 === policy.route_map_sha256;
+  return value.route_map_approval_sha256 === policy.route_map_approval_sha256;
+}
+
+async function adoptedM5SourceObjectPaths(
+  layout: RunLayout,
+  objects: readonly InspectedObject[],
+): Promise<ReadonlySet<string>> {
+  const available = new Map(objects.map((object) => [object.relativePath, object]));
+  const policies: M5ControlPolicyDocument[] = [];
+  for (const object of objects) {
+    if (object.kind !== "M5_CONTROL_POLICY") continue;
+    try {
+      const policy = await readJsonDocument<M5ControlPolicyDocument>(layout, object.kind, object.contentSha256);
+      if (policy.production_authority === "OWNER_APPROVED") policies.push(policy);
+    } catch {
+      // Invalid policy records are not allowed to adopt otherwise orphaned evidence.
+    }
+  }
+  if (policies.length === 0) return new Set();
+  const candidates = await readM5SourceCandidates(layout, available);
+  // A strict policy is the existing durable root for its four typed source documents;
+  // this also lets a just-published source bundle pass the ordinary transition gate.
+  const adopted = new Set<string>();
+  for (const reference of candidates.references) if (policies.some((policy) => sourceReferenceMatchesPolicy(reference, policy))) {
+    adopted.add(reference.metadataRelativePath);
+    adopted.add(reference.evidenceRelativePath);
+  }
+  return adopted;
 }
 
 interface CapturedEvidenceInput {
@@ -1464,12 +1589,20 @@ async function classifyManagedRecords(
     }
   }
   const authoritative = (kind: StoredObjectKind, digest: string): boolean => [...m3, ...m4].some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest && entry.classification === "AUTHORITATIVE_MANAGED_RECORD");
-  const authoritativeM4Policies = new Map([...policies].filter(([digest]) => authoritative("M4_TOOL_POLICY", digest)));
-  const authoritativeM4Catalogs = new Map([...catalogs].filter(([digest]) => authoritative("M4_COMMAND_CATALOG", digest)));
+  const allowPreProviderM4 = [...m5Policies.values()].some((entry) => entry.production_authority === "OWNER_APPROVED");
+  const validPreProviderM4 = (kind: StoredObjectKind, digest: string): boolean => [...m3, ...m4].some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest &&
+    (entry.classification === "AUTHORITATIVE_MANAGED_RECORD" || allowPreProviderM4 && entry.classification === "UNREFERENCED_MANAGED_RECORD"));
+  const authoritativeM4Policies = new Map([...policies].filter(([digest]) => validPreProviderM4("M4_TOOL_POLICY", digest)));
+  const authoritativeM4Catalogs = new Map([...catalogs].filter(([digest]) => validPreProviderM4("M4_COMMAND_CATALOG", digest)));
+  const sourceCandidates = await readM5SourceCandidates(layout, new Map(objects.map((object) => [object.relativePath, object])));
+  const sourcePolicies = [...m5Policies.values()].filter((entry) => entry.run_id === basename(layout.runDirectory));
+  const persistedM5Sources = sourcePolicies.length === 1 && sourcePolicies[0]!.production_authority === "OWNER_APPROVED"
+    ? selectM5Sources(sourcePolicies[0]!, sourceCandidates) : {};
   const m5 = classifyM5Authority({
     runId: basename(layout.runDirectory), workflowState: graph.currentState, workflowStates, objects, priorClassifications: [...m3, ...m4],
     policies: m5Policies, usage: m5Usage, decisions: m5Decisions, reducerPolicies, m4Policies: authoritativeM4Policies, m4Catalogs: authoritativeM4Catalogs, reachableRawEvidence, typedTransitionDecisionDigests, runAuthorityValidatedPolicyDigests, committedWorkflowStateDigests,
     authoritativeSources: {
+      ...persistedM5Sources,
       m4CommandResults: [...commandResults.values()].filter((entry) => authoritative("M4_COMMAND_RESULT", entry.content_sha256)),
       m3StateTokens: [...tokens.values()].filter((entry) => authoritative("M3_REPOSITORY_STATE_TOKEN", entry.content_sha256)),
       m3Postflights: [...postflights.values()].filter((entry) => authoritative("M3_POSTFLIGHT", entry.content_sha256)),
@@ -1575,11 +1708,15 @@ async function inspectRunStorageInternal(
     ...scanned.objects,
     ...managedObjects.filter((object) => object.kind === "M3_TERMINAL_RETENTION_AUTHORITY"),
   ], graph);
+  const adoptedM5SourceObjects = await adoptedM5SourceObjectPaths(layout, scanned.objects);
   const uncommittedBaselineBlobs = managedRecordClassifications.filter((entry) =>
     entry.object.kind === "M3_BASELINE_BLOB" && entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION",
   ).map((entry) => entry.object);
+  const adoptedSourceObjects = scanned.objects.filter((object) => adoptedM5SourceObjects.has(object.relativePath));
+  const reportedReachableObjects = [...new Map([...graph.reachable.values(), ...adoptedSourceObjects].map((object) => [object.relativePath, object])).values()]
+    .sort((left, right) => compareText(left.relativePath, right.relativePath));
   const orphanedObjects = [
-    ...scanned.objects.filter((object) => !ALL_MANAGED_KINDS.has(object.kind) && !graph.reachable.has(object.relativePath)),
+    ...scanned.objects.filter((object) => !ALL_MANAGED_KINDS.has(object.kind) && !graph.reachable.has(object.relativePath) && !adoptedM5SourceObjects.has(object.relativePath)),
     ...uncommittedBaselineBlobs,
   ].sort((left, right) => compareText(left.relativePath, right.relativePath));
   const issues = [
@@ -1604,7 +1741,7 @@ async function inspectRunStorageInternal(
     statePointer: graph.pointer,
     workflowState: graph.currentState,
     transitionCommit: graph.currentCommit,
-    reachableObjects: [...graph.reachable.values()].sort((a, b) => compareText(a.relativePath, b.relativePath)),
+    reachableObjects: reportedReachableObjects,
     orphanedObjects,
     managedObjects,
     managedRecordClassifications,
@@ -1741,9 +1878,15 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   readonly commandCatalogs: readonly M4CommandCatalogDocument[];
   readonly stateTokens: readonly M3RepositoryStateTokenDocument[];
   readonly postflights: readonly M3PostflightDocument[];
+  readonly contracts: readonly ContractDocument[];
+  readonly budgets: readonly BudgetDocument[];
+  readonly routeMaps: readonly RouteMapDocument[];
+  readonly routeMapApprovals: readonly RouteMapApprovalDocument[];
 }> {
   const layout = assertLocation(input);
   await assertExistingLayout(layout);
+  const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+  const sourceCandidates = await readM5SourceCandidates(layout, new Map([...inspection.reachableObjects, ...inspection.orphanedObjects].map((object) => [object.relativePath, object])));
   const load = async <T extends Record<string, unknown>>(kind: JsonStoredObjectKind): Promise<T[]> => {
     const definition = JSON_KIND_BY_NAME.get(kind)!;
     const names = (await readdir(layout[definition.directory])).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
@@ -1759,6 +1902,10 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
     commandCatalogs: await load<M4CommandCatalogDocument>("M4_COMMAND_CATALOG"),
     stateTokens: await load<M3RepositoryStateTokenDocument>("M3_REPOSITORY_STATE_TOKEN"),
     postflights: await load<M3PostflightDocument>("M3_POSTFLIGHT"),
+    contracts: sourceCandidates.contracts,
+    budgets: sourceCandidates.budgets,
+    routeMaps: sourceCandidates.routeMaps,
+    routeMapApprovals: sourceCandidates.routeMapApprovals,
   });
 }
 

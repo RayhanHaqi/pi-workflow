@@ -161,8 +161,12 @@ function deterministicRecalculationError(
     ...(input.authoritativeSources ?? {}),
   };
   const requestSources: M5AuthoritativeSources = {
+    ...(persistedSources.contract === undefined ? {} : { contract: persistedSources.contract }),
+    ...(persistedSources.budget === undefined ? {} : { budget: persistedSources.budget }),
     ...(persistedSources.m4ToolPolicy === undefined ? {} : { m4ToolPolicy: persistedSources.m4ToolPolicy }),
     ...(persistedSources.m4CommandCatalog === undefined ? {} : { m4CommandCatalog: persistedSources.m4CommandCatalog }),
+    ...(persistedSources.routeMap === undefined ? {} : { routeMap: persistedSources.routeMap }),
+    ...(persistedSources.routeMapApproval === undefined ? {} : { routeMapApproval: persistedSources.routeMapApproval }),
     m3StateTokens: persistedSources.m3StateTokens ?? [],
     m3Postflights: persistedSources.m3Postflights ?? [],
   };
