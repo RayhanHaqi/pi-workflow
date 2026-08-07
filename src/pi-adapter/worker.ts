@@ -53,6 +53,10 @@ const MAX_PROMPT_BYTES = 32_768;
 const MAX_READ_BYTES = 65_536;
 const MAX_TOOL_RESULT_BYTES = 69_632;
 const MAX_REPORT_BYTES = 4_096;
+// The empty canonical report is 137 UTF-8 bytes. Canonical JSON escapes any
+// valid Unicode scalar value to at most six UTF-8 bytes, so 137 + 659 * 6
+// remains within the existing 4,096-byte durable report limit.
+const MAX_REPORT_SUMMARY_LENGTH = 659;
 const MAX_WALL_TIME_MS = 120_000;
 
 type JsonRecord = { readonly [key: string]: unknown };
@@ -1005,6 +1009,47 @@ function invocationProjection(input: M6DirectReadOnlyWorkerInput, admission: Adm
   };
 }
 
+interface WorkerReportSubmissionState {
+  readonly readResult: M4ReadMemory | undefined;
+  report: JsonRecord | undefined;
+  reportCalls: number;
+}
+
+function acceptWorkerReport(params: unknown, state: WorkerReportSubmissionState): JsonRecord {
+  if (state.reportCalls !== 0 || state.readResult === undefined) fail("WORKER_REPORT_INVALID", "Report is premature or duplicated", "REPORT_TOOL");
+  const args = record(params, "submit_worker_report arguments");
+  if (Object.keys(args).length !== 2 || args["status"] !== "COMPLETED" || typeof args["summary"] !== "string" || args["summary"].length === 0 || [...args["summary"]].length > MAX_REPORT_SUMMARY_LENGTH) fail("WORKER_REPORT_INVALID", "Worker report arguments are invalid", "REPORT_TOOL");
+  let evidence: Sha256Digest;
+  try { evidence = safeDigest(state.readResult.recordContentSha256, "authoritative M4 read result"); }
+  catch { fail("WORKER_REPORT_INVALID", "Authoritative M4 read result identity is absent or invalid", "REPORT_TOOL"); }
+  const report = { status: "COMPLETED" as const, summary: args["summary"], evidence_content_sha256: [evidence] };
+  if (Buffer.byteLength(canonicalize(report), "utf8") > MAX_REPORT_BYTES) fail("WORKER_REPORT_INVALID", "Worker report exceeds its canonical byte bound", "REPORT_TOOL");
+  state.reportCalls += 1;
+  state.report = report;
+  return report;
+}
+
+/** Package-internal test-only proof seam; production callers cannot supply worker state. */
+export function runM6ReportSubmissionProtocolForTests(
+  evidence: unknown,
+  submissions: readonly unknown[],
+): { readonly acceptedCount: number; readonly report: JsonRecord | undefined; readonly failures: readonly { readonly code: M6FailureCode; readonly stage: M6FailureStage }[] } {
+  const state: WorkerReportSubmissionState = {
+    readResult: evidence === undefined ? undefined : { recordContentSha256: evidence as Sha256Digest, contentDigest: null, content: "" },
+    report: undefined,
+    reportCalls: 0,
+  };
+  const failures: Array<{ readonly code: M6FailureCode; readonly stage: M6FailureStage }> = [];
+  for (const submission of submissions) {
+    try { acceptWorkerReport(submission, state); }
+    catch (error: unknown) {
+      if (!(error instanceof M6WorkerError)) throw error;
+      failures.push({ code: error.code, stage: error.stage });
+    }
+  }
+  return { acceptedCount: state.reportCalls, report: state.report, failures };
+}
+
 function workerTools(
   input: M6DirectReadOnlyWorkerInput,
   admission: Admission,
@@ -1054,25 +1099,17 @@ function workerTools(
       type: "object",
       properties: {
         status: { type: "string", const: "COMPLETED" },
-        summary: { type: "string", minLength: 1, maxLength: 2048 },
-        evidence_content_sha256: { type: "array", minItems: 1, maxItems: 1, items: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" } },
+        summary: { type: "string", minLength: 1, maxLength: MAX_REPORT_SUMMARY_LENGTH },
       },
-      required: ["status", "summary", "evidence_content_sha256"],
+      required: ["status", "summary"],
       additionalProperties: false,
     },
     execute: async (_toolCallId, params, signal) => {
       if (signal?.aborted === true) fail("WORKER_ABORTED", "Report was aborted", "REPORT_TOOL");
-      if (state.reportCalls !== 0 || state.readResult === undefined) fail("WORKER_REPORT_INVALID", "Report is premature or duplicated", "REPORT_TOOL");
-      const args = record(params, "submit_worker_report arguments");
-      if (Object.keys(args).length !== 3 || args["status"] !== "COMPLETED" || typeof args["summary"] !== "string" || args["summary"].length === 0 || args["summary"].length > 2_048 || !Array.isArray(args["evidence_content_sha256"]) || args["evidence_content_sha256"].length !== 1) fail("WORKER_REPORT_INVALID", "Worker report arguments are invalid", "REPORT_TOOL");
-      const evidence = safeDigest(args["evidence_content_sha256"][0], "worker report evidence");
-      if (evidence !== state.readResult.recordContentSha256) fail("WORKER_REPORT_INVALID", "Worker report evidence does not identify the M4 read result", "REPORT_TOOL");
-      if (Buffer.byteLength(canonicalize(args), "utf8") > MAX_REPORT_BYTES) fail("WORKER_REPORT_INVALID", "Worker report exceeds its canonical byte bound", "REPORT_TOOL");
-      state.reportCalls += 1;
-      state.report = { status: "COMPLETED", summary: args["summary"], evidence_content_sha256: [evidence] };
+      const report = acceptWorkerReport(params, state);
       return {
         content: [{ type: "text", text: "Terminal worker report accepted." }],
-        details: { status: "COMPLETED", evidence_content_sha256: [evidence] },
+        details: { status: "COMPLETED", evidence_content_sha256: report["evidence_content_sha256"] },
         terminate: true,
       };
     },

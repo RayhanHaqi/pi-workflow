@@ -38,21 +38,10 @@ function methodValue(value: unknown, name: string, label: string): (...args: rea
   return (...args: readonly unknown[]) => Reflect.apply(method, object, args);
 }
 
-function fauxSecondResponse(aiModule: Record<string, unknown>, contextValue: unknown): unknown {
-  const context = objectValue(contextValue, "faux response context");
-  const messages = context["messages"];
-  if (!Array.isArray(messages)) throw new Error("faux response messages are not an array");
-  let evidence: string | undefined;
-  for (const messageValue of messages) {
-    const message = objectValue(messageValue, "faux response message");
-    if (message["role"] !== "toolResult" || message["toolName"] !== "read_scoped") continue;
-    const details = objectValue(message["details"], "read tool result details");
-    if (typeof details["m4ResultContentSha256"] === "string") evidence = details["m4ResultContentSha256"];
-  }
+function fauxSecondResponse(aiModule: Record<string, unknown>, _contextValue: unknown): unknown {
   const assistant = methodValue(aiModule, "fauxAssistantMessage", "AI module");
-  if (evidence === undefined) return assistant("missing read evidence", { stopReason: "stop" });
   const toolCall = methodValue(aiModule, "fauxToolCall", "AI module")( "submit_worker_report", {
-    status: "COMPLETED", summary: "Completed the bounded read-only task from the authoritative primary evidence.", evidence_content_sha256: [evidence],
+    status: "COMPLETED", summary: "Completed the bounded read-only task from the authoritative primary evidence.",
   });
   return assistant(toolCall, { stopReason: "toolUse" });
 }
@@ -176,7 +165,8 @@ test("M6 direct read-only worker executes once and replays its immutable result"
       assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(credentials, 0);
     });
     const result = await runDirectReadOnlyLunaWorkerForTests(workerInput);
-    assert.equal(result.result.outcome, "COMPLETED"); assert.equal(result.result.usage.provider_turns, 2); assert.equal(result.result.usage.read_calls, 1); assert.equal(result.result.usage.report_submissions, 1); assert.equal(result.result.settlement.cleanup_certain, false); assert.equal(credentials, 1); assert.equal(fauxEvents.includes("explicit-api-key"), false);
+    assert.equal(result.result.outcome, "COMPLETED"); assert.equal(result.result.usage.provider_turns, 2); assert.equal(result.result.usage.model_turns, 2); assert.equal(result.result.usage.tool_calls, 2); assert.equal(result.result.usage.read_calls, 1); assert.equal(result.result.usage.report_submissions, 1); assert.equal(result.result.settlement.cleanup_certain, false); assert.equal(credentials, 1); assert.equal(fauxEvents.includes("explicit-api-key"), false);
+    assert.equal(fauxEvents.filter((event) => event === "provider-call").length, 2);
     assert.ok(fauxEvents.indexOf("invocation-written") >= 0);
     assert.ok(fauxEvents.indexOf("invocation-written") < fauxEvents.indexOf("provider-call"));
     assert.ok(fauxEvents.indexOf("result-classified") >= 0);
@@ -184,6 +174,8 @@ test("M6 direct read-only worker executes once and replays its immutable result"
     const persisted = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
     assert.equal(persisted.invocations.length, 1); assert.equal(persisted.results.length, 1); assert.equal(persisted.results[0]?.content_sha256, result.result.content_sha256);
     assert.equal(result.result.m4_result_content_sha256 !== null, true);
+    assert.equal(result.result.worker_report?.status, "COMPLETED");
+    assert.equal(result.result.worker_report?.summary, "Completed the bounded read-only task from the authoritative primary evidence.");
     assert.deepEqual(result.result.worker_report?.evidence_content_sha256, [result.result.m4_result_content_sha256]);
     const inspection = await inspectRunStorage({ stateRoot: fixture.stateRoot, runId: fixture.runId });
     assert.equal(inspection.status, "HEALTHY");
@@ -194,8 +186,15 @@ test("M6 direct read-only worker executes once and replays its immutable result"
       const records = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
       assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 1); assert.equal(credentials, 1);
     });
+    const providerCallsBeforeReplay = fauxEvents.filter((event) => event === "provider-call").length;
+    const recordsBeforeReplay = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
+    const m4AuthorityBeforeReplay = (await inspectRunStorage({ stateRoot: fixture.stateRoot, runId: fixture.runId })).managedRecordClassifications.filter((entry) => entry.object.kind === "M4_TOOL_RESULT" && entry.classification === "AUTHORITATIVE_MANAGED_RECORD").length;
     const replay = await runDirectReadOnlyLunaWorkerForTests(workerInput);
     assert.equal(replay.replayed, true); assert.equal(replay.result.content_sha256, result.result.content_sha256); assert.equal(credentials, 1);
+    assert.equal(fauxEvents.filter((event) => event === "provider-call").length, providerCallsBeforeReplay);
+    assert.deepEqual(await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId }), recordsBeforeReplay);
+    assert.equal((await inspectRunStorage({ stateRoot: fixture.stateRoot, runId: fixture.runId })).managedRecordClassifications.filter((entry) => entry.object.kind === "M4_TOOL_RESULT" && entry.classification === "AUTHORITATIVE_MANAGED_RECORD").length, m4AuthorityBeforeReplay);
+    assert.equal(replay.result.usage.read_calls, result.result.usage.read_calls); assert.equal(replay.result.usage.tool_calls, result.result.usage.tool_calls); assert.equal(replay.result.usage.report_submissions, result.result.usage.report_submissions);
     await t.test("semantic M6 classifier rejects schema-valid contradictory terminal records", async () => {
       const invalidResult = (patch: Record<string, unknown>): typeof result.result => {
         const { content_sha256: _contentSha256, ...body } = structuredClone(result.result) as Record<string, unknown>;

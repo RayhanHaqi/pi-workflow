@@ -6,12 +6,13 @@ import { createControlDecisionKernel } from "../src/control/index.js";
 import { inspectRunStorage, readM6WorkerRecords } from "../src/persistence/store.js";
 import { configurePersistenceTestHooks } from "../src/persistence/test-hooks.js";
 import { acquireWorktreeLock, releaseWorktreeLock, runFullPreflight } from "../src/repository/index.js";
-import { configureM6FauxRuntimeForTests, runDirectReadOnlyLunaWorker, runDirectReadOnlyLunaWorkerForTests } from "../src/pi-adapter/worker.js";
+import { configureM6FauxRuntimeForTests, runDirectReadOnlyLunaWorker, runDirectReadOnlyLunaWorkerForTests, runM6ReportSubmissionProtocolForTests } from "../src/pi-adapter/worker.js";
 import type { M6DirectReadOnlyWorkerInput } from "../src/pi-adapter/worker.js";
 import { identifyContractDocument, type M3BaselineRuntimeDocument, type M3RepositoryIdentityDocument, type M3RepositoryStateTokenDocument, type M4CommandCatalogDocument, type M4ScopedToolPolicyDocument, type M5ControlDecisionDocument, type TaskDocument } from "../src/schemas/index.js";
 import { createScopedToolGateway } from "../src/scoped-tools/index.js";
 import { createM5R3Fixture, directFastPreflightFixture, m5Policy, removeM5R3Fixture, r3ProcessMetadata } from "./m5-r3-fixtures.js";
 import { digest } from "./helpers.js";
+import { canonicalize } from "../src/canonical-json/index.js";
 import { type Sha256Digest } from "../src/identity/index.js";
 import { m3ScopeIdentity } from "../src/identity/m3-scope.js";
 import type { ScopedToolGateway } from "../src/scoped-tools/types.js";
@@ -23,8 +24,10 @@ const editable = ["tracked.txt"] as const;
 const frozen = ["AGENTS.md", "AUTHORITY.md"] as const;
 const taskScopeIdentity = m3ScopeIdentity(editable, frozen);
 
-type Mode = "SUCCESS" | "TEXT_ONLY" | "UNKNOWN_TOOL" | "SECOND_READ" | "REPORT_BEFORE_READ" | "PROVIDER_FAILURE" | "ACTIVE_ABORT" | "CLEANUP_FAILURE";
+type Mode = "SUCCESS" | "TEXT_ONLY" | "UNKNOWN_TOOL" | "SECOND_READ" | "REPORT_BEFORE_READ" | "EXTRA_EVIDENCE" | "INVALID_STATUS" | "EMPTY_SUMMARY" | "OVERSIZED_SUMMARY" | "PROVIDER_FAILURE" | "ACTIVE_ABORT" | "CLEANUP_FAILURE";
 let mode: Mode = "SUCCESS";
+let reportSummary = "Bounded report.";
+let observedReportParameters: Record<string, unknown> | undefined;
 let activeAbortController: AbortController | undefined;
 
 function objectValue(value: unknown, label: string): Record<string, unknown> {
@@ -44,20 +47,23 @@ function methodValue(value: unknown, name: string, label: string): (...args: rea
   return (...args: readonly unknown[]) => Reflect.apply(method, object, args);
 }
 
-function secondSuccess(aiModule: Record<string, unknown>, contextValue: unknown): unknown {
-  const context = objectValue(contextValue, "faux response context");
-  const messages = context["messages"];
-  if (!Array.isArray(messages)) throw new Error("faux response messages are not an array");
-  const evidence = messages.map((value) => objectValue(value, "faux response message")).find((value) => value["role"] === "toolResult" && value["toolName"] === "read_scoped");
-  const details = evidence === undefined ? undefined : objectValue(evidence["details"], "read result details");
-  const digestValue = details?.["m4ResultContentSha256"];
-  const assistant = methodValue(aiModule, "fauxAssistantMessage", "AI module");
-  const toolCall = methodValue(aiModule, "fauxToolCall", "AI module");
-  return assistant(toolCall("submit_worker_report", { status: "COMPLETED", summary: "Bounded report.", evidence_content_sha256: [digestValue] }), { stopReason: "toolUse" });
+function reportArguments(): Record<string, unknown> {
+  const summary = mode === "EMPTY_SUMMARY" ? "" : mode === "OVERSIZED_SUMMARY" ? "x".repeat(660) : reportSummary;
+  const argumentsValue: Record<string, unknown> = { status: mode === "INVALID_STATUS" ? "BLOCKED" : "COMPLETED", summary };
+  if (mode === "EXTRA_EVIDENCE") argumentsValue["evidence_content_sha256"] = [digest(999)];
+  return argumentsValue;
 }
 
-function installFauxRuntime(nextMode: Mode): void {
+function secondSuccess(aiModule: Record<string, unknown>, _contextValue: unknown): unknown {
+  const assistant = methodValue(aiModule, "fauxAssistantMessage", "AI module");
+  const toolCall = methodValue(aiModule, "fauxToolCall", "AI module");
+  return assistant(toolCall("submit_worker_report", reportArguments()), { stopReason: "toolUse" });
+}
+
+function installFauxRuntime(nextMode: Mode, nextSummary = "Bounded report."): void {
   mode = nextMode;
+  reportSummary = nextSummary;
+  observedReportParameters = undefined;
   configureM6FauxRuntimeForTests({ providerId: "provider-primary", modelId: "luna-high" }, ({ aiModule, providerId, modelId }) => {
     if (providerId !== "provider-primary" || modelId !== "luna-high") return undefined;
     const faux = objectValue(methodValue(aiModule, "fauxProvider", "AI module")({ api: "m6-repair-faux-api", provider: providerId, models: [{ id: modelId, name: modelId, reasoning: true, input: ["text"] }], tokensPerSecond: 0 }), "faux provider");
@@ -67,7 +73,7 @@ function installFauxRuntime(nextMode: Mode): void {
     const assistant = methodValue(aiModule, "fauxAssistantMessage", "AI module");
     const toolCall = methodValue(aiModule, "fauxToolCall", "AI module");
     const read = assistant(toolCall(mode === "UNKNOWN_TOOL" ? "unknown_tool" : "read_scoped", { read_id: "primary" }), { stopReason: "toolUse" });
-    const report = assistant(toolCall("submit_worker_report", { status: "COMPLETED", summary: "Premature report.", evidence_content_sha256: [digest(999)] }), { stopReason: "toolUse" });
+    const report = assistant(toolCall("submit_worker_report", { status: "COMPLETED", summary: "Premature report." }), { stopReason: "toolUse" });
     const secondRead = assistant(toolCall("read_scoped", { read_id: "primary" }), { stopReason: "toolUse" });
     const text = assistant("text only", { stopReason: "stop" });
     const responses = mode === "TEXT_ONLY" ? [text] : mode === "REPORT_BEFORE_READ" ? [report] : mode === "SECOND_READ" ? [read, secondRead] : [read, (context: unknown) => secondSuccess(aiModule, context)];
@@ -77,6 +83,14 @@ function installFauxRuntime(nextMode: Mode): void {
       models,
       model,
       streamFn: (streamModel: unknown, context: unknown, options?: unknown): unknown => {
+        if (context !== null && typeof context === "object" && !Array.isArray(context)) {
+          const contextTools = (context as Record<string, unknown>)["tools"];
+          if (Array.isArray(contextTools)) {
+            const reportTool = contextTools.map((value) => objectValue(value, "model-visible tool")).find((value) => value["name"] === "submit_worker_report");
+            const parameters = reportTool?.["parameters"];
+            if (parameters !== undefined) observedReportParameters = objectValue(parameters, "submit_worker_report parameters");
+          }
+        }
         if (mode === "PROVIDER_FAILURE") throw new Error("provider stream failure");
         if (mode === "ACTIVE_ABORT") {
           activeAbortController?.abort();
@@ -252,6 +266,75 @@ test("OpenAI Codex OAuth route uses the Pi credential store without network or f
   assert.equal(providerCalls, 1);
 });
 
+test("M6 terminal report binding rejects duplicate, missing-authority, and substituted submissions", () => {
+  const validEvidence = digest(700);
+  const validReport = { status: "COMPLETED", summary: "Bounded report." };
+  const duplicate = runM6ReportSubmissionProtocolForTests(validEvidence, [validReport, validReport]);
+  assert.equal(duplicate.acceptedCount, 1);
+  assert.equal(duplicate.failures.length, 1);
+  assert.equal(duplicate.failures[0]?.code, "WORKER_REPORT_INVALID");
+  assert.deepEqual(duplicate.report?.["evidence_content_sha256"], [validEvidence]);
+
+  const missing = runM6ReportSubmissionProtocolForTests(undefined, [validReport]);
+  assert.equal(missing.acceptedCount, 0);
+  assert.equal(missing.failures[0]?.code, "WORKER_REPORT_INVALID");
+
+  const substituted = runM6ReportSubmissionProtocolForTests(validEvidence, [{ ...validReport, evidence_content_sha256: [digest(701)] }]);
+  assert.equal(substituted.acceptedCount, 0);
+  assert.equal(substituted.failures[0]?.code, "WORKER_REPORT_INVALID");
+});
+
+test("M6 terminal report summary bound is proven at the durable byte boundary", async () => {
+  const evidence = digest(1);
+  const report = (summary: string): Record<string, unknown> => ({ status: "COMPLETED", summary, evidence_content_sha256: [evidence] });
+  assert.equal(Buffer.byteLength(canonicalize(report("")), "utf8"), 137);
+  assert.equal(Buffer.byteLength(canonicalize(report("\u0000".repeat(659))), "utf8"), 4_091);
+  assert.ok(Buffer.byteLength(canonicalize(report("\u0000".repeat(660))), "utf8") > 4_096);
+  const multibyte = "😀".repeat(659);
+  assert.equal(multibyte.length, 1_318);
+  assert.equal([...multibyte].length, 659);
+  assert.ok(Buffer.byteLength(canonicalize(report(multibyte)), "utf8") <= 4_096);
+
+  const scenario = await createScenario();
+  installFauxRuntime("SUCCESS", multibyte);
+  try {
+    const execution = await runDirectReadOnlyLunaWorkerForTests(scenario.input);
+    assert.equal(execution.result.outcome, "COMPLETED");
+    assert.equal(execution.result.worker_report?.summary, multibyte);
+    assert.equal(execution.result.usage.report_submissions, 1);
+    assert.deepEqual(observedReportParameters, { type: "object", properties: { status: { type: "string", const: "COMPLETED" }, summary: { type: "string", minLength: 1, maxLength: 659 } }, required: ["status", "summary"], additionalProperties: false });
+  } finally { await cleanupScenario(scenario); }
+});
+
+test("official Pi 0.83.0 OpenAI Responses serialization excludes tool details", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../node_modules/@earendil-works/pi-ai/package.json", import.meta.url), "utf8")) as Record<string, unknown>;
+  assert.equal(packageJson["version"], "0.83.0");
+  const serializerSpecifier: string = "@earendil-works/pi-ai/api/openai-responses-shared";
+  const shared = objectValue(await import(serializerSpecifier), "OpenAI Responses shared API");
+  const convert = shared["convertResponsesMessages"];
+  if (typeof convert !== "function") throw new Error("Pi OpenAI Responses converter is not callable");
+  const m4Digest = digest(701);
+  const contentDigest = digest(702);
+  const model = {
+    provider: "openai-codex", api: "openai-codex-responses", id: "gpt-5.6-luna", reasoning: true, input: ["text"],
+  };
+  const messages = (convert as (model: unknown, context: unknown, allowed: ReadonlySet<string>) => readonly unknown[])(model, {
+    systemPrompt: "",
+    messages: [
+      { role: "assistant", content: [{ type: "toolCall", id: "call-1|fc_item-1", name: "read_scoped", arguments: { read_id: "primary" } }], api: "faux", provider: "faux", model: "faux", stopReason: "toolUse", timestamp: 1 },
+      { role: "toolResult", toolCallId: "call-1|fc_item-1", toolName: "read_scoped", content: [{ type: "text", text: "model-visible read content" }], details: { m4ResultContentSha256: m4Digest, contentSha256: contentDigest }, isError: false, timestamp: 2 },
+    ],
+  }, new Set(["openai-codex"]));
+  const serialized = JSON.stringify(messages);
+  assert.match(serialized, /model-visible read content/);
+  assert.doesNotMatch(serialized, new RegExp(m4Digest));
+  assert.doesNotMatch(serialized, new RegExp(contentDigest));
+  assert.doesNotMatch(serialized, /details|m4ResultContentSha256|contentSha256/);
+  const output = messages.find((value) => objectValue(value, "serialized Responses item")["type"] === "function_call_output");
+  assert.ok(output);
+  assert.equal(objectValue(output, "serialized tool result")["output"], "model-visible read content");
+});
+
 test("M6 production-path protocol and lifecycle negatives remain bounded", async (t) => {
   await t.test("production entrypoint rejects TEST_FIXTURE authority before any work", async () => {
     const scenario = await createScenario(); installFauxRuntime("SUCCESS");
@@ -330,7 +413,7 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
     } finally { await cleanupScenario(scenario); }
   });
 
-  for (const negative of ["TEXT_ONLY", "UNKNOWN_TOOL", "SECOND_READ", "REPORT_BEFORE_READ"] as const) {
+  for (const negative of ["TEXT_ONLY", "UNKNOWN_TOOL", "SECOND_READ", "REPORT_BEFORE_READ", "INVALID_STATUS", "EMPTY_SUMMARY", "OVERSIZED_SUMMARY", "EXTRA_EVIDENCE"] as const) {
     await t.test(`${negative} is rejected without a completed result`, async () => {
       const scenario = await createScenario();
       installFauxRuntime(negative);
@@ -339,6 +422,10 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
         assert.equal(execution.result.outcome, "BLOCKED");
         assert.notEqual(execution.result.first_failure_code, null);
         assert.equal((await readM6WorkerRecords(scenario.input)).results.length, 1);
+        if (negative === "REPORT_BEFORE_READ" || negative === "EXTRA_EVIDENCE" || negative === "INVALID_STATUS" || negative === "EMPTY_SUMMARY" || negative === "OVERSIZED_SUMMARY") {
+          assert.equal(execution.result.usage.report_submissions, 0);
+          assert.equal(execution.result.worker_report, null);
+        }
       } finally { await cleanupScenario(scenario); }
     });
   }
