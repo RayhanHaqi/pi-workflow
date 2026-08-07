@@ -14,7 +14,7 @@ The package contains:
 - an M4 descriptor-relative secure filesystem and scoped tool gateway with exact-byte mutation, frozen structured commands, Landlock filesystem confinement, `no_new_privs`, seccomp network denial, and immutable operation evidence; and
 - an M5 deterministic control-decision kernel for typed usage budgets, evidence-backed progress, fixed failure actions, contract satisfiability, finite route eligibility/selection, and M2-bound immutable decision authority.
 
-It does **not** register a Pi extension or implement a CLI, event journal, resume/recovery, worker sessions, route execution, provider/model selection, fallback, or any M6+ runtime capability.
+M7 adds one approval-gated, ephemeral, read-only/report-only workflow surface: `pi-workflow <goal.json>` and the human-confirmed `/workflow <goal.json>` Pi command. It compiles the Goal into the existing canonical TaskDocument, revalidates the approved content identity, reuses M3/M4/M5, and invokes only the existing bounded M6 worker. It does not add Goal identity or persistence, a Goal schema/record, mutation, resume/recovery, retries, fallback, provider/model selection, or another worker.
 
 ## Package foundation
 
@@ -28,7 +28,7 @@ npm test
 npm run build
 ```
 
-Generated JavaScript and declarations are written to ignored `dist/`. The package has no `pi.extensions` entry and installation into active Pi configuration remains outside M1–M5.
+Generated JavaScript and declarations are written to ignored `dist/`. The package advertises its Pi extension through `pi.extensions` and its CLI through `bin.pi-workflow`; installation into active Pi configuration remains an explicit consumer action. The M7 controller remains private and no additional package export subpath is added.
 
 ## Canonical JSON
 

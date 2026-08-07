@@ -4,6 +4,13 @@
   "private": true,
   "description": "Deterministic M1-M5 kernel with durable repository authority, scoped tools, and bounded control decisions",
   "type": "module",
+  "bin": {
+    "pi-workflow": "dist/src/cli/pi-workflow.js"
+  },
+  "pi": {
+    "extensions": ["./dist/src/pi-extension/workflow.js"]
+  },
+  "keywords": ["pi-package"],
   "engines": {
     "node": ">=22 <23"
   },
@@ -12,7 +19,7 @@
     "schema:check": "tsx src/schemas/emit.ts --check",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && tsx --test --test-concurrency=1 tests/*.test.ts",
-    "build": "npm run schema:check && tsc -p tsconfig.json"
+    "build": "npm run schema:check && tsc -p tsconfig.json && chmod 755 dist/src/cli/pi-workflow.js"
   },
   "exports": {
     "./canonical-json": "./dist/src/canonical-json/index.js",
@@ -37,6 +44,14 @@
     "@earendil-works/pi-ai": "0.83.0",
     "@sinclair/typebox": "0.34.41",
     "ajv": "8.17.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "22.15.3",
