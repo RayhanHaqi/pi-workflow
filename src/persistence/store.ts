@@ -1589,9 +1589,50 @@ async function classifyManagedRecords(
     }
   }
   const authoritative = (kind: StoredObjectKind, digest: string): boolean => [...m3, ...m4].some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest && entry.classification === "AUTHORITATIVE_MANAGED_RECORD");
-  const allowPreProviderM4 = [...m5Policies.values()].some((entry) => entry.production_authority === "OWNER_APPROVED");
-  const validPreProviderM4 = (kind: StoredObjectKind, digest: string): boolean => [...m3, ...m4].some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest &&
-    (entry.classification === "AUTHORITATIVE_MANAGED_RECORD" || allowPreProviderM4 && entry.classification === "UNREFERENCED_MANAGED_RECORD"));
+  const classificationFor = (classifications: readonly ManagedRecordClassification[], kind: StoredObjectKind, digest: string): ManagedRecordClassification | undefined =>
+    classifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest);
+  const m5PolicyContexts = new Map<string, number>();
+  for (const policy of m5Policies.values()) {
+    const context = `${policy.run_id}:${policy.starting_state_content_sha256}`;
+    m5PolicyContexts.set(context, (m5PolicyContexts.get(context) ?? 0) + 1);
+  }
+  const exactOwnerApprovedM4 = new Set<string>();
+  const exactOwnerApprovedPair = (policy: M5ControlPolicyDocument): readonly [string, string] | undefined => {
+    if (policy.production_authority !== "OWNER_APPROVED" || policy.run_id !== basename(layout.runDirectory) ||
+        m5PolicyContexts.get(`${policy.run_id}:${policy.starting_state_content_sha256}`) !== 1 ||
+        !objects.some((object) => object.kind === "M5_CONTROL_POLICY" && object.contentSha256 === policy.content_sha256)) return undefined;
+    try { assertDocumentValid("pi_gacw_m5_control_policy_v0", policy); } catch { return undefined; }
+    const genesis = workflowStates.get(policy.starting_state_content_sha256);
+    if (genesis?.phase !== "CREATED" ||
+        policy.objective_sha256 !== graph.currentState.identities.objective_sha256 || policy.contract_sha256 !== graph.currentState.identities.contract_sha256 ||
+        policy.budget_sha256 !== graph.currentState.identities.budget_sha256 || policy.scope_sha256 !== graph.currentState.identities.scope_sha256 ||
+        policy.acceptance_sha256 !== graph.currentState.identities.acceptance_sha256 || policy.reducer_policy_content_sha256 !== graph.currentState.frozen_policy_content_sha256) return undefined;
+    const toolPolicy = policies.get(policy.tool_policy_content_sha256);
+    const commandCatalog = catalogs.get(policy.command_catalog_content_sha256);
+    if (toolPolicy === undefined || commandCatalog === undefined || toolPolicy.content_sha256 !== policy.tool_policy_content_sha256 ||
+        commandCatalog.content_sha256 !== policy.command_catalog_content_sha256 || toolPolicy.run_id !== policy.run_id ||
+        toolPolicy.repository_identity_content_sha256 !== policy.repository_identity_content_sha256 || toolPolicy.worktree_key !== policy.worktree_key ||
+        toolPolicy.task_scope_identity !== policy.scope_sha256 || commandCatalog.run_id !== policy.run_id ||
+        commandCatalog.repository_identity_content_sha256 !== policy.repository_identity_content_sha256 ||
+        commandCatalog.tool_policy_content_sha256 !== toolPolicy.content_sha256) return undefined;
+    const toolClassification = classificationFor(m4, "M4_TOOL_POLICY", toolPolicy.content_sha256);
+    const catalogClassification = classificationFor(m4, "M4_COMMAND_CATALOG", commandCatalog.content_sha256);
+    const eligible = (classification: ManagedRecordClassification | undefined): boolean => classification?.classification === "AUTHORITATIVE_MANAGED_RECORD" || classification?.classification === "UNREFERENCED_MANAGED_RECORD";
+    if (!eligible(toolClassification) || !eligible(catalogClassification)) return undefined;
+    const token = [...tokens.values()].find((candidate) => candidate.run_id === policy.run_id &&
+      candidate.repository_identity_content_sha256 === policy.repository_identity_content_sha256 && candidate.worktree_key === policy.worktree_key &&
+      candidate.task_scope_identity === policy.scope_sha256 && classificationFor(m3, "M3_REPOSITORY_STATE_TOKEN", candidate.content_sha256)?.classification === "AUTHORITATIVE_MANAGED_RECORD");
+    if (token === undefined) return undefined;
+    return [toolPolicy.content_sha256, commandCatalog.content_sha256];
+  };
+  for (const policy of m5Policies.values()) {
+    const pair = exactOwnerApprovedPair(policy);
+    if (pair !== undefined) {
+      exactOwnerApprovedM4.add(`M4_TOOL_POLICY:${pair[0]}`);
+      exactOwnerApprovedM4.add(`M4_COMMAND_CATALOG:${pair[1]}`);
+    }
+  }
+  const validPreProviderM4 = (kind: StoredObjectKind, digest: string): boolean => authoritative(kind, digest) || exactOwnerApprovedM4.has(`${kind}:${digest}`);
   const authoritativeM4Policies = new Map([...policies].filter(([digest]) => validPreProviderM4("M4_TOOL_POLICY", digest)));
   const authoritativeM4Catalogs = new Map([...catalogs].filter(([digest]) => validPreProviderM4("M4_COMMAND_CATALOG", digest)));
   const sourceCandidates = await readM5SourceCandidates(layout, new Map(objects.map((object) => [object.relativePath, object])));

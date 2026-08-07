@@ -11,7 +11,7 @@ import { createControlDecisionKernel, ControlDecisionError } from "../src/contro
 import type { M5AuthoritativeSources, M5ImmutableRunAuthoritySources } from "../src/control/types.js";
 import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
 import { m3ScopeIdentity } from "../src/identity/m3-scope.js";
-import { inspectRunStorage, initializeRunStorage, readM6WorkerRecords, readM5ManagedRecords, commitTransition } from "../src/persistence/store.js";
+import { inspectRunStorage, initializeRunStorage, publishM5ManagedRecord, readM6WorkerRecords, readM5ManagedRecords, commitTransition } from "../src/persistence/store.js";
 import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hooks.js";
 import { acquireWorktreeLock, captureBaseline, releaseWorktreeLock, resolveRepositoryIdentity, runFullPreflight } from "../src/repository/index.js";
 import { createScopedToolGateway } from "../src/scoped-tools/index.js";
@@ -76,6 +76,11 @@ interface PreparedOwnerRun extends OwnerRun {
   readonly fast: Awaited<ReturnType<typeof initializeRunStorage>>;
   readonly policy: M5ControlPolicyDocument;
   readonly sources: M5AuthoritativeSources;
+}
+
+interface PersistedM4Pair {
+  readonly m4ToolPolicy: M4ScopedToolPolicyDocument;
+  readonly m4CommandCatalog: M4CommandCatalogDocument;
 }
 
 function bytes(value: unknown): Buffer {
@@ -225,6 +230,66 @@ async function prepareOwnerRun(run: OwnerRun): Promise<PreparedOwnerRun> {
   }
 }
 
+async function createUnrelatedM4Pair(run: PreparedOwnerRun, suffix = "unrelated"): Promise<PersistedM4Pair> {
+  const repositoryIdentity = run.runAuthority.repositoryIdentity;
+  const m4ToolPolicy = identifyContractDocument("pi_gacw_scoped_tool_policy_v0", {
+    ...structuredClone(run.m4ToolPolicy), content_sha256: undefined, policy_id: `m6-${suffix}-policy`,
+  }) as unknown as M4ScopedToolPolicyDocument;
+  const m4CommandCatalog = identifyContractDocument("pi_gacw_command_catalog_v0", {
+    ...structuredClone(run.m4CommandCatalog), content_sha256: undefined, catalog_id: `m6-${suffix}-catalog`,
+    tool_policy_content_sha256: m4ToolPolicy.content_sha256,
+  }) as unknown as M4CommandCatalogDocument;
+  const baselinePath = join(run.stateRoot, "runs", run.runId, "records", "baselines", `${run.m3StateToken.baseline_runtime_content_sha256.slice(7)}.json`);
+  const baseline = JSON.parse(await readFile(baselinePath, "utf8"));
+  const instructions = [await fingerprintInput(run.instructionPath)]; const authorities = [await fingerprintInput(run.authorityPath)];
+  await createScopedToolGateway({ stateRoot: run.stateRoot, runId: run.runId, repository: repositoryIdentity, baseline, acceptedState: run.m3StateToken, lock: run.lock,
+    instructionFiles: instructions, authorityFiles: authorities, editablePaths: ["tracked.txt"], frozenPaths: ["AGENTS.md", "AUTHORITY.md"],
+    taskScopeIdentity: taskScope, toolPolicy: m4ToolPolicy, commandCatalog: m4CommandCatalog, temporaryRoot: join(run.root, `controller-tmp-${suffix}`) });
+  return { m4ToolPolicy, m4CommandCatalog };
+}
+
+interface RejectionSnapshot {
+  readonly pointerBytes: string;
+  readonly revision: number | null;
+  readonly statePointerContentSha256: string | null;
+  readonly workflowStateContentSha256: string | null;
+  readonly transitionCommitContentSha256: string | null;
+  readonly transitionGraph: readonly { readonly kind: string; readonly contentSha256: string; readonly relativePath: string }[];
+  readonly storageHealth: { readonly status: string; readonly issues: unknown; readonly orphanedObjects: unknown; readonly temporaryFiles: unknown };
+  readonly m5Inventory: { readonly policies: unknown; readonly usage: unknown; readonly decisions: unknown };
+  readonly m6Inventory: { readonly invocations: unknown; readonly results: unknown };
+}
+
+async function rejectionSnapshot(run: PreparedOwnerRun): Promise<RejectionSnapshot> {
+  const inspection = await inspectRunStorage({ stateRoot: run.stateRoot, runId: run.runId });
+  const records = await readM5ManagedRecords({ stateRoot: run.stateRoot, runId: run.runId });
+  const m6 = await readM6WorkerRecords({ stateRoot: run.stateRoot, runId: run.runId });
+  const pointerBytes = await readFile(join(run.stateRoot, "runs", run.runId, "state.json"));
+  const transitionKinds = new Set(["WORKFLOW_STATE", "TRANSITION_EVENT", "TRANSITION_COMMIT"]);
+  return {
+    pointerBytes: pointerBytes.toString("hex"), revision: inspection.revision,
+    statePointerContentSha256: inspection.statePointer?.content_sha256 ?? null,
+    workflowStateContentSha256: inspection.workflowState?.content_sha256 ?? null,
+    transitionCommitContentSha256: inspection.transitionCommit?.content_sha256 ?? null,
+    transitionGraph: inspection.reachableObjects.filter((object) => transitionKinds.has(object.kind)).map((object) => ({ kind: object.kind, contentSha256: object.contentSha256, relativePath: object.relativePath })),
+    storageHealth: { status: inspection.status, issues: inspection.issues, orphanedObjects: inspection.orphanedObjects, temporaryFiles: inspection.temporaryFiles },
+    m5Inventory: { policies: records.policies, usage: records.usage, decisions: records.decisions },
+    m6Inventory: { invocations: m6.invocations, results: m6.results },
+  };
+}
+
+function assertRejectionPreserved(before: RejectionSnapshot, after: RejectionSnapshot): void {
+  assert.equal(after.pointerBytes, before.pointerBytes);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.statePointerContentSha256, before.statePointerContentSha256);
+  assert.equal(after.workflowStateContentSha256, before.workflowStateContentSha256);
+  assert.equal(after.transitionCommitContentSha256, before.transitionCommitContentSha256);
+  assert.deepEqual(after.transitionGraph, before.transitionGraph);
+  assert.deepEqual(after.storageHealth, before.storageHealth);
+  assert.deepEqual(after.m5Inventory, before.m5Inventory);
+  assert.deepEqual(after.m6Inventory, before.m6Inventory);
+}
+
 async function cleanupPrepared(run: PreparedOwnerRun): Promise<void> {
   configureM5PersistenceTestHooks(undefined);
   await releaseWorktreeLock(run.lock).catch(() => undefined);
@@ -247,24 +312,26 @@ function decisionClassification(inspection: any, digestValue: string): string | 
 }
 
 async function assertNoAdmission(run: PreparedOwnerRun, omission?: SourceOmission): Promise<void> {
-  const before = await inspectRunStorage({ stateRoot: run.stateRoot, runId: run.runId });
+  await publishM5ManagedRecord({ stateRoot: run.stateRoot, runId: run.runId, kind: "M5_CONTROL_POLICY", document: run.policy });
+  const before = await rejectionSnapshot(run);
   const sources = { ...run.sources };
   if (omission !== undefined) delete sources[omission];
   const runAuthority = omission === "contract" || omission === "routeMap" || omission === "routeMapApproval" ? undefined : run.runAuthority;
   const kernel = createControlDecisionKernel({ stateRoot: run.stateRoot, runId: run.runId, policy: run.policy, reducerPolicy: run.reducer,
     ...(runAuthority === undefined ? {} : { runAuthority }), authoritativeSources: sources, production: true });
   await assert.rejects(kernel.evaluateControlDecision({ intent: "AUTHORIZE_WORK", operationId: "owner-negative-operation", availableLogicalRoles: ["LUNA_EXECUTOR"],
-    expectedRevision: before.revision!, expectedStatePointerContentSha256: before.statePointer!.content_sha256 as Sha256Digest,
-    expectedWorkflowStateContentSha256: before.workflowState!.content_sha256 as Sha256Digest, transitionId: "owner-negative-start", processMetadata,
+    expectedRevision: before.revision!, expectedStatePointerContentSha256: before.statePointerContentSha256 as Sha256Digest,
+    expectedWorkflowStateContentSha256: before.workflowStateContentSha256 as Sha256Digest, transitionId: "owner-negative-start", processMetadata,
     authoritativeSources: sources }), (error: unknown) => error instanceof ControlDecisionError && error.code === "M5_AUTHORITY_INCOMPLETE");
-  const after = await inspectRunStorage({ stateRoot: run.stateRoot, runId: run.runId });
-  assert.equal(after.revision, before.revision); assert.equal(after.workflowState?.phase, "DIRECT_FAST_PREFLIGHT");
-  assert.equal((await readM5ManagedRecords({ stateRoot: run.stateRoot, runId: run.runId })).decisions.length, 0);
-  assert.equal((await readM6WorkerRecords({ stateRoot: run.stateRoot, runId: run.runId })).invocations.length, 0);
+  const after = await rejectionSnapshot(run);
+  assertRejectionPreserved(before, after);
+  assert.equal(after.workflowStateContentSha256, before.workflowStateContentSha256);
+  assert.equal((after.m5Inventory.decisions as readonly unknown[]).length, 0);
+  assert.equal((after.m6Inventory.invocations as readonly unknown[]).length, 0);
 }
 
 test("OWNER_APPROVED strict predecessors survive publication and fresh reconstruction", async () => {
-  const owner = await createOwnerRun(); const run = await prepareOwnerRun(owner);
+  const owner = await createOwnerRun(); const run = await prepareOwnerRun(owner); const unrelated = await createUnrelatedM4Pair(run);
   let precommit: any;
   configureM5PersistenceTestHooks({ checkpoint: async (checkpoint) => {
     if (checkpoint !== "AFTER_DECISION_PUBLICATION") return;
@@ -280,6 +347,8 @@ test("OWNER_APPROVED strict predecessors survive publication and fresh reconstru
     assert.equal(run.policy.production_authority, "OWNER_APPROVED"); assert.equal(decisionClassification(precommit, result.decision.content_sha256), "UNREFERENCED_MANAGED_RECORD");
     assert.equal(recordClassification(precommit, "M4_TOOL_POLICY", run.m4ToolPolicy.content_sha256), "UNREFERENCED_MANAGED_RECORD");
     assert.equal(recordClassification(precommit, "M4_COMMAND_CATALOG", run.m4CommandCatalog.content_sha256), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(recordClassification(precommit, "M4_TOOL_POLICY", unrelated.m4ToolPolicy.content_sha256), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(recordClassification(precommit, "M4_COMMAND_CATALOG", unrelated.m4CommandCatalog.content_sha256), "UNREFERENCED_MANAGED_RECORD");
     assert.equal(result.committed, true); assert.equal(result.workflowState.phase, "DIRECT_ATTEMPT_RUNNING");
     assert.equal(result.decision.outcome, "AUTHORIZE"); assert.equal(result.decision.selected_route, "CONTINUE_ADMITTED_OPERATION");
     assert.equal(result.decision.reservation?.logical_role, "LUNA_EXECUTOR"); assert.equal(result.decision.reservation?.reserved_route, "DIRECT_LUNA_HIGH");
@@ -295,6 +364,8 @@ test("OWNER_APPROVED strict predecessors survive publication and fresh reconstru
     assert.equal(decisionClassification(fresh.inspection, result.decision.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     assert.equal(recordClassification(fresh.inspection, "M4_TOOL_POLICY", run.m4ToolPolicy.content_sha256), "UNREFERENCED_MANAGED_RECORD");
     assert.equal(recordClassification(fresh.inspection, "M4_COMMAND_CATALOG", run.m4CommandCatalog.content_sha256), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(recordClassification(fresh.inspection, "M4_TOOL_POLICY", unrelated.m4ToolPolicy.content_sha256), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(recordClassification(fresh.inspection, "M4_COMMAND_CATALOG", unrelated.m4CommandCatalog.content_sha256), "UNREFERENCED_MANAGED_RECORD");
     const freshDecision = fresh.records.decisions.find((entry: any) => entry.content_sha256 === result.decision.content_sha256);
     assert.ok(freshDecision); assert.equal(freshDecision.reservation.logical_role, "LUNA_EXECUTOR"); assert.equal(freshDecision.reservation.reserved_route, "DIRECT_LUNA_HIGH");
     assert.equal(freshDecision.contract_sha256, run.runAuthority.contract.contract_sha256); assert.equal(freshDecision.budget_sha256, run.budget.budget_sha256);
@@ -302,6 +373,21 @@ test("OWNER_APPROVED strict predecessors survive publication and fresh reconstru
     assert.equal(freshDecision.tool_policy_content_sha256, run.m4ToolPolicy.content_sha256); assert.equal(freshDecision.command_catalog_content_sha256, run.m4CommandCatalog.content_sha256);
     const m6 = await readM6WorkerRecords({ stateRoot: run.stateRoot, runId: run.runId }); assert.equal(m6.invocations.length, 0); assert.equal(m6.results.length, 0);
     assert.equal(fresh.inspection.managedRecordClassifications.some((entry: any) => entry.object.kind === "M4_TOOL_RESULT"), false);
+  } finally { await cleanupPrepared(run); }
+});
+
+test("OWNER_APPROVED exact M4 pair is not substituted by another valid pair", async () => {
+  const owner = await createOwnerRun(); const run = await prepareOwnerRun(owner); const unrelated = await createUnrelatedM4Pair(run, "substitute");
+  try {
+    await unlink(join(run.stateRoot, "runs", run.runId, "records", "tool-policies", `${run.m4ToolPolicy.content_sha256.slice(7)}.json`));
+    await unlink(join(run.stateRoot, "runs", run.runId, "records", "command-catalogs", `${run.m4CommandCatalog.content_sha256.slice(7)}.json`));
+    const { m4ToolPolicy: _toolPolicy, m4CommandCatalog: _commandCatalog, ...withoutM4 } = run.sources;
+    await assertNoAdmission({ ...run, sources: withoutM4 }, "m4ToolPolicy");
+    const inspection = await inspectRunStorage({ stateRoot: run.stateRoot, runId: run.runId });
+    assert.equal(recordClassification(inspection, "M4_TOOL_POLICY", unrelated.m4ToolPolicy.content_sha256), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(recordClassification(inspection, "M4_COMMAND_CATALOG", unrelated.m4CommandCatalog.content_sha256), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(recordClassification(inspection, "M4_TOOL_POLICY", run.m4ToolPolicy.content_sha256), undefined);
+    assert.equal(recordClassification(inspection, "M4_COMMAND_CATALOG", run.m4CommandCatalog.content_sha256), undefined);
   } finally { await cleanupPrepared(run); }
 });
 
@@ -331,7 +417,9 @@ test("OWNER_APPROVED source identity substitutions fail closed before transition
     ["catalog bound to another policy", (run) => ({ ...run.sources, m4CommandCatalog: identifyContractDocument("pi_gacw_command_catalog_v0", { ...structuredClone(run.m4CommandCatalog), content_sha256: undefined, tool_policy_content_sha256: digest(990) }) as unknown as M4CommandCatalogDocument })],
     ["M4 policy from another run", (run) => ({ ...run.sources, m4ToolPolicy: identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { ...structuredClone(run.m4ToolPolicy), content_sha256: undefined, run_id: "another-run" }) as unknown as M4ScopedToolPolicyDocument })],
     ["M4 catalog from another repository", (run) => ({ ...run.sources, m4CommandCatalog: identifyContractDocument("pi_gacw_command_catalog_v0", { ...structuredClone(run.m4CommandCatalog), content_sha256: undefined, repository_identity_content_sha256: digest(991) }) as unknown as M4CommandCatalogDocument })],
-    ["M4 policy scope substitution", (run) => ({ ...run.sources, m4ToolPolicy: identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { ...structuredClone(run.m4ToolPolicy), content_sha256: undefined, task_scope_identity: digest(992) }) as unknown as M4ScopedToolPolicyDocument })],
+    ["M4 policy from another worktree", (run) => ({ ...run.sources, m4ToolPolicy: identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { ...structuredClone(run.m4ToolPolicy), content_sha256: undefined, worktree_key: digest(992) }) as unknown as M4ScopedToolPolicyDocument })],
+    ["M4 policy from another M3 token scope", (run) => ({ ...run.sources, m4ToolPolicy: identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { ...structuredClone(run.m4ToolPolicy), content_sha256: undefined, task_scope_identity: digest(993) }) as unknown as M4ScopedToolPolicyDocument })],
+    ["M4 policy scope substitution", (run) => ({ ...run.sources, m4ToolPolicy: identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { ...structuredClone(run.m4ToolPolicy), content_sha256: undefined, task_scope_identity: digest(994) }) as unknown as M4ScopedToolPolicyDocument })],
   ];
   for (const [name, substitute] of cases) {
     await t.test(name, async () => {
