@@ -82,6 +82,7 @@ function installFauxRuntime(events: string[], responses: readonly FauxResponse[]
       model,
       streamFn: (streamModel: unknown, context: unknown, options?: unknown): unknown => {
         fauxEvents.push("provider-call");
+        if (options !== undefined && objectValue(options, "provider options")["apiKey"] !== undefined) fauxEvents.push("explicit-api-key");
         return streamSimple(streamModel, context, options);
       },
       clearProviderState: (): void => { fauxEvents.push("cleanup-provider"); setResponses([]); },
@@ -144,7 +145,8 @@ test("M6 direct read-only worker executes once and replays its immutable result"
       }
     } });
     let credentials = 0;
-    const workerInput = { stateRoot: fixture.stateRoot, runId: fixture.runId, reducerPolicy: fixture.reducer, m5Policy: policy, m5Decision: decisionResult.decision, runAuthority: { ...fixture.runAuthority, task: task as TaskDocument }, repository, baseline, m3StateToken: m3StateToken, lock, instructionFiles: [instruction], authorityFiles: [authority], gateway, m4ToolPolicy: m4Policy, m4CommandCatalog: m4Catalog, task: { task_id: task.task_id, task_sha256: task.task_sha256 }, approvedResources: [{ path: instruction.path, contentSha256: instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" }, { path: authority.path, contentSha256: authority.expectedSha256, dataClass: "PUBLIC_SOURCE" }], systemPrompt: "Bounded smoke worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialCallback: () => { credentials += 1; return "m6-faux-test-key"; } } as const;
+    const credentialStore = { read: async () => undefined, list: async () => [], modify: async () => undefined, delete: async () => undefined };
+    const workerInput = { stateRoot: fixture.stateRoot, runId: fixture.runId, reducerPolicy: fixture.reducer, m5Policy: policy, m5Decision: decisionResult.decision, runAuthority: { ...fixture.runAuthority, task: task as TaskDocument }, repository, baseline, m3StateToken: m3StateToken, lock, instructionFiles: [instruction], authorityFiles: [authority], gateway, m4ToolPolicy: m4Policy, m4CommandCatalog: m4Catalog, task: { task_id: task.task_id, task_sha256: task.task_sha256 }, approvedResources: [{ path: instruction.path, contentSha256: instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" }, { path: authority.path, contentSha256: authority.expectedSha256, dataClass: "PUBLIC_SOURCE" }], systemPrompt: "Bounded smoke worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialStoreCallback: () => { credentials += 1; return credentialStore; } } as const;
     const assertAuthorityRejectedWithoutWork = async (candidate: typeof workerInput): Promise<void> => {
       await assert.rejects(runDirectReadOnlyLunaWorkerForTests(candidate), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "AUTHORITY_REJECTED");
       const records = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
@@ -174,7 +176,7 @@ test("M6 direct read-only worker executes once and replays its immutable result"
       assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(credentials, 0);
     });
     const result = await runDirectReadOnlyLunaWorkerForTests(workerInput);
-    assert.equal(result.result.outcome, "COMPLETED"); assert.equal(result.result.usage.provider_turns, 2); assert.equal(result.result.usage.read_calls, 1); assert.equal(result.result.usage.report_submissions, 1); assert.equal(result.result.settlement.cleanup_certain, false); assert.equal(credentials, 2);
+    assert.equal(result.result.outcome, "COMPLETED"); assert.equal(result.result.usage.provider_turns, 2); assert.equal(result.result.usage.read_calls, 1); assert.equal(result.result.usage.report_submissions, 1); assert.equal(result.result.settlement.cleanup_certain, false); assert.equal(credentials, 1); assert.equal(fauxEvents.includes("explicit-api-key"), false);
     assert.ok(fauxEvents.indexOf("invocation-written") >= 0);
     assert.ok(fauxEvents.indexOf("invocation-written") < fauxEvents.indexOf("provider-call"));
     assert.ok(fauxEvents.indexOf("result-classified") >= 0);
@@ -190,10 +192,10 @@ test("M6 direct read-only worker executes once and replays its immutable result"
     await t.test("completed authority conflict is rejected before a new invocation publication", async () => {
       await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...workerInput, userPrompt: "A conflicting prompt identity." }), (error: unknown) => error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "AUTHORITY_REJECTED");
       const records = await readM6WorkerRecords({ stateRoot: fixture.stateRoot, runId: fixture.runId });
-      assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 1); assert.equal(credentials, 2);
+      assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 1); assert.equal(credentials, 1);
     });
     const replay = await runDirectReadOnlyLunaWorkerForTests(workerInput);
-    assert.equal(replay.replayed, true); assert.equal(replay.result.content_sha256, result.result.content_sha256); assert.equal(credentials, 2);
+    assert.equal(replay.replayed, true); assert.equal(replay.result.content_sha256, result.result.content_sha256); assert.equal(credentials, 1);
     await t.test("semantic M6 classifier rejects schema-valid contradictory terminal records", async () => {
       const invalidResult = (patch: Record<string, unknown>): typeof result.result => {
         const { content_sha256: _contentSha256, ...body } = structuredClone(result.result) as Record<string, unknown>;

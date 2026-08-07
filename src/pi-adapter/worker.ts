@@ -105,7 +105,7 @@ export interface M6DirectReadOnlyWorkerInput {
   readonly approvedResources: readonly M6ApprovedResourceInput[];
   readonly systemPrompt: string;
   readonly userPrompt: string;
-  readonly credentialCallback: (providerId: string) => Promise<string | undefined> | string | undefined;
+  readonly credentialStoreCallback: (providerId: string) => Promise<unknown> | unknown;
   readonly signal?: AbortSignal;
 }
 
@@ -149,6 +149,13 @@ interface ModelsRuntime {
   readonly streamSimple: (model: unknown, context: unknown, options: unknown) => unknown;
   readonly setProvider: (provider: unknown) => void;
   readonly clearProviders: () => void;
+}
+
+interface CredentialStoreRuntime {
+  readonly read: (providerId: string) => Promise<unknown>;
+  readonly list: () => Promise<unknown>;
+  readonly modify: (providerId: string, fn: UnknownCallable) => Promise<unknown>;
+  readonly delete: (providerId: string) => Promise<unknown>;
 }
 
 interface AgentStateRuntime {
@@ -196,6 +203,7 @@ export interface M6FauxRuntimeFactoryInput {
   readonly aiModule: JsonRecord;
   readonly providerId: string;
   readonly modelId: string;
+  readonly credentialStore: CredentialStoreRuntime;
 }
 
 export type M6FauxRuntimeFactory = (input: M6FauxRuntimeFactoryInput) => JsonRecord | undefined;
@@ -580,6 +588,20 @@ function guardModels(value: unknown): ModelsRuntime {
   };
 }
 
+function guardCredentialStore(value: unknown): CredentialStoreRuntime {
+  const object = record(value, "Pi credential store");
+  const readMethod = method(object, "read", "Pi credential store");
+  const listMethod = method(object, "list", "Pi credential store");
+  const modifyMethod = method(object, "modify", "Pi credential store");
+  const deleteMethod = method(object, "delete", "Pi credential store");
+  return {
+    read: async (providerId) => promiseResult(readMethod(providerId), "Pi credential store.read"),
+    list: async () => promiseResult(listMethod(), "Pi credential store.list"),
+    modify: async (providerId, fn) => promiseResult(modifyMethod(providerId, fn), "Pi credential store.modify"),
+    delete: async (providerId) => promiseResult(deleteMethod(providerId), "Pi credential store.delete"),
+  };
+}
+
 function assertAgentTools(value: unknown): void {
   const tools = array(value, "Agent state tools");
   if (tools.length !== 2) fail("RUNTIME_CAPABILITY_INVALID", "Agent must expose exactly two tools", "RUNTIME_GUARD");
@@ -697,10 +719,12 @@ function guardFauxRuntime(value: JsonRecord): PreparedRuntime {
 
 function streamOptions(value: unknown): JsonRecord {
   if (!isJsonRecord(value)) return { maxRetries: 0, maxRetryDelayMs: 0 };
-  return { ...value, maxRetries: 0, maxRetryDelayMs: 0 };
+  if (value["apiKey"] !== undefined) fail("AUTHORITY_REJECTED", "Explicit API-key overrides are forbidden for the controller-owned credential route", "CREDENTIAL");
+  const { apiKey: _apiKey, ...withoutApiKey } = value;
+  return { ...withoutApiKey, maxRetries: 0, maxRetryDelayMs: 0 };
 }
 
-function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, fauxAuthority?: object): PreparedRuntime {
+function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object): PreparedRuntime {
   const getSupportedThinkingLevels = method(boundary.aiModule, "getSupportedThinkingLevels", "AI module");
   const builtinModels = method(boundary.providersModule, "builtinModels", "providers module");
   const officialIds = verifyOfficialCatalogue(boundary.providersModule);
@@ -713,7 +737,7 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
   const provenance = fauxAuthority === undefined ? undefined : fauxRuntimeProvenance.get(fauxAuthority);
   if (fauxAuthority !== undefined && provenance === undefined) fail("AUTHORITY_REJECTED", "Faux runtime provenance is not registered by the test-only constructor", "M1_M5_ADMISSION");
   if (provenance !== undefined) {
-    const injected = provenance.factory({ aiModule: boundary.aiModule, providerId, modelId });
+    const injected = provenance.factory({ aiModule: boundary.aiModule, providerId, modelId, credentialStore });
     if (injected === undefined) fail("RUNTIME_CAPABILITY_INVALID", "Registered faux runtime did not provide the fixed synthetic route", "RUNTIME_GUARD");
     const prepared = guardFauxRuntime(injected);
     models = prepared.models;
@@ -724,7 +748,7 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
   } else {
     if (!officialIds.includes(providerId)) fail("RUNTIME_CAPABILITY_INVALID", "M5 provider is absent from the official catalogue", "RUNTIME_GUARD");
     modelFromCatalogue(boundary.providersModule, providerId, modelId);
-    models = guardModels(builtinModels());
+    models = guardModels(builtinModels({ credentials: credentialStore }));
     const registeredProvider = record(models.getProvider(providerId), "registered catalogue provider");
     exactString(registeredProvider["id"], providerId, "registered catalogue provider ID");
     model = models.getModel(providerId, modelId);
@@ -753,6 +777,17 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
     },
     pendingResponseCount,
   };
+}
+
+async function resolveCredentialStore(input: M6DirectReadOnlyWorkerInput, providerId: string): Promise<CredentialStoreRuntime> {
+  let candidate: unknown;
+  try {
+    candidate = await input.credentialStoreCallback(providerId);
+  } catch {
+    fail("AUTHORITY_REJECTED", "Pi credential authority is unavailable", "CREDENTIAL");
+  }
+  if (candidate === undefined) fail("AUTHORITY_REJECTED", "Pi credential authority is unavailable", "CREDENTIAL");
+  return guardCredentialStore(candidate);
 }
 
 function assertFauxRuntimeAuthority(admission: Admission, productionAuthority: M5ControlPolicyDocument["production_authority"], fauxAuthority: object | undefined): void {
@@ -1247,7 +1282,8 @@ async function runWorker(input: M6DirectReadOnlyWorkerInput, fauxAuthority: obje
     let prepared: PreparedRuntime | undefined;
     try {
       if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before runtime preparation", "M6_INVOCATION");
-      prepared = prepareRuntime(runtimeBoundary, admission.providerId, admission.modelId, fauxAuthority);
+      const credentialStore = await resolveCredentialStore(input, admission.providerId);
+      prepared = prepareRuntime(runtimeBoundary, admission.providerId, admission.modelId, credentialStore, fauxAuthority);
       if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before invocation publication", "M6_INVOCATION");
       await publishM6WorkerRecord({ ...location, kind: "M6_WORKER_INVOCATION", document: invocation });
       return { runtime: prepared };
@@ -1278,7 +1314,6 @@ async function runWorker(input: M6DirectReadOnlyWorkerInput, fauxAuthority: obje
   let timersCleared = false;
   let providerCollectionCleared = false;
   let providerWorkStarted = false;
-  let credentialCallbackCount = 0;
   let providerTurns = 0;
   let modelTurns = 0;
   let toolCalls = 0;
@@ -1300,13 +1335,6 @@ async function runWorker(input: M6DirectReadOnlyWorkerInput, fauxAuthority: obje
         }
         providerTurns += 1;
         return runtime.streamFn(model, context, optionsValue);
-      },
-      getApiKey: async (provider: string): Promise<string | undefined> => {
-        if (provider !== admission.providerId) fail("AUTHORITY_REJECTED", "Credential callback received the wrong provider ID", "CREDENTIAL");
-        credentialCallbackCount += 1;
-        const credential = await input.credentialCallback(provider);
-        if (credential !== undefined && typeof credential !== "string") fail("AUTHORITY_REJECTED", "Credential callback returned a non-string value", "CREDENTIAL");
-        return credential;
       },
       toolExecution: "sequential",
       maxRetryDelayMs: 0,
@@ -1378,7 +1406,6 @@ async function runWorker(input: M6DirectReadOnlyWorkerInput, fauxAuthority: obje
     } catch (error: unknown) {
       latch(firstErrorCode(error), firstErrorStage(error));
     }
-    if (credentialCallbackCount !== providerTurns || providerTurns !== 2) latch("PROVIDER_PROTOCOL_INVALID", "CREDENTIAL");
     try { assertProtocol(agent, { providerTurns, modelTurns, readCalls: toolState.readCalls, reportCalls: toolState.reportCalls, toolCalls }, toolState.report); }
     catch (error: unknown) { latch(firstErrorCode(error), firstErrorStage(error)); }
   } catch (error: unknown) {

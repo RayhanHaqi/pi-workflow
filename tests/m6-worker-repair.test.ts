@@ -32,6 +32,11 @@ function objectValue(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function arrayValue(value: unknown, label: string): readonly unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${label} is not an array`);
+  return value;
+}
+
 function methodValue(value: unknown, name: string, label: string): (...args: readonly unknown[]) => unknown {
   const object = objectValue(value, label);
   const method = object[name];
@@ -113,12 +118,18 @@ function buildInput(value: {
   decision: M5ControlDecisionDocument;
   credentials: { value: number };
 }): M6DirectReadOnlyWorkerInput {
+  const credentialStore = {
+    read: async () => undefined,
+    list: async () => [],
+    modify: async () => undefined,
+    delete: async () => undefined,
+  };
   return {
     stateRoot: value.fixture.stateRoot, runId: value.fixture.runId, reducerPolicy: value.fixture.reducer, m5Policy: value.policy, m5Decision: value.decision,
     runAuthority: { ...value.fixture.runAuthority, task: value.task }, repository: value.repository, baseline: value.baseline, m3StateToken: value.m3StateToken, lock: value.lock,
     instructionFiles: [value.instruction], authorityFiles: [value.authority], gateway: value.gateway, m4ToolPolicy: value.m4Policy, m4CommandCatalog: value.m4Catalog,
     task: { task_id: value.task.task_id, task_sha256: value.task.task_sha256 }, approvedResources: [{ path: value.instruction.path, contentSha256: value.instruction.expectedSha256, dataClass: "PUBLIC_SOURCE" as const }, { path: value.authority.path, contentSha256: value.authority.expectedSha256, dataClass: "PUBLIC_SOURCE" as const }],
-    systemPrompt: "Bounded repair worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialCallback: () => { value.credentials.value += 1; return "m6-repair-faux-key"; },
+    systemPrompt: "Bounded repair worker.", userPrompt: "Read the primary target and submit the terminal report.", credentialStoreCallback: () => { value.credentials.value += 1; return credentialStore; },
   };
 }
 
@@ -175,11 +186,86 @@ function errorCode(error: unknown): unknown {
   return error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
 }
 
+test("OpenAI Codex OAuth route uses the Pi credential store without network or fallback", async () => {
+  const aiSpecifier: string = "@earendil-works/pi-ai";
+  const providersSpecifier: string = "@earendil-works/pi-ai/providers/all";
+  const aiModule = objectValue(await import(aiSpecifier), "AI module");
+  const providersModule = objectValue(await import(providersSpecifier), "providers module");
+  const officialProvider = arrayValue(methodValue(providersModule, "builtinProviders", "providers module")(), "providers").map((value) => objectValue(value, "provider")).find((value) => value["id"] === "openai-codex");
+  if (officialProvider === undefined) throw new Error("OpenAI Codex provider is absent");
+  const lunaModel = arrayValue(methodValue(providersModule, "getBuiltinModels", "providers module")("openai-codex"), "OpenAI Codex models").map((value) => objectValue(value, "model")).find((value) => value["id"] === "gpt-5.6-luna");
+  if (lunaModel === undefined) throw new Error("gpt-5.6-luna is absent");
+  const access = ["m6", "synthetic", "access"].join(":");
+  const refresh = ["m6", "synthetic", "refresh"].join(":");
+  let storeReads = 0;
+  let storeModifications = 0;
+  let environmentReads = 0;
+  let providerCalls = 0;
+  let observedProviderApiKey: unknown;
+  const credentials = {
+    read: async (providerId: string): Promise<unknown> => {
+      storeReads += 1;
+      return providerId === "openai-codex" ? { type: "oauth", access, refresh, expires: Date.now() + 60 * 60 * 1000 } : undefined;
+    },
+    list: async (): Promise<readonly unknown[]> => [{ providerId: "openai-codex", type: "oauth" }],
+    modify: async (_providerId: string, _fn: unknown): Promise<unknown> => { storeModifications += 1; return undefined; },
+    delete: async (_providerId: string): Promise<unknown> => undefined,
+  };
+  const authContext = {
+    env: async (_name: string): Promise<string | undefined> => { environmentReads += 1; return "m6-generic-fallback"; },
+    fileExists: async (_path: string): Promise<boolean> => false,
+  };
+  const faux = objectValue(methodValue(aiModule, "fauxProvider", "AI module")({ api: "m6-oauth-faux-api", provider: "openai-codex", models: [{ id: "gpt-5.6-luna", reasoning: true, input: ["text"] }], tokensPerSecond: 0 }), "faux provider");
+  methodValue(faux, "setResponses", "faux provider")( [methodValue(aiModule, "fauxAssistantMessage", "AI module")("offline", { stopReason: "stop" })] );
+  const fauxProvider = objectValue(faux["provider"], "faux provider implementation");
+  const fauxStream = methodValue(fauxProvider, "stream", "faux provider");
+  const fauxStreamSimple = methodValue(fauxProvider, "streamSimple", "faux provider");
+  const wrappedProvider = methodValue(aiModule, "createProvider", "AI module")({
+    id: officialProvider["id"], name: officialProvider["name"], baseUrl: officialProvider["baseUrl"], auth: officialProvider["auth"], models: [lunaModel],
+    api: {
+      stream: (model: unknown, context: unknown, options: unknown): unknown => { providerCalls += 1; observedProviderApiKey = objectValue(options, "provider options")["apiKey"]; return fauxStream(model, context, options); },
+      streamSimple: (model: unknown, context: unknown, options: unknown): unknown => { providerCalls += 1; observedProviderApiKey = objectValue(options, "provider options")["apiKey"]; return fauxStreamSimple(model, context, options); },
+    },
+  });
+  const models = objectValue(methodValue(aiModule, "createModels", "AI module")({ credentials, authContext }), "models");
+  methodValue(models, "setProvider", "models")(wrappedProvider);
+  const selected = methodValue(models, "getModel", "models")("openai-codex", "gpt-5.6-luna");
+  if (selected === undefined) throw new Error("Exact OpenAI Codex model lookup failed");
+  assert.equal(objectValue(selected, "selected model")["provider"], "openai-codex");
+  assert.equal(objectValue(selected, "selected model")["id"], "gpt-5.6-luna");
+  const levels = arrayValue(methodValue(aiModule, "getSupportedThinkingLevels", "AI module")(selected), "thinking levels");
+  assert.ok(levels.includes("high"));
+  const auth = objectValue(await methodValue(models, "getAuth", "models")(selected), "OAuth resolution");
+  assert.equal(auth["source"], "OAuth");
+  const stream = objectValue(methodValue(models, "streamSimple", "models")(selected, { systemPrompt: "", messages: [] }, { reasoning: "high" }), "provider stream");
+  await methodValue(stream, "result", "provider stream")();
+  assert.equal(observedProviderApiKey, access);
+  assert.equal(storeReads, 2);
+  assert.equal(storeModifications, 0);
+  assert.equal(environmentReads, 0);
+  assert.equal(providerCalls, 1);
+
+  const unavailableCredentials = { ...credentials, read: async (): Promise<undefined> => undefined };
+  const unavailableModels = objectValue(methodValue(aiModule, "createModels", "AI module")({ credentials: unavailableCredentials, authContext }), "unavailable models");
+  methodValue(unavailableModels, "setProvider", "unavailable models")(wrappedProvider);
+  assert.equal(await methodValue(unavailableModels, "getAuth", "unavailable models")(selected), undefined);
+  assert.equal(providerCalls, 1);
+});
+
 test("M6 production-path protocol and lifecycle negatives remain bounded", async (t) => {
   await t.test("production entrypoint rejects TEST_FIXTURE authority before any work", async () => {
     const scenario = await createScenario(); installFauxRuntime("SUCCESS");
     try {
       await assert.rejects(runDirectReadOnlyLunaWorker(scenario.input), (error: unknown) => errorCode(error) === "AUTHORITY_REJECTED");
+      const records = await readM6WorkerRecords(scenario.input);
+      assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
+    } finally { await cleanupScenario(scenario); }
+  });
+
+  await t.test("unavailable Pi credential authority is rejected before provider work", async () => {
+    const scenario = await createScenario(); installFauxRuntime("SUCCESS");
+    try {
+      await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...scenario.input, credentialStoreCallback: () => undefined }), (error: unknown) => errorCode(error) === "AUTHORITY_REJECTED");
       const records = await readM6WorkerRecords(scenario.input);
       assert.equal(records.invocations.length, 0); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
     } finally { await cleanupScenario(scenario); }
@@ -229,7 +315,7 @@ test("M6 production-path protocol and lifecycle negatives remain bounded", async
     try {
       await assert.rejects(runDirectReadOnlyLunaWorkerForTests({ ...scenario.input, signal: controller.signal }), (error: unknown) => errorCode(error) === "WORKER_ABORTED");
       const records = await readM6WorkerRecords(scenario.input);
-      assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 0);
+      assert.equal(records.invocations.length, 1); assert.equal(records.results.length, 0); assert.equal(scenario.credentials.value, 1);
     } finally { await cleanupScenario(scenario); }
   });
 
