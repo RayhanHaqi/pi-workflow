@@ -70,7 +70,17 @@ function fakeWorker(outcome: "COMPLETED" | "BLOCKED" = "COMPLETED"): (input: unk
   } as unknown as M6WorkerExecutionResult);
 }
 
-function canonicalWorker(publish = true, outcome: "COMPLETED" | "BLOCKED" = "COMPLETED"): (input: unknown) => Promise<M6WorkerExecutionResult> {
+interface CanonicalWorkerOverrides {
+  readonly attemptNumber?: 1 | 2;
+  readonly taskContentSha256?: Sha256Digest;
+  readonly resultWallTimeMs?: number;
+}
+
+function canonicalWorker(
+  publish = true,
+  outcome: "COMPLETED" | "BLOCKED" = "COMPLETED",
+  overrides: CanonicalWorkerOverrides = {},
+): (input: unknown) => Promise<M6WorkerExecutionResult> {
   return async (unknownInput) => {
     const input = unknownInput as M6DirectReadOnlyWorkerInput;
     const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
@@ -102,7 +112,7 @@ function canonicalWorker(publish = true, outcome: "COMPLETED" | "BLOCKED" = "COM
       m3_state_token_content_sha256: input.m3StateToken.content_sha256,
       m4_tool_policy_content_sha256: input.m4ToolPolicy.content_sha256,
       m4_command_catalog_content_sha256: input.m4CommandCatalog.content_sha256,
-      task_content_sha256: task.content_sha256,
+      task_content_sha256: overrides.taskContentSha256 ?? task.content_sha256,
       task_scope_identity: input.m3StateToken.task_scope_identity,
       route_map_sha256: input.runAuthority.routeMap.route_map_sha256,
       route_map_approval_sha256: input.runAuthority.routeMapApproval.route_map_approval_sha256,
@@ -118,7 +128,7 @@ function canonicalWorker(publish = true, outcome: "COMPLETED" | "BLOCKED" = "COM
       read_offset: 0,
       read_length: input.m4ToolPolicy.limits.maximum_read_bytes,
       hard_limits: { provider_turns: 2, model_turns: 2, read_calls: 1, tool_calls: 2, report_submissions: 1, prompt_bytes: 32_768, read_bytes: input.m4ToolPolicy.limits.maximum_read_bytes, tool_result_bytes: 69_632, report_canonical_bytes: 4_096, wall_deadline_ms: 120_000 },
-      attempt_number: 1,
+      attempt_number: overrides.attemptNumber ?? 1,
     };
     const invocation = identifyContractDocument("pi_gacw_m6_worker_invocation_v0", {
       schema_id: "pi_gacw_m6_worker_invocation_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
@@ -133,7 +143,7 @@ function canonicalWorker(publish = true, outcome: "COMPLETED" | "BLOCKED" = "COM
       first_failure_code: completed ? null : "AUTHORITY_REJECTED", first_failure_stage: completed ? null : "M1_M5_ADMISSION",
       worker_report: completed ? { status: "COMPLETED", summary: "Completed the bounded read-only task from authoritative M4 evidence.", evidence_content_sha256: [readDigest!] } : null,
       m4_result_content_sha256: completed ? readDigest! : null,
-      usage: { provider_turns: completed ? 2 : 0, model_turns: completed ? 2 : 0, provider_requests: null, tool_calls: completed ? 2 : 0, read_calls: completed ? 1 : 0, report_submissions: completed ? 1 : 0, input_tokens: null, output_tokens: null, cost_microusd: null, wall_time_ms: completed ? 10 : 0 },
+      usage: { provider_turns: completed ? 2 : 0, model_turns: completed ? 2 : 0, provider_requests: null, tool_calls: completed ? 2 : 0, read_calls: completed ? 1 : 0, report_submissions: completed ? 1 : 0, input_tokens: null, output_tokens: null, cost_microusd: null, wall_time_ms: completed ? (overrides.resultWallTimeMs ?? 10) : 0 },
       settlement: { prompt_settled: true, agent_idle: true, pending_tool_calls: 0, subscriber_removed: false, queues_empty: false, reset_completed: false, timers_cleared: false, provider_collection_cleared: false, owned_provider_streams: 0, owned_child_processes: 0, owned_sockets: 0, owned_fifos: 0, cleanup_certain: false },
       cleanup_failure_code: null, completed_at: new Date().toISOString(),
     }) as M6WorkerExecutionResult["result"];
@@ -232,6 +242,38 @@ test("M5 authorization invokes exactly one worker and a completed worker reaches
   assert.equal(result.outcome, "PASS", JSON.stringify({ reason: result.reason, phase: result.finalState?.phase, decision: result.m5Decision, m6: result.m6 }));
   assert.equal(result.finalState?.phase, "PASS");
   assert.equal(result.m5Decision?.outcome, "PASS");
+  assert.equal(result.m5Decision?.usage_evidence_content_sha256.length, 1);
+  assert.equal(result.m6?.result.usage.wall_time_ms, 10);
+});
+
+test("M7 rejects a persisted M6 execution whose canonical attempt number is not one", async () => {
+  const result = await productionRun(goal(), (input) => canonicalWorker(true, "COMPLETED", {
+    attemptNumber: 2,
+    resultWallTimeMs: 120000,
+  })(input));
+  assert.equal(result.outcome, "BLOCKED");
+  assert.equal(result.finalState?.phase, "BLOCKED");
+  assert.equal(result.m6, undefined);
+  assert.equal(result.m5Decision?.intent, "BLOCK");
+  assert.equal(result.m5Decision?.usage_evidence_content_sha256.length, 1);
+  assert.equal(result.m5Decision?.budget.find((entry) => entry.dimension === "WORKER_INVOCATION")?.validated_amount, 0);
+  assert.equal(result.m5Decision?.budget.find((entry) => entry.dimension === "WALL_TIME_MS")?.observed_reported_amount, 0);
+  assert.match(result.reason, /attempt_number is not 1/u);
+});
+
+test("M7 gives a rejected persisted M6 result zero downstream usage authority", async () => {
+  const result = await productionRun(goal(), (input) => canonicalWorker(true, "COMPLETED", {
+    taskContentSha256: sha256Canonical({ rejected: "task-binding" }),
+    resultWallTimeMs: 120000,
+  })(input));
+  assert.equal(result.outcome, "BLOCKED");
+  assert.equal(result.finalState?.phase, "BLOCKED");
+  assert.equal(result.m6, undefined);
+  assert.equal(result.m5Decision?.intent, "BLOCK");
+  assert.equal(result.m5Decision?.usage_evidence_content_sha256.length, 1);
+  assert.equal(result.m5Decision?.budget.find((entry) => entry.dimension === "WORKER_INVOCATION")?.validated_amount, 0);
+  assert.equal(result.m5Decision?.budget.find((entry) => entry.dimension === "WALL_TIME_MS")?.observed_reported_amount, 0);
+  assert.match(result.reason, /exact current M3\/M4\/M5\/task\/route authority/u);
 });
 
 test("M7 uses exact persisted M6 authority instead of a reconstructed worker return", async () => {

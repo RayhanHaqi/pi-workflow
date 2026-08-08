@@ -872,6 +872,31 @@ function usageEvidence(
   }) as unknown as M5UsageEvidenceDocument;
 }
 
+function blockedM6UsageEvidence(
+  policy: M5ControlPolicyDocument,
+  decision: M5ControlDecisionDocument,
+): M5UsageEvidenceDocument {
+  return identifyContractDocument("pi_gacw_m5_usage_evidence_v0", {
+    schema_id: "pi_gacw_m5_usage_evidence_v0",
+    schema_version: "0.1.0",
+    content_projection_id: "document-content-v1",
+    run_id: policy.run_id,
+    policy_content_sha256: policy.content_sha256,
+    originating_state_content_sha256: decision.current_state_content_sha256,
+    operation_id: decision.operation_id!,
+    operation_kind: "WORKER_INVOCATION",
+    execution_mode: "DIRECT_LUNA_HIGH",
+    logical_role: "LUNA_EXECUTOR",
+    reservation_decision_content_sha256: decision.content_sha256,
+    source_layer: "M5",
+    source_kind: "M5_CONTROL_DECISION",
+    source_record_content_sha256: decision.content_sha256,
+    measurements: [{ dimension: "WORKER_INVOCATION", amount: 0, basis: "VALIDATED", enforcement_class: "HARD_ENFORCEABLE" }],
+    disposition: "BLOCKED_BEFORE_START",
+    duration_ms: null,
+  }) as unknown as M5UsageEvidenceDocument;
+}
+
 const PI_CODING_AGENT_SPECIFIER: string = "@earendil-works/pi-coding-agent";
 const PI_AI_SPECIFIER: string = "@earendil-works/pi-ai";
 type CredentialReader = (providerId: string) => Promise<unknown> | unknown;
@@ -993,6 +1018,9 @@ async function resolveAuthoritativeM6Execution(
   const taskPath = input.runAuthority.task.scope.readable_paths[0];
   const reservationKey = input.m5Decision.reservation?.reservation_decision_key ?? null;
   const commit = inspection.transitionCommit;
+  if (persistedInvocation.attempt_number !== 1) {
+    throw new Error("M6 invocation attempt_number is not 1 for the sole authorized direct attempt");
+  }
   if (route === undefined || taskPath === undefined ||
       persistedInvocation.run_id !== input.runId ||
       persistedInvocation.revision !== inspection.revision ||
@@ -1291,14 +1319,10 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
     try {
       resolved = await resolveAuthoritativeM6Execution(workerInput, execution);
     } catch (error: unknown) {
-      let reconciliation: readonly M5UsageEvidenceDocument[] = [];
-      try {
-        const returnedResultDigest = returnedDigest(execution.result, "result");
-        const persistedResults = (await readM6WorkerRecords({ stateRoot, runId: RUN_ID })).results;
-        const persisted = persistedResults.find((value) => value.content_sha256 === returnedResultDigest) ?? (persistedResults.length === 1 ? persistedResults[0] : undefined);
-        if (persisted !== undefined) reconciliation = [usageEvidence(m5, decisionResult.decision, persisted)];
-      } catch { /* The durable BLOCK path below retains the reservation when no exact result exists. */ }
-      return await terminalizePostAdmission(`BLOCKED_M7_M6_AUTHORITY:${error instanceof Error ? error.message : String(error)}`, reconciliation);
+      return await terminalizePostAdmission(
+        `BLOCKED_M7_M6_AUTHORITY:${error instanceof Error ? error.message : String(error)}`,
+        [blockedM6UsageEvidence(m5, decisionResult.decision)],
+      );
     }
     const usage = usageEvidence(m5, decisionResult.decision, resolved.result);
     if (resolved.result.outcome !== "COMPLETED") {
