@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -35,14 +35,14 @@ async function runProcess(command: string, args: readonly string[], cwd: string)
   });
 }
 
-function goal(commandPath = "/usr/bin/true"): Record<string, any> {
+function goal(): Record<string, any> {
   return {
     objective: "Inspect one selected source and report its bounded state.",
     resources: [{ path: "README.md", max_bytes: 1024, data_class: "PUBLIC_SOURCE" }],
     non_goals: ["Do not edit files", "Do not use network"],
     deliverable: "One structured report.",
-    acceptance_criteria: [{ criterion_id: "verify", description: "The exact verification command passes.", evidence_kind: "COMMAND", owner_acceptance: false }],
-    verification_commands: [{ command_id: "verify", argv: [commandPath], cwd: "REPOSITORY_ROOT", timeout_ms: 1000, network: "FORBIDDEN" }],
+    acceptance_criteria: [{ criterion_id: "report", description: "The bounded report is completed.", evidence_kind: "DIGEST", owner_acceptance: false }],
+    verification_commands: [],
     budget: { max_worker_invocations: 1, max_model_turns: 2, max_tool_calls: 2, max_wall_time_ms: 120000, max_read_bytes: 1024 },
     stop_condition: "Stop after one report.",
   };
@@ -76,9 +76,8 @@ function canonicalWorker(publish = true, outcome: "COMPLETED" | "BLOCKED" = "COM
     const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
     if (inspection.status !== "HEALTHY" || inspection.statePointer === null || inspection.workflowState === null || inspection.transitionCommit === null) throw new Error("test M6 fixture lacks committed admission");
     const task = input.runAuthority.task;
-    const commandObject = inspection.managedObjects.find((object) => object.kind === "M4_COMMAND_RESULT");
-    const read = outcome === "COMPLETED" && commandObject !== undefined
-      ? JSON.parse(await readFile(join(input.stateRoot, "runs", input.runId, commandObject.relativePath), "utf8")) as { readonly content_sha256: Sha256Digest }
+    const read = outcome === "COMPLETED"
+      ? (await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path: task.scope.readable_paths[0]!, offset: 0, length: input.m4ToolPolicy.limits.maximum_read_bytes, mode: "TEXT" })).resultRecord
       : undefined;
     const m5Reservation = input.m5Decision.reservation;
     const projection = {
@@ -179,8 +178,9 @@ test("M7 compilation is deterministic and binds every Goal execution field", () 
   assert.equal(first.task_id, "task-only");
   assert.equal(first.objective.includes("goal_sha256"), false);
   assert.equal(first.objective.includes("m7-ephemeral-goal-v1"), true);
-  assert.equal(first.content_sha256, "sha256:8a3e606c4c6651250d626f795350253341ca5885e999ed8d1d14224d40efedb8");
-  assert.equal(first.task_sha256, "sha256:3e227caa324c8c99032101089ae3cdd5598bfd7d81d8d151ddcb9f72df378b5d");
+  assert.equal(first.verification_commands.length, 0);
+  assert.equal(first.acceptance_criteria[0]?.criterion_id, "report");
+  assert.equal(first.acceptance_criteria[0]?.evidence_kind, "DIGEST");
 
   const variants: Array<(value: Record<string, any>) => void> = [
     (value) => { value["objective"] += " changed"; },
@@ -190,7 +190,6 @@ test("M7 compilation is deterministic and binds every Goal execution field", () 
     (value) => { value["non_goals"][0] = "A different non-goal"; },
     (value) => { value["deliverable"] += " changed"; },
     (value) => { value["acceptance_criteria"][0].description += " changed"; },
-    (value) => { value["verification_commands"][0].timeout_ms = 2000; },
     (value) => { value["budget"]["max_wall_time_ms"] = 110000; },
     (value) => { value["budget"]["max_read_bytes"] = 512; },
     (value) => { value["stop_condition"] += " changed"; },
@@ -202,13 +201,14 @@ test("M7 compilation is deterministic and binds every Goal execution field", () 
   }
 });
 
-test("M7 rejects unknown Goal fields, unsafe commands, and widened budgets before execution", () => {
+test("M7 deletes Goal executable authority and rejects unsupported acceptance before M5", () => {
   assert.throws(() => compileGoalToTask({ ...goal(), unknown: true }), WorkflowValidationError);
   assert.throws(() => compileGoalToTask({ ...goal(), budget: { ...goal()["budget"], max_worker_invocations: 2 } }), WorkflowValidationError);
-  assert.throws(() => compileGoalToTask({ ...goal(), verification_commands: [{ ...goal()["verification_commands"][0], network: "ALLOW" }] }), WorkflowValidationError);
-  assert.throws(() => compileGoalToTask({ ...goal(), verification_commands: [{ ...goal()["verification_commands"][0], argv: ["/bin/sh", "-c", "true"] }] }), WorkflowValidationError);
+  assert.throws(() => compileGoalToTask({ ...goal(), verification_commands: [{ command_id: "verify", argv: ["/usr/bin/true"], cwd: "REPOSITORY_ROOT", timeout_ms: 1, network: "FORBIDDEN" }] }), WorkflowValidationError);
+  assert.throws(() => compileGoalToTask({ ...goal(), verification_commands: [{ command_id: "verify", argv: ["/bin/sh", "-c", "true"], cwd: "REPOSITORY_ROOT", timeout_ms: 1, network: "FORBIDDEN" }] }), WorkflowValidationError);
+  assert.throws(() => compileGoalToTask({ ...goal(), acceptance_criteria: [{ ...goal()["acceptance_criteria"][0], evidence_kind: "FILE" }] }), WorkflowValidationError);
+  assert.throws(() => compileGoalToTask({ ...goal(), acceptance_criteria: [{ ...goal()["acceptance_criteria"][0], criterion_id: "arbitrary" }] }), WorkflowValidationError);
   assert.throws(() => compileGoalToTask({ ...goal(), resources: [{ path: "../README.md", max_bytes: 1, data_class: "PUBLIC_SOURCE" }] }), WorkflowValidationError);
-  assert.throws(() => compileGoalToTask({ ...goal(), budget: { ...goal()["budget"], max_wall_time_ms: 500 }, verification_commands: [{ ...goal()["verification_commands"][0], timeout_ms: 1000 }] }), WorkflowValidationError);
 });
 
 test("approval mismatch and tampering do not reach the shared execution hook", async () => {
@@ -228,16 +228,31 @@ test("approval mismatch and tampering do not reach the shared execution hook", a
 test("M5 authorization invokes exactly one worker and a completed worker reaches authoritative PASS", async () => {
   let calls = 0;
   const result = await productionRun(goal(), async (input) => { calls += 1; return canonicalWorker()(input); });
-  assert.equal(calls, 1);
+  assert.equal(calls, 1, JSON.stringify({ outcome: result.outcome, reason: result.reason, phase: result.finalState?.phase, decision: result.m5Decision }));
   assert.equal(result.outcome, "PASS", JSON.stringify({ reason: result.reason, phase: result.finalState?.phase, decision: result.m5Decision, m6: result.m6 }));
   assert.equal(result.finalState?.phase, "PASS");
   assert.equal(result.m5Decision?.outcome, "PASS");
 });
 
+test("M7 uses exact persisted M6 authority instead of a reconstructed worker return", async () => {
+  const result = await productionRun(goal(), async (input) => {
+    const persisted = await canonicalWorker()(input);
+    const reconstructed = identifyContractDocument("pi_gacw_m6_worker_result_v0", {
+      ...persisted.result,
+      content_sha256: undefined,
+      completed_at: new Date(Date.parse(persisted.result.completed_at) + 1).toISOString(),
+    }) as M6WorkerExecutionResult["result"];
+    return { ...persisted, result: reconstructed };
+  });
+  assert.equal(result.outcome, "BLOCKED");
+  assert.equal(result.finalState?.phase, "BLOCKED");
+  assert.match(result.reason, /M6 returned locator does not identify a persisted record/u);
+});
+
 test("M5 BLOCK and M6 BLOCKED both stop without retry", async () => {
   let blockedWorkerCalls = 0;
-  const verificationBlocked = await productionRun(goal("/usr/bin/false"), async (input) => { blockedWorkerCalls += 1; return fakeWorker()(input); });
-  assert.equal(verificationBlocked.outcome, "BLOCKED");
+  const commandGoal = { ...goal(), verification_commands: [{ command_id: "verify", argv: ["/usr/bin/false"], cwd: "REPOSITORY_ROOT", timeout_ms: 1000, network: "FORBIDDEN" }] };
+  assert.throws(() => prepareWorkflow(commandGoal), WorkflowValidationError);
   assert.equal(blockedWorkerCalls, 0);
 
   let m6Calls = 0;

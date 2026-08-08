@@ -218,7 +218,7 @@ export const VerificationCommandSchema = StrictObject({
 export const CommandPolicySchema = StrictObject({
   shell: Type.Literal(false),
   network: StringEnum(["FORBIDDEN", "OWNER_APPROVED"] as const),
-  allowed_executables: Type.Array(NonEmptyString(1024), { minItems: 1, maxItems: 1024, uniqueItems: true }),
+  allowed_executables: Type.Array(NonEmptyString(1024), { minItems: 0, maxItems: 1024, uniqueItems: true }),
   forbidden_operations: Type.Array(
     StringEnum(["INSTALL", "COMMIT", "PUSH", "TAG", "MERGE", "REBASE", "RESET", "RESTORE", "CLEAN", "SWITCH_BRANCH", "MODIFY_REMOTE"] as const),
     { minItems: 1, uniqueItems: true },
@@ -428,7 +428,7 @@ export const ContractSchema = StrictObject(
     required_outputs: Type.Array(NonEmptyString(), { minItems: 1, maxItems: 10_000, uniqueItems: true }),
     acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { minItems: 1, maxItems: 10_000 }),
     owner_acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { maxItems: 10_000 }),
-    verification_commands: Type.Array(VerificationCommandSchema, { minItems: 1, maxItems: 10_000 }),
+    verification_commands: Type.Array(VerificationCommandSchema, { minItems: 0, maxItems: 10_000 }),
     command_policy: CommandPolicySchema,
     limits: LimitEnvelopeSchema,
     stopping_conditions: Type.Array(NonEmptyString(), { minItems: 1, maxItems: 10_000 }),
@@ -475,7 +475,7 @@ export const TaskSchema = StrictObject(
     required_outputs: Type.Array(NonEmptyString(), { minItems: 1, maxItems: 10_000, uniqueItems: true }),
     acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { minItems: 1, maxItems: 10_000 }),
     owner_acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { maxItems: 10_000 }),
-    verification_commands: Type.Array(VerificationCommandSchema, { minItems: 1, maxItems: 10_000 }),
+    verification_commands: Type.Array(VerificationCommandSchema, { minItems: 0, maxItems: 10_000 }),
     assigned_role: StringEnum(["SOL_OWNER", "LUNA_EXECUTOR"] as const),
     write_owner: Identifier(),
   },

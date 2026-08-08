@@ -226,7 +226,7 @@
       }
     },
     "verification_commands": {
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 10000,
       "type": "array",
       "items": {
@@ -290,7 +290,7 @@
           ]
         },
         "allowed_executables": {
-          "minItems": 1,
+          "minItems": 0,
           "maxItems": 1024,
           "uniqueItems": true,
           "type": "array",

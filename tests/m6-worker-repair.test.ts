@@ -1,4 +1,4 @@
-import { mkdir, readFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -264,6 +264,24 @@ test("OpenAI Codex OAuth route uses the Pi credential store without network or f
   methodValue(unavailableModels, "setProvider", "unavailable models")(wrappedProvider);
   assert.equal(await methodValue(unavailableModels, "getAuth", "unavailable models")(selected), undefined);
   assert.equal(providerCalls, 1);
+});
+
+test("coding-agent nested dependency bytes are covered by the fixed direct installed-tree identity", async () => {
+  const nestedPackage = join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/node_modules/@anthropic-ai/sdk/package.json");
+  const original = await readFile(nestedPackage);
+  const scenario = await createScenario();
+  installFauxRuntime("SUCCESS");
+  try {
+    await writeFile(nestedPackage, Buffer.concat([original, Buffer.from("\nM7 nested-tree mutation\n", "utf8")]));
+    await assert.rejects(runDirectReadOnlyLunaWorkerForTests(scenario.input), (error: unknown) => errorCode(error) === "RUNTIME_IDENTITY_INVALID");
+    const records = await readM6WorkerRecords(scenario.input);
+    assert.equal(records.invocations.length, 0);
+    assert.equal(records.results.length, 0);
+    assert.equal(scenario.credentials.value, 0);
+  } finally {
+    await writeFile(nestedPackage, original);
+    await cleanupScenario(scenario);
+  }
 });
 
 test("M6 terminal report binding rejects duplicate, missing-authority, and substituted submissions", () => {

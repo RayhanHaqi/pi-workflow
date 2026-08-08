@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
-import { isAbsolute, join, basename } from "node:path";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
@@ -27,7 +27,7 @@ import {
   type WorktreeLockHandle,
 } from "./repository/index.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
-import { commandSpecProjection, isInterpreterExecutablePath } from "./scoped-tools/commands.js";
+
 import { assertM4CanonicalPath } from "./secure-fs/path.js";
 import {
   assertDocumentValid,
@@ -38,10 +38,11 @@ import {
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
   type M4CommandCatalogDocument,
-  type M4CommandResultDocument,
-  type M4CommandSpecification,
   type M4ScopedToolPolicyDocument,
+  type M4ToolResultDocument,
   type M5ControlDecisionDocument,
+  type M6WorkerInvocationDocument,
+  type M6WorkerResultDocument,
   type M5ControlPolicyDocument,
   type M5UsageEvidenceDocument,
   type ProcessMetadata,
@@ -54,7 +55,8 @@ import {
 } from "./schemas/index.js";
 import { createInitialState } from "./state-machine/index.js";
 import { classifyM6Authority } from "./persistence/m6-authority.js";
-import { readM6WorkerRecords } from "./persistence/store.js";
+import { readM5ManagedRecords, readM6WorkerRecords } from "./persistence/store.js";
+import { readM4Record } from "./scoped-tools/records.js";
 import { runDirectReadOnlyLunaWorker, type M6DirectReadOnlyWorkerInput, type M6WorkerExecutionResult } from "./pi-adapter/worker.js";
 import type { ScopedToolGateway } from "./scoped-tools/types.js";
 import { resolveExecutable } from "./repository/lock.js";
@@ -94,7 +96,6 @@ const GOAL_KEYS = [
 ] as const;
 const RESOURCE_KEYS = ["path", "max_bytes", "data_class"] as const;
 const ACCEPTANCE_KEYS = ["criterion_id", "description", "evidence_kind", "owner_acceptance"] as const;
-const VERIFICATION_KEYS = ["command_id", "argv", "cwd", "timeout_ms", "network"] as const;
 const BUDGET_KEYS = [
   "max_worker_invocations",
   "max_model_turns",
@@ -105,7 +106,7 @@ const BUDGET_KEYS = [
 
 export type WorkflowOutcome = "PASS" | "BLOCKED";
 export type GoalDataClass = "PUBLIC_SOURCE" | "PRIVATE_SOURCE" | "SENSITIVE" | "HASH_ONLY";
-export type GoalEvidenceKind = "COMMAND" | "FILE" | "DIGEST";
+export type GoalEvidenceKind = "DIGEST";
 
 export interface GoalResource {
   readonly path: string;
@@ -118,14 +119,6 @@ export interface GoalAcceptanceCriterion {
   readonly description: string;
   readonly evidence_kind: GoalEvidenceKind;
   readonly owner_acceptance: false;
-}
-
-export interface GoalVerificationCommand {
-  readonly command_id: string;
-  readonly argv: readonly string[];
-  readonly cwd: "REPOSITORY_ROOT";
-  readonly timeout_ms: number;
-  readonly network: "FORBIDDEN";
 }
 
 export interface GoalBudget {
@@ -146,7 +139,8 @@ export interface EphemeralGoal {
   readonly non_goals: readonly string[];
   readonly deliverable: string;
   readonly acceptance_criteria: readonly GoalAcceptanceCriterion[];
-  readonly verification_commands: readonly GoalVerificationCommand[];
+  /** Compatibility field; V0 accepts only an empty array and creates no executable authority. */
+  readonly verification_commands: readonly [];
   readonly budget: GoalBudget;
   readonly stop_condition: string;
 }
@@ -265,43 +259,24 @@ function normalizeGoal(value: unknown): EphemeralGoal {
   const nonGoals = (input["non_goals"] as readonly unknown[]).map((candidate, index) => nonempty(candidate, `Goal.non_goals[${index}]`, 4096));
   if (new Set(nonGoals).size !== nonGoals.length) invalid("Goal.non_goals contains duplicate values");
 
-  if (!Array.isArray(input["acceptance_criteria"]) || (input["acceptance_criteria"] as readonly unknown[]).length === 0) invalid("Goal.acceptance_criteria must be non-empty");
+  if (!Array.isArray(input["acceptance_criteria"]) || (input["acceptance_criteria"] as readonly unknown[]).length !== 1) {
+    invalid("M7 V0 accepts exactly one fixed report acceptance criterion");
+  }
   const acceptance = (input["acceptance_criteria"] as readonly unknown[]).map((candidate, index): GoalAcceptanceCriterion => {
     const criterion = record(candidate, `Goal.acceptance_criteria[${index}]`);
     exactKeys(criterion, ACCEPTANCE_KEYS, `Goal.acceptance_criteria[${index}]`);
     const criterionId = nonempty(criterion["criterion_id"], `Goal.acceptance_criteria[${index}].criterion_id`, 128);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(criterionId)) invalid(`Goal.acceptance_criteria[${index}].criterion_id is invalid`);
+    if (criterionId !== "report") invalid("M7 V0 supports only the fixed report acceptance criterion");
     const description = nonempty(criterion["description"], `Goal.acceptance_criteria[${index}].description`);
-    const evidenceKind = criterion["evidence_kind"];
-    if (evidenceKind !== "COMMAND" && evidenceKind !== "FILE" && evidenceKind !== "DIGEST") invalid(`Goal.acceptance_criteria[${index}].evidence_kind is unsupported`);
+    if (criterion["evidence_kind"] !== "DIGEST") invalid("M7 V0 acceptance must use the fixed authoritative DIGEST evidence shape");
     if (criterion["owner_acceptance"] !== false) invalid("M7 does not admit owner-acceptance criteria");
-    return { criterion_id: criterionId, description, evidence_kind: evidenceKind, owner_acceptance: false };
+    return { criterion_id: criterionId, description, evidence_kind: "DIGEST", owner_acceptance: false };
   });
-  if (new Set(acceptance.map((criterion) => criterion.criterion_id)).size !== acceptance.length) invalid("Goal.acceptance_criteria contains duplicate criterion IDs");
 
-  if (!Array.isArray(input["verification_commands"]) || (input["verification_commands"] as readonly unknown[]).length === 0) invalid("Goal.verification_commands must be non-empty");
-  const verification = (input["verification_commands"] as readonly unknown[]).map((candidate, index): GoalVerificationCommand => {
-    const command = record(candidate, `Goal.verification_commands[${index}]`);
-    exactKeys(command, VERIFICATION_KEYS, `Goal.verification_commands[${index}]`);
-    const commandId = nonempty(command["command_id"], `Goal.verification_commands[${index}].command_id`, 128);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(commandId)) invalid(`Goal.verification_commands[${index}].command_id is invalid`);
-    if (!Array.isArray(command["argv"]) || (command["argv"] as readonly unknown[]).length === 0 || (command["argv"] as readonly unknown[]).length > 128) invalid(`Goal.verification_commands[${index}].argv is invalid`);
-    const argv = (command["argv"] as readonly unknown[]).map((argument, argumentIndex) => nonempty(argument, `Goal.verification_commands[${index}].argv[${argumentIndex}]`, 4096));
-    if (!isAbsolute(argv[0]!)) invalid("Verification argv[0] must be an absolute M4 executable identity; PATH lookup is not authority");
-    if (isInterpreterExecutablePath(argv[0]!)) invalid("M7 Goal verification commands must use direct non-interpreter executables");
-    if (argv.slice(1).some((argument) => isAbsolute(argument))) invalid("M7 Goal verification commands cannot create authority for absolute argv operands");
-    if (command["cwd"] !== "REPOSITORY_ROOT") invalid("Verification cwd must be the exact authorized repository root");
-    const timeout = safeInteger(command["timeout_ms"], `Goal.verification_commands[${index}].timeout_ms`, 1, M4_MAX_COMMAND_TIME_MS);
-    if (command["network"] !== "FORBIDDEN") invalid("M7 verification commands require network FORBIDDEN");
-    return { command_id: commandId, argv, cwd: "REPOSITORY_ROOT", timeout_ms: timeout, network: "FORBIDDEN" };
-  });
-  if (new Set(verification.map((command) => command.command_id)).size !== verification.length) invalid("Goal.verification_commands contains duplicate command IDs");
-  const commandIds = new Set(verification.map((command) => command.command_id));
-  for (const criterion of acceptance) {
-    if (criterion.evidence_kind !== "COMMAND" || !commandIds.has(criterion.criterion_id)) {
-      invalid(`Goal criterion ${criterion.criterion_id} must bind one exact authorized COMMAND verification result`);
-    }
+  if (!Array.isArray(input["verification_commands"]) || (input["verification_commands"] as readonly unknown[]).length !== 0) {
+    invalid("M7 V0 does not admit Goal verification commands or executable authority");
   }
+  const verification = [] as const;
 
   const budgetInput = record(input["budget"], "Goal.budget");
   exactKeys(budgetInput, BUDGET_KEYS, "Goal.budget");
@@ -310,7 +285,6 @@ function normalizeGoal(value: unknown): EphemeralGoal {
   const toolCalls = safeInteger(budgetInput["max_tool_calls"], "Goal.budget.max_tool_calls", M6_TOOL_CALLS, M6_TOOL_CALLS);
   const wallTime = safeInteger(budgetInput["max_wall_time_ms"], "Goal.budget.max_wall_time_ms", 1, M6_MAX_WALL_TIME_MS);
   const readBytes = safeInteger(budgetInput["max_read_bytes"], "Goal.budget.max_read_bytes", 1, M6_MAX_READ_BYTES);
-  if (verification.some((command) => command.timeout_ms > wallTime)) invalid("Verification timeout exceeds Goal.budget.max_wall_time_ms");
   const budget = {
     max_worker_invocations: workerInvocations,
     max_model_turns: modelTurns,
@@ -325,7 +299,7 @@ function normalizeGoal(value: unknown): EphemeralGoal {
     non_goals: sortedStrings(nonGoals),
     deliverable,
     acceptance_criteria: canonicalSorted(acceptance),
-    verification_commands: canonicalSorted(verification),
+    verification_commands: [] as const,
     budget,
     stop_condition: stopCondition,
   };
@@ -490,7 +464,7 @@ function routeMap(): RouteMapDocument {
       policy_id: `m7-${logical_role.toLowerCase()}`,
       built_in_tools_disabled: true as const,
       mutation_tool: "NONE" as const,
-      command_gateway: "VERIFICATION_ONLY" as const,
+      command_gateway: logical_role === "SOL_CLOSEOUT" ? "VERIFICATION_ONLY" as const : "INSPECTION_ONLY" as const,
       maximum_tool_calls: M6_TOOL_CALLS,
     },
   }));
@@ -571,11 +545,11 @@ function contractDocument(goal: EphemeralGoal, task: TaskDocument, routeApproval
     required_outputs: task.required_outputs,
     acceptance_criteria: goal.acceptance_criteria,
     owner_acceptance_criteria: [],
-    verification_commands: goal.verification_commands,
+    verification_commands: [],
     command_policy: {
       shell: false,
       network: "FORBIDDEN",
-      allowed_executables: sortedStrings(goal.verification_commands.map((command) => basename(command.argv[0]!))),
+      allowed_executables: [],
       forbidden_operations: ["INSTALL", "COMMIT", "PUSH", "TAG", "MERGE", "REBASE", "RESET", "RESTORE", "CLEAN", "SWITCH_BRANCH", "MODIFY_REMOTE"],
     },
     limits: {
@@ -689,7 +663,7 @@ function m5Policy(
       unique_write_ownership: true,
       leaf_acceptance_machine_checkable: true,
     },
-    obligations: acceptanceObligationsFromContract(contract),
+    obligations: acceptanceObligationsFromContract(),
     limits: dimensions.map(([dimension, hard_limit, soft_limit, enforcement_class]) => ({ dimension, hard_limit, soft_limit, enforcement_class })),
     role_reservation_envelopes: [{ logical_role: "LUNA_EXECUTOR", purpose: "ORDINARY", amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] }],
     failure_action_table_version: "m5-failure-actions-v1",
@@ -703,7 +677,7 @@ function m5Policy(
   }) as unknown as M5ControlPolicyDocument;
 }
 
-function acceptanceObligationsFromContract(contract: ContractDocument): M5ControlPolicyDocument["obligations"] {
+function acceptanceObligationsFromContract(): M5ControlPolicyDocument["obligations"] {
   const report = {
     declaration: "report",
     direction: "OUTPUT" as const,
@@ -715,18 +689,7 @@ function acceptanceObligationsFromContract(contract: ContractDocument): M5Contro
     literal: "COMPLETED",
     prefix: null,
   };
-  const criteria = contract.acceptance_criteria.map((criterion) => ({
-    declaration: `acceptance.${criterion.criterion_id}`,
-    direction: "OUTPUT" as const,
-    stage: 1,
-    producer: TASK_ID,
-    consumers: ["contract"],
-    grammar: "LITERAL" as const,
-    evidence_kind: criterion.evidence_kind,
-    literal: "PASS",
-    prefix: null,
-  }));
-  return [report, ...criteria].map((obligation) => ({ descriptor_sha256: sha256Canonical(obligation), ...obligation }));
+  return [{ descriptor_sha256: sha256Canonical(report), ...report }];
 }
 
 function m4Limits(goal: EphemeralGoal) {
@@ -762,68 +725,6 @@ async function requiredEnvironment(repository: M3RepositoryIdentityDocument): Pr
     git_path: await resolveExecutable("git"),
     python_path: pythonPath,
   };
-}
-
-async function commandSpecification(
-  repository: M3RepositoryIdentityDocument,
-  command: GoalVerificationCommand,
-): Promise<M4CommandSpecification> {
-  const executablePath = command.argv[0]!;
-  const executablePhysical = await realpath(executablePath);
-  if (executablePhysical !== executablePath) throw new Error("Verification executable is symlinked or not canonical");
-  const executableStats = await lstat(executablePath);
-  if (!executableStats.isFile() || executableStats.isSymbolicLink() || (executableStats.mode & 0o111) === 0) throw new Error("Verification executable is not a regular executable file");
-  const cwd = repository.worktree_root;
-  const cwdStats = await lstat(cwd);
-  const cwdPhysical = await realpath(cwd);
-  if (!cwdStats.isDirectory() || cwdPhysical !== cwd) throw new Error("Repository root is not a canonical directory");
-  const executionInputs: Array<{ path: string; realpath: string; device: number; inode: number; mode: number; size: number; digest: Sha256Digest }> = [];
-  if (command.argv.slice(1).some((argument) => isAbsolute(argument))) throw new Error("Goal verification command has an unauthorized absolute argv operand");
-  const seen = new Set<string>();
-  for (const argument of command.argv) {
-    if (!isAbsolute(argument) || seen.has(argument)) continue;
-    try {
-      const stats = await lstat(argument);
-      if (!stats.isFile() || stats.isSymbolicLink()) continue;
-      const physical = await realpath(argument);
-      if (physical !== argument) throw new Error("Verification execution input is symlinked");
-      seen.add(argument);
-      executionInputs.push({ path: argument, realpath: physical, device: stats.dev, inode: stats.ino, mode: stats.mode & 0o7777, size: stats.size, digest: sha256Bytes(await readFile(argument)) });
-    } catch (error: unknown) {
-      if (argument === executablePath) continue;
-      throw error;
-    }
-  }
-  const draft = {
-    command_id: command.command_id,
-    command_spec_sha256: `sha256:${"0".repeat(64)}`,
-    command_class: "VERIFICATION" as const,
-    executable_invocation_path: executablePath,
-    executable_realpath: executablePhysical,
-    executable_device: executableStats.dev,
-    executable_inode: executableStats.ino,
-    executable_mode: executableStats.mode & 0o7777,
-    executable_size: executableStats.size,
-    executable_sha256: sha256Bytes(await readFile(executablePath)),
-    argv: [...command.argv],
-    cwd: "REPOSITORY_ROOT" as const,
-    cwd_realpath: cwdPhysical,
-    cwd_device: cwdStats.dev,
-    cwd_inode: cwdStats.ino,
-    execution_inputs: executionInputs,
-    environment: [],
-    read_paths: [],
-    write_paths: [],
-    network_policy: "FORBIDDEN" as const,
-    timeout_ms: command.timeout_ms,
-    stdout_limit: M4_MAX_STDOUT_BYTES,
-    stderr_limit: M4_MAX_STDERR_BYTES,
-    expected_exit_codes: [0],
-    repository_side_effect: "NONE" as const,
-    claimed_paths: [],
-    cleanup_paths: [],
-  };
-  return { ...draft, command_spec_sha256: sha256Canonical(commandSpecProjection(draft as M4CommandSpecification)) } as M4CommandSpecification;
 }
 
 async function toolPolicy(
@@ -864,20 +765,16 @@ async function toolPolicy(
   }) as unknown as M4ScopedToolPolicyDocument;
 }
 
-async function catalog(
-  repository: M3RepositoryIdentityDocument,
-  goal: EphemeralGoal,
-): Promise<M4CommandCatalogDocument> {
-  const commands = await Promise.all(goal.verification_commands.map((command) => commandSpecification(repository, command)));
+function catalog(repository: M3RepositoryIdentityDocument): M4CommandCatalogDocument {
   return identifyContractDocument("pi_gacw_command_catalog_v0", {
     schema_id: "pi_gacw_command_catalog_v0",
     schema_version: "0.1.0",
     content_projection_id: "document-content-v1",
     run_id: RUN_ID,
-    catalog_id: "m7-verification-catalog",
+    catalog_id: "m7-controller-owned-empty-catalog",
     repository_identity_content_sha256: repository.content_sha256,
     tool_policy_content_sha256: `sha256:${"0".repeat(64)}`,
-    commands,
+    commands: [],
   }) as unknown as M4CommandCatalogDocument;
 }
 
@@ -940,9 +837,9 @@ async function currentExpected(stateRoot: string, runId: string) {
 function usageEvidence(
   policy: M5ControlPolicyDocument,
   decision: M5ControlDecisionDocument,
-  result: M6WorkerExecutionResult,
+  result: M6WorkerResultDocument,
 ): M5UsageEvidenceDocument {
-  const usage = result.result.usage;
+  const usage = result.usage;
   const amount = (dimension: string, value: number | null, basis: "VALIDATED" | "OBSERVED" | "REPORTED" | "UNAVAILABLE", enforcement_class: M5UsageEvidenceDocument["measurements"][number]["enforcement_class"]) => ({ dimension, amount: value, basis, enforcement_class });
   const measurements = [
     amount("WORKER_INVOCATION", 1, "VALIDATED", "HARD_ENFORCEABLE"),
@@ -970,7 +867,7 @@ function usageEvidence(
     source_kind: "M5_CONTROL_DECISION",
     source_record_content_sha256: decision.content_sha256,
     measurements,
-    disposition: result.result.outcome === "COMPLETED" ? "COMPLETED" : "BLOCKED_BEFORE_START",
+    disposition: "COMPLETED",
     duration_ms: usage.wall_time_ms,
   }) as unknown as M5UsageEvidenceDocument;
 }
@@ -999,34 +896,167 @@ async function publicCredentialStore(providerId: string, reader?: CredentialRead
   return store;
 }
 
-async function assertCanonicalM6Execution(stateRoot: string, runId: string, execution: M6WorkerExecutionResult): Promise<void> {
+interface ResolvedM6Execution {
+  readonly invocation: M6WorkerInvocationDocument;
+  readonly result: M6WorkerResultDocument;
+  readonly replayed: boolean;
+  readonly m4Read?: M4ToolResultDocument;
+  readonly evidence: readonly { readonly bytes: Buffer; readonly mediaType: string }[];
+}
+
+function returnedDigest(value: unknown, label: string): Sha256Digest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`M6 ${label} locator is missing`);
+  const digest = (value as Record<string, unknown>)["content_sha256"];
+  if (typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(digest)) throw new Error(`M6 ${label} locator is schema-invalid`);
+  return digest as Sha256Digest;
+}
+
+function managedClass(
+  inspection: Awaited<ReturnType<typeof inspectRunStorage>>,
+  kind: string,
+  digest: string,
+): string | undefined {
+  return inspection.managedRecordClassifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest)?.classification;
+}
+
+async function exactPersistedEvidence(
+  stateRoot: string,
+  runId: string,
+  inspection: Awaited<ReturnType<typeof inspectRunStorage>>,
+  kind: "M6_WORKER_INVOCATION" | "M6_WORKER_RESULT",
+  digest: Sha256Digest,
+  value: object,
+): Promise<{ readonly bytes: Buffer; readonly mediaType: string }> {
+  const object = inspection.managedObjects.find((entry) => entry.kind === kind && entry.contentSha256 === digest);
+  if (object === undefined) throw new Error(`M6 ${kind} persisted locator is absent`);
+  const bytes = await readFile(join(stateRoot, "runs", runId, object.relativePath));
+  if (!bytes.equals(Buffer.from(`${canonicalize(value)}\n`, "utf8"))) throw new Error(`M6 ${kind} persisted bytes are not the canonical authority record`);
+  return { bytes, mediaType: "application/json" };
+}
+
+async function resolveAuthoritativeM6Execution(
+  input: M6DirectReadOnlyWorkerInput,
+  execution: M6WorkerExecutionResult,
+): Promise<ResolvedM6Execution> {
   try {
     assertDocumentValid("pi_gacw_m6_worker_invocation_v0", execution.invocation);
     assertDocumentValid("pi_gacw_m6_worker_result_v0", execution.result);
   } catch (error: unknown) {
-    throw new Error(`M6 returned schema-invalid authority: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`M6 returned schema-invalid authority reference: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (execution.invocation.run_id !== runId || execution.result.run_id !== runId || execution.result.invocation_content_sha256 !== execution.invocation.content_sha256) {
-    throw new Error("M6 returned authority is bound to the wrong run or invocation");
+  const invocationDigest = returnedDigest(execution.invocation, "invocation");
+  const resultDigest = returnedDigest(execution.result, "result");
+  if (execution.invocation.run_id !== input.runId || execution.result.run_id !== input.runId || execution.result.invocation_content_sha256 !== invocationDigest) {
+    throw new Error("M6 returned locators are bound to the wrong run or invocation");
   }
-  const location = { stateRoot, runId };
-  const [inspection, records] = await Promise.all([inspectRunStorage(location), readM6WorkerRecords(location)]);
-  const persistedInvocation = records.invocations.find((value) => value.content_sha256 === execution.invocation.content_sha256);
-  const persistedResult = records.results.find((value) => value.content_sha256 === execution.result.content_sha256);
-  if (inspection.status !== "HEALTHY" || persistedInvocation === undefined || persistedResult === undefined ||
-      canonicalize(persistedInvocation) !== canonicalize(execution.invocation) || canonicalize(persistedResult) !== canonicalize(execution.result)) {
-    throw new Error("M6 returned authority is not the exact persisted managed record");
+  const location = { stateRoot: input.stateRoot, runId: input.runId };
+  const [inspection, records, m5Records] = await Promise.all([
+    inspectRunStorage(location),
+    readM6WorkerRecords(location),
+    readM5ManagedRecords(location),
+  ]);
+  if (inspection.status !== "HEALTHY" || inspection.workflowState === null || inspection.statePointer === null || inspection.transitionCommit === null || inspection.revision === null) {
+    throw new Error("M6 persisted authority is unavailable from a healthy committed run");
   }
+  const persistedInvocation = records.invocations.find((value) => value.content_sha256 === invocationDigest);
+  const persistedResult = records.results.find((value) => value.content_sha256 === resultDigest);
+  if (persistedInvocation === undefined || persistedResult === undefined) throw new Error("M6 returned locator does not identify a persisted record");
   const classifications = classifyM6Authority({
-    runId,
+    runId: input.runId,
     objects: inspection.managedObjects.filter((object) => object.kind === "M6_WORKER_INVOCATION" || object.kind === "M6_WORKER_RESULT"),
     invocations: new Map(records.invocations.map((value) => [value.content_sha256, value])),
     results: new Map(records.results.map((value) => [value.content_sha256, value])),
   });
-  for (const [kind, digest] of [["M6_WORKER_INVOCATION", execution.invocation.content_sha256], ["M6_WORKER_RESULT", execution.result.content_sha256]] as const) {
+  for (const [kind, digest] of [["M6_WORKER_INVOCATION", invocationDigest], ["M6_WORKER_RESULT", resultDigest]] as const) {
     const classification = classifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest);
     if (classification?.classification !== "AUTHORITATIVE_MANAGED_RECORD") throw new Error(`M6 ${kind} is not an authoritative managed record`);
   }
+
+  const persistedPolicy = m5Records.policies.find((value) => value.content_sha256 === input.m5Policy.content_sha256);
+  const persistedDecision = m5Records.decisions.find((value) => value.content_sha256 === input.m5Decision.content_sha256);
+  if (persistedPolicy === undefined || persistedDecision === undefined || canonicalize(persistedPolicy) !== canonicalize(input.m5Policy) || canonicalize(persistedDecision) !== canonicalize(input.m5Decision)) {
+    throw new Error("M6 outer M5 authority is not the exact persisted policy and decision");
+  }
+  if (managedClass(inspection, "M5_CONTROL_POLICY", persistedPolicy.content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD" ||
+      managedClass(inspection, "M5_CONTROL_DECISION", persistedDecision.content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD") {
+    throw new Error("M6 outer M5 authority is not classified as authoritative");
+  }
+  const catalogClass = managedClass(inspection, "M4_COMMAND_CATALOG", input.m4CommandCatalog.content_sha256);
+  if (managedClass(inspection, "M3_REPOSITORY_STATE_TOKEN", input.m3StateToken.content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD" ||
+      managedClass(inspection, "M4_TOOL_POLICY", input.m4ToolPolicy.content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD" ||
+      (catalogClass !== "AUTHORITATIVE_MANAGED_RECORD" && catalogClass !== "UNREFERENCED_MANAGED_RECORD")) {
+    throw new Error("M6 outer M3/M4 authority is not current");
+  }
+  if (input.m4CommandCatalog.commands.length !== 0) throw new Error("M7 M4 command catalog contains executable Goal-derived authority");
+
+  const route = input.runAuthority.routeMap.routes.find((candidate) => candidate.logical_role === "LUNA_EXECUTOR");
+  const taskPath = input.runAuthority.task.scope.readable_paths[0];
+  const reservationKey = input.m5Decision.reservation?.reservation_decision_key ?? null;
+  const commit = inspection.transitionCommit;
+  if (route === undefined || taskPath === undefined ||
+      persistedInvocation.run_id !== input.runId ||
+      persistedInvocation.revision !== inspection.revision ||
+      persistedInvocation.state_pointer_content_sha256 !== inspection.statePointer.content_sha256 ||
+      persistedInvocation.current_state_content_sha256 !== inspection.workflowState.content_sha256 ||
+      persistedInvocation.predecessor_state_content_sha256 !== commit.previous_workflow_state_content_sha256 ||
+      persistedInvocation.transition_commit_content_sha256 !== commit.content_sha256 ||
+      persistedInvocation.m5_decision_content_sha256 !== persistedDecision.content_sha256 ||
+      persistedInvocation.m5_policy_content_sha256 !== persistedPolicy.content_sha256 ||
+      persistedInvocation.m5_reservation_decision_key !== reservationKey ||
+      persistedInvocation.operation_id !== input.m5Decision.operation_id ||
+      persistedInvocation.transition_event_content_sha256 !== commit.transition_event_content_sha256 ||
+      persistedInvocation.predicted_next_state_content_sha256 !== input.m5Decision.predicted_next_state_content_sha256 ||
+      persistedInvocation.repository_identity_content_sha256 !== input.repository.content_sha256 ||
+      persistedInvocation.worktree_key !== input.repository.worktree_key ||
+      persistedInvocation.m3_state_token_content_sha256 !== input.m3StateToken.content_sha256 ||
+      persistedInvocation.m4_tool_policy_content_sha256 !== input.m4ToolPolicy.content_sha256 ||
+      persistedInvocation.m4_command_catalog_content_sha256 !== input.m4CommandCatalog.content_sha256 ||
+      persistedInvocation.task_content_sha256 !== input.runAuthority.task.content_sha256 ||
+      persistedInvocation.task_scope_identity !== input.m3StateToken.task_scope_identity ||
+      persistedInvocation.route_map_sha256 !== input.runAuthority.routeMap.route_map_sha256 ||
+      persistedInvocation.route_map_approval_sha256 !== input.runAuthority.routeMapApproval.route_map_approval_sha256 ||
+      persistedInvocation.provider_id !== route.provider_id || persistedInvocation.model_id !== route.model_id || persistedInvocation.effort !== "high" ||
+      persistedInvocation.read_path !== taskPath || persistedInvocation.read_offset !== 0 ||
+      persistedInvocation.system_prompt_sha256 !== sha256Bytes(Buffer.from(input.systemPrompt, "utf8")) ||
+      persistedInvocation.user_prompt_sha256 !== sha256Bytes(Buffer.from(input.userPrompt, "utf8")) ||
+      canonicalize(persistedInvocation.approved_resources) !== canonicalize(input.approvedResources)) {
+    throw new Error("M6 invocation is not bound to the exact current M3/M4/M5/task/route authority");
+  }
+  if (persistedInvocation.read_length < 1 || persistedInvocation.read_length > input.m4ToolPolicy.limits.maximum_read_bytes ||
+      persistedInvocation.hard_limits.read_bytes !== persistedInvocation.read_length) {
+    throw new Error("M6 invocation read authority exceeds the current M4 policy");
+  }
+  if (persistedResult.invocation_key !== persistedInvocation.invocation_key || persistedResult.invocation_content_sha256 !== persistedInvocation.content_sha256 || persistedResult.run_id !== input.runId) {
+    throw new Error("M6 persisted result is not bound to the exact persisted invocation");
+  }
+
+  let m4Read: M4ToolResultDocument | undefined;
+  if (persistedResult.m4_result_content_sha256 !== null) {
+    const m4Digest = persistedResult.m4_result_content_sha256;
+    if (managedClass(inspection, "M4_TOOL_RESULT", m4Digest) !== "AUTHORITATIVE_MANAGED_RECORD") throw new Error("M6 result M4 identity is not an authoritative managed record");
+    const result = await readM4Record(location, "TOOL_RESULT", m4Digest as Sha256Digest);
+    if (managedClass(inspection, "M4_TOOL_REQUEST", result.request_content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD") throw new Error("M6 M4 read request is not authoritative");
+    const request = await readM4Record(location, "TOOL_REQUEST", result.request_content_sha256 as Sha256Digest);
+    const authority = input.m4ToolPolicy.path_authorities.find((entry) => entry.path === taskPath && entry.kind === "EXACT");
+    if (authority === undefined || !authority.raw_read_approved ||
+        request.run_id !== input.runId || request.request_kind !== "READ" || request.path !== taskPath || request.command_id !== null ||
+        request.state_token_content_sha256 !== input.m3StateToken.content_sha256 || request.tool_policy_content_sha256 !== input.m4ToolPolicy.content_sha256 ||
+        request.task_scope_identity !== input.m3StateToken.task_scope_identity ||
+        request.request_metadata_sha256 !== sha256Canonical({ offset: 0, length: persistedInvocation.read_length, mode: "TEXT", raw: true }) ||
+        result.run_id !== input.runId || result.request_content_sha256 !== request.content_sha256 || result.result_kind !== "READ" || result.path !== taskPath ||
+        result.state_token_content_sha256 !== input.m3StateToken.content_sha256 || result.data_class !== authority.data_class || result.outcome !== "RAW") {
+      throw new Error("M6 result does not bind the exact authoritative M4 read request, policy, path, and state token");
+    }
+    m4Read = result;
+  }
+  if (persistedResult.outcome === "COMPLETED" && (m4Read === undefined || persistedResult.worker_report === null || persistedResult.worker_report.evidence_content_sha256[0] !== m4Read.content_sha256)) {
+    throw new Error("Completed M6 result is not bound to the exact authoritative M4 read");
+  }
+  const evidence = [
+    await exactPersistedEvidence(input.stateRoot, input.runId, inspection, "M6_WORKER_INVOCATION", persistedInvocation.content_sha256 as Sha256Digest, persistedInvocation),
+    await exactPersistedEvidence(input.stateRoot, input.runId, inspection, "M6_WORKER_RESULT", persistedResult.content_sha256 as Sha256Digest, persistedResult),
+  ];
+  return { invocation: persistedInvocation, result: persistedResult, replayed: execution.replayed, ...(m4Read === undefined ? {} : { m4Read }), evidence };
 }
 
 async function m5Block(
@@ -1124,7 +1154,7 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
     committed = await commitEvent(stateRoot, committed, reducer, "ACCEPT_CLEAN_BASELINE", 4);
     committed = await commitEvent(stateRoot, committed, reducer, "PASS_FULL_PREFLIGHT", 5);
     const policy = await toolPolicy(repository, task, full.acceptedState, goal);
-    const catalogDraft = await catalog(repository, goal);
+    const catalogDraft = catalog(repository);
     const catalogDocument = withCatalogPolicy(catalogDraft, policy);
     const gateway: ScopedToolGateway = await createScopedToolGateway({
       stateRoot,
@@ -1142,25 +1172,6 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
       commandCatalog: catalogDocument,
       temporaryRoot,
     });
-    // Verification is an M4 operation, not an M5 evidence shortcut. Run it
-    // before publishing M5 decisions so every later M5 decision sees the same
-    // durable M3 authority population and no decision key changes when the
-    // command result is published.
-    const verificationResults: M4CommandResultDocument[] = [];
-    let verificationFailure: string | undefined;
-    for (const command of goal.verification_commands) {
-      try {
-        const commandResult = await gateway.run_verification_command({ commandId: command.command_id, stateTokenContentSha256: gateway.acceptedState.content_sha256 as Sha256Digest });
-        verificationResults.push(commandResult.record);
-        if (commandResult.record.outcome !== "PASS") {
-          verificationFailure = "BLOCKED_M4_VERIFICATION";
-          break;
-        }
-      } catch {
-        verificationFailure = "BLOCKED_M4_VERIFICATION";
-        break;
-      }
-    }
     const admittedState = gateway.acceptedState;
     const m5 = m5Policy(repository, initialState, reducer, contract, budget, route, approval, policy, catalogDocument, scopeSha, acceptanceSha);
     const sources = sourceBundle(contract, budget, route, approval, policy, catalogDocument, admittedState);
@@ -1222,11 +1233,6 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
       finalState = decisionResult.workflowState;
       return { outcome: "BLOCKED", reason: decisionResult.decision.blocking_reason ?? "BLOCKED_M5_ROUTE", task, finalState, m5Decision: currentM5Decision };
     }
-    if (verificationFailure !== undefined) {
-      const blocked = await m5Block(kernel, stateRoot, m5, sources, verificationFailure);
-      finalState = blocked.state;
-      return { outcome: "BLOCKED", reason: blocked.decision.blocking_reason ?? verificationFailure, task, finalState, m5Decision: blocked.decision };
-    }
     const afterSelectExpected = await currentExpected(stateRoot, RUN_ID);
     await commitEvent(stateRoot, { statePointer: afterSelectExpected.inspection.statePointer!, workflowState: afterSelectExpected.inspection.workflowState! }, reducer, "VALIDATE_DIRECT_CONTRACT", 20);
     const afterDirectContract = await currentExpected(stateRoot, RUN_ID);
@@ -1281,37 +1287,42 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
     } catch (error: unknown) {
       return await terminalizePostAdmission!( `BLOCKED_M6_${error instanceof Error ? error.name : "FAILURE"}`);
     }
-    await assertCanonicalM6Execution(stateRoot, RUN_ID, execution);
-    const usage = usageEvidence(m5, decisionResult.decision, execution);
-    if (execution.result.outcome !== "COMPLETED") {
-      return await terminalizePostAdmission("BLOCKED_M6_RESULT", [usage], execution);
+    let resolved: ResolvedM6Execution;
+    try {
+      resolved = await resolveAuthoritativeM6Execution(workerInput, execution);
+    } catch (error: unknown) {
+      let reconciliation: readonly M5UsageEvidenceDocument[] = [];
+      try {
+        const returnedResultDigest = returnedDigest(execution.result, "result");
+        const persistedResults = (await readM6WorkerRecords({ stateRoot, runId: RUN_ID })).results;
+        const persisted = persistedResults.find((value) => value.content_sha256 === returnedResultDigest) ?? (persistedResults.length === 1 ? persistedResults[0] : undefined);
+        if (persisted !== undefined) reconciliation = [usageEvidence(m5, decisionResult.decision, persisted)];
+      } catch { /* The durable BLOCK path below retains the reservation when no exact result exists. */ }
+      return await terminalizePostAdmission(`BLOCKED_M7_M6_AUTHORITY:${error instanceof Error ? error.message : String(error)}`, reconciliation);
+    }
+    const usage = usageEvidence(m5, decisionResult.decision, resolved.result);
+    if (resolved.result.outcome !== "COMPLETED") {
+      return await terminalizePostAdmission("BLOCKED_M6_RESULT", [usage], resolved);
     }
     const runningExpected = await currentExpected(stateRoot, RUN_ID);
-    const afterAttempt = await commitEvent(stateRoot, { statePointer: runningExpected.inspection.statePointer!, workflowState: runningExpected.inspection.workflowState! }, reducer, "COMPLETE_DIRECT_ATTEMPT", 24, {}, [canonicalEvidence(execution.invocation), canonicalEvidence(execution.result)]);
+    await commitEvent(stateRoot, { statePointer: runningExpected.inspection.statePointer!, workflowState: runningExpected.inspection.workflowState! }, reducer, "COMPLETE_DIRECT_ATTEMPT", 24, {}, resolved.evidence);
     const afterVerificationExpected = await currentExpected(stateRoot, RUN_ID);
-    const afterVerification = await commitEvent(stateRoot, { statePointer: afterVerificationExpected.inspection.statePointer!, workflowState: afterVerificationExpected.inspection.workflowState! }, reducer, "PASS_DIRECT_POSTFLIGHT", 25, {}, verificationResults.map((value) => canonicalEvidence(value)));
+    await commitEvent(stateRoot, { statePointer: afterVerificationExpected.inspection.statePointer!, workflowState: afterVerificationExpected.inspection.workflowState! }, reducer, "PASS_DIRECT_POSTFLIGHT", 25);
     const terminalExpected = await currentExpected(stateRoot, RUN_ID);
-    const terminalSources: M5AuthoritativeSources = {
-      ...sources,
-      m4CommandResults: verificationResults,
-    };
-    const commandResultsById = new Map(verificationResults.map((value) => [value.command_id, value]));
-    const obligationEvidence = m5.obligations.map((obligation) => {
-      if (obligation.declaration === "report") {
-        return { descriptorSha256: obligation.descriptor_sha256 as Sha256Digest, value: "COMPLETED", evidenceContentSha256: terminalExpected.inspection.workflowState!.content_sha256 as Sha256Digest };
-      }
-      const commandId = obligation.declaration.slice("acceptance.".length);
-      const result = commandResultsById.get(commandId);
-      if (result === undefined || result.outcome !== "PASS") throw new Error(`M4 command criterion ${commandId} has no authoritative PASS result`);
-      return { descriptorSha256: obligation.descriptor_sha256 as Sha256Digest, value: "PASS", evidenceContentSha256: result.content_sha256 as Sha256Digest };
-    });
+    const reportObligation = m5.obligations.find((obligation) => obligation.declaration === "report");
+    if (reportObligation === undefined) throw new Error("Fixed M7 report obligation is absent from M5 policy");
+    const obligationEvidence = [{
+      descriptorSha256: reportObligation.descriptor_sha256 as Sha256Digest,
+      value: "COMPLETED",
+      evidenceContentSha256: terminalExpected.inspection.workflowState!.content_sha256 as Sha256Digest,
+    }];
     const terminal = await kernel.evaluateControlDecision({
       intent: "EVALUATE_TERMINAL",
       ...terminalExpected,
       transitionId: "m7-evaluate-terminal",
       processMetadata: processMetadata(),
       availableLogicalRoles: ["LUNA_EXECUTOR"],
-      authoritativeSources: terminalSources,
+      authoritativeSources: sources,
       usageEvidence: [usage],
       obligationEvidence,
     });
@@ -1323,7 +1334,7 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
       task,
       finalState,
       m5Decision: currentM5Decision,
-      m6: execution,
+      m6: resolved,
     };
   } catch (error: unknown) {
     if (admissionBegun && !terminalizationAttempted && terminalizePostAdmission !== undefined) {

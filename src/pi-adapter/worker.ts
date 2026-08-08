@@ -54,7 +54,7 @@ const CODING_AGENT_RUNTIME = {
   package_version: "0.83.0",
   registry_integrity: "sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==",
   registry_resolved: "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.83.0.tgz",
-  installed_tree_sha256: "sha256:91585fe135830f1aff68bf7c930461fb9ac3a6202a47e2e3fa60de53434b7aa9" as Sha256Digest,
+  installed_tree_sha256: "sha256:13a6d5f8ffe7b15aaa590c75198c491f7bc5939afbd9afdba762b50f3ee5c3c2" as Sha256Digest,
 } as const;
 const PROTOCOL_ID = "m6-direct-read-v0";
 const RUNTIME_BOUNDARY_POLICY = M6_RUNTIME_BOUNDARY_POLICY;
@@ -385,23 +385,29 @@ async function optionalJsonRecord(path: string, label: string): Promise<JsonReco
   return readJsonRecord(path, label);
 }
 
-async function collectRegularFiles(root: string, current: string, includeNestedNodeModules = true): Promise<readonly string[]> {
+async function collectRegularFiles(root: string, current: string): Promise<readonly string[]> {
   const entries = await readdir(current, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
     const path = join(current, entry.name);
-    if (entry.isSymbolicLink()) fail("RUNTIME_IDENTITY_INVALID", `Symlink in installed tree: ${path}`, "RUNTIME_IDENTITY");
-    if (entry.isDirectory()) {
-      if (!includeNestedNodeModules && entry.name === "node_modules") continue;
-      files.push(...await collectRegularFiles(root, path, includeNestedNodeModules));
-    } else if (entry.isFile()) files.push(path);
+    if (entry.isSymbolicLink()) {
+      let physical: string;
+      try { physical = await realpath(path); }
+      catch { fail("RUNTIME_IDENTITY_INVALID", `Installed-tree symlink target is unavailable: ${path}`, "RUNTIME_IDENTITY"); }
+      if (!isWithin(physical!, root)) fail("RUNTIME_IDENTITY_INVALID", `Installed-tree symlink escapes its package root: ${path}`, "RUNTIME_IDENTITY");
+      const target = await lstat(physical!);
+      if (!target.isFile() || target.isSymbolicLink()) fail("RUNTIME_IDENTITY_INVALID", `Installed-tree symlink target is not a regular file: ${path}`, "RUNTIME_IDENTITY");
+      continue;
+    }
+    if (entry.isDirectory()) files.push(...await collectRegularFiles(root, path));
+    else if (entry.isFile()) files.push(path);
     else fail("RUNTIME_IDENTITY_INVALID", `Special file in installed tree: ${path}`, "RUNTIME_IDENTITY");
   }
   return files;
 }
 
-async function installedTreeDigest(root: string, includeNestedNodeModules = true): Promise<Sha256Digest> {
-  const files = [...await collectRegularFiles(root, root, includeNestedNodeModules)].sort((left, right) => {
+async function installedTreeDigest(root: string): Promise<Sha256Digest> {
+  const files = [...await collectRegularFiles(root, root)].sort((left, right) => {
     const a = relative(root, left);
     const b = relative(root, right);
     return a < b ? -1 : a > b ? 1 : 0;
@@ -473,13 +479,17 @@ async function matchingPackageRoots(packageName: string, resolutionRoots: readon
 
 async function runtimeResolutionRoots(root: string): Promise<readonly string[]> {
   const candidates = new Set<string>();
-  const local = join(root, "node_modules");
-  try { await canonicalDirectory(local, "package-local node_modules"); candidates.add(local); }
-  catch (error: unknown) { if (!isNotFound(error)) throw error; }
-  const parent = resolve(root, "..");
-  if (basename(parent) === "node_modules") {
-    await canonicalDirectory(parent, "hoisted node_modules");
-    candidates.add(parent);
+  const addCandidate = async (candidate: string, label: string): Promise<void> => {
+    try { await canonicalDirectory(candidate, label); candidates.add(resolve(candidate)); }
+    catch (error: unknown) { if (!isNotFound(error)) throw error; }
+  };
+  const normalizedRoot = resolve(root);
+  await addCandidate(join(normalizedRoot, "node_modules"), "package-local node_modules");
+  let ancestor = resolve(normalizedRoot, "..");
+  for (let depth = 0; depth < 32 && ancestor !== resolve(ancestor, ".."); depth += 1) {
+    const candidate = basename(ancestor) === "node_modules" ? ancestor : join(ancestor, "node_modules");
+    await addCandidate(candidate, `ancestor node_modules ${depth}`);
+    ancestor = resolve(ancestor, "..");
   }
   if (candidates.size === 0) fail("RUNTIME_IDENTITY_INVALID", "No package dependency resolution root is available", "RUNTIME_IDENTITY");
   return Object.freeze([...candidates].sort());
@@ -493,7 +503,6 @@ async function verifyPackage(
   expectedResolved: string,
   expectedTree: Sha256Digest,
   resolutionRoots: readonly string[],
-  includeNestedNodeModules = true,
 ): Promise<PackageIdentity> {
   const rootPath = await findPackageRoot(target.entryPath, packageName, expectedVersion, resolutionRoots);
   if (!resolutionRoots.some((root) => isWithin(rootPath, root))) fail("RUNTIME_IDENTITY_INVALID", `${packageName} package root is outside the installed dependency graph`, "RUNTIME_IDENTITY");
@@ -503,7 +512,7 @@ async function verifyPackage(
   exactString(packageJson["version"], expectedVersion, `${packageName} package version`);
   const roots = await matchingPackageRoots(packageName, resolutionRoots);
   if (roots.length !== 1 || roots[0] !== rootPath) fail("RUNTIME_IDENTITY_INVALID", `${packageName} has duplicate or substituted roots`, "RUNTIME_IDENTITY");
-  const tree = await installedTreeDigest(rootPath, includeNestedNodeModules);
+  const tree = await installedTreeDigest(rootPath);
   if (tree !== expectedTree) fail("RUNTIME_IDENTITY_INVALID", `${packageName} installed-tree digest mismatch`, "RUNTIME_IDENTITY");
   return {
     specifier: target.specifier,
@@ -560,7 +569,7 @@ async function loadRuntimeBoundary(): Promise<RuntimeBoundary> {
   const codingAgentTarget = await resolvePublicEsm(CODING_AGENT_MODULE_SPECIFIER, resolutionRoots);
   const agentIdentity = await verifyPackage(agentTarget, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, resolutionRoots);
   const aiIdentity = await verifyPackage(aiTarget, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, resolutionRoots);
-  const codingAgentIdentity = await verifyPackage(codingAgentTarget, CODING_AGENT_RUNTIME.package_name, CODING_AGENT_RUNTIME.package_version, CODING_AGENT_RUNTIME.registry_integrity, CODING_AGENT_RUNTIME.registry_resolved, CODING_AGENT_RUNTIME.installed_tree_sha256, resolutionRoots, false);
+  const codingAgentIdentity = await verifyPackage(codingAgentTarget, CODING_AGENT_RUNTIME.package_name, CODING_AGENT_RUNTIME.package_version, CODING_AGENT_RUNTIME.registry_integrity, CODING_AGENT_RUNTIME.registry_resolved, CODING_AGENT_RUNTIME.installed_tree_sha256, resolutionRoots);
   if (!isWithin(providersTarget.entryPath, aiIdentity.rootPath)) fail("RUNTIME_IDENTITY_INVALID", "providers/all is outside the verified Pi AI root", "RUNTIME_IDENTITY");
   const providersRoot = await findPackageRoot(providersTarget.entryPath, providersExpected.package_name, providersExpected.package_version, resolutionRoots);
   if (providersRoot !== aiIdentity.rootPath) fail("RUNTIME_IDENTITY_INVALID", "providers/all root differs from Pi AI root", "RUNTIME_IDENTITY");
@@ -582,7 +591,7 @@ async function loadRuntimeBoundary(): Promise<RuntimeBoundary> {
   }
   await verifyPackage(agentAfter, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, resolutionRoots);
   await verifyPackage(aiAfter, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, resolutionRoots);
-  await verifyPackage(codingAgentAfter, CODING_AGENT_RUNTIME.package_name, CODING_AGENT_RUNTIME.package_version, CODING_AGENT_RUNTIME.registry_integrity, CODING_AGENT_RUNTIME.registry_resolved, CODING_AGENT_RUNTIME.installed_tree_sha256, resolutionRoots, false);
+  await verifyPackage(codingAgentAfter, CODING_AGENT_RUNTIME.package_name, CODING_AGENT_RUNTIME.package_version, CODING_AGENT_RUNTIME.registry_integrity, CODING_AGENT_RUNTIME.registry_resolved, CODING_AGENT_RUNTIME.installed_tree_sha256, resolutionRoots);
   exactString(codingAgentModule["VERSION"], CODING_AGENT_RUNTIME.package_version, "coding-agent VERSION");
   callable(readProperty(codingAgentModule, "readStoredCredential", "coding-agent module"), "coding-agent readStoredCredential");
   const agentExport = readProperty(agentModule, "Agent", "Agent module");
