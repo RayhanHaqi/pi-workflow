@@ -42,16 +42,9 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.83.0",
     "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
     "@sinclair/typebox": "0.34.41",
     "ajv": "8.17.1"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.83.0"
-  },
-  "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@types/node": "22.15.3",

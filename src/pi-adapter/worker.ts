@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { canonicalize } from "../canonical-json/index.js";
@@ -47,6 +47,15 @@ import type { RunStorageLocation } from "../persistence/types.js";
 const AGENT_MODULE_SPECIFIER = M6_RUNTIME_MODULES[0]!.specifier;
 const AI_MODULE_SPECIFIER = M6_RUNTIME_MODULES[1]!.specifier;
 const PROVIDERS_MODULE_SPECIFIER = M6_RUNTIME_MODULES[2]!.specifier;
+const CODING_AGENT_MODULE_SPECIFIER: string = "@earendil-works/pi-coding-agent";
+const CODING_AGENT_RUNTIME = {
+  specifier: CODING_AGENT_MODULE_SPECIFIER,
+  package_name: CODING_AGENT_MODULE_SPECIFIER,
+  package_version: "0.83.0",
+  registry_integrity: "sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==",
+  registry_resolved: "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.83.0.tgz",
+  installed_tree_sha256: "sha256:91585fe135830f1aff68bf7c930461fb9ac3a6202a47e2e3fa60de53434b7aa9" as Sha256Digest,
+} as const;
 const PROTOCOL_ID = "m6-direct-read-v0";
 const RUNTIME_BOUNDARY_POLICY = M6_RUNTIME_BOUNDARY_POLICY;
 const MAX_PROMPT_BYTES = 32_768;
@@ -140,8 +149,10 @@ interface RuntimeBoundary {
   readonly agentModule: JsonRecord;
   readonly aiModule: JsonRecord;
   readonly providersModule: JsonRecord;
+  readonly codingAgentModule: JsonRecord;
   readonly agentIdentity: PackageIdentity;
   readonly aiIdentity: PackageIdentity;
+  readonly codingAgentIdentity: PackageIdentity;
   readonly providersTarget: ResolvedTarget;
 }
 
@@ -374,21 +385,23 @@ async function optionalJsonRecord(path: string, label: string): Promise<JsonReco
   return readJsonRecord(path, label);
 }
 
-async function collectRegularFiles(root: string, current: string): Promise<readonly string[]> {
+async function collectRegularFiles(root: string, current: string, includeNestedNodeModules = true): Promise<readonly string[]> {
   const entries = await readdir(current, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
     const path = join(current, entry.name);
     if (entry.isSymbolicLink()) fail("RUNTIME_IDENTITY_INVALID", `Symlink in installed tree: ${path}`, "RUNTIME_IDENTITY");
-    if (entry.isDirectory()) files.push(...await collectRegularFiles(root, path));
-    else if (entry.isFile()) files.push(path);
+    if (entry.isDirectory()) {
+      if (!includeNestedNodeModules && entry.name === "node_modules") continue;
+      files.push(...await collectRegularFiles(root, path, includeNestedNodeModules));
+    } else if (entry.isFile()) files.push(path);
     else fail("RUNTIME_IDENTITY_INVALID", `Special file in installed tree: ${path}`, "RUNTIME_IDENTITY");
   }
   return files;
 }
 
-async function installedTreeDigest(root: string): Promise<Sha256Digest> {
-  const files = [...await collectRegularFiles(root, root)].sort((left, right) => {
+async function installedTreeDigest(root: string, includeNestedNodeModules = true): Promise<Sha256Digest> {
+  const files = [...await collectRegularFiles(root, root, includeNestedNodeModules)].sort((left, right) => {
     const a = relative(root, left);
     const b = relative(root, right);
     return a < b ? -1 : a > b ? 1 : 0;
@@ -414,22 +427,21 @@ function parseFileUrl(value: string, label: string): URL {
   return parsed;
 }
 
-async function resolvePublicEsm(specifier: string, nodeModulesRoot: string): Promise<ResolvedTarget> {
+async function resolvePublicEsm(specifier: string, resolutionRoots: readonly string[]): Promise<ResolvedTarget> {
   let resolvedUrl: string;
   try { resolvedUrl = import.meta.resolve(specifier); }
   catch { fail("RUNTIME_IDENTITY_INVALID", `${specifier} ESM resolution failed`, "RUNTIME_IDENTITY"); }
   const parsed = parseFileUrl(resolvedUrl, `${specifier} ESM resolution`);
   const entryPath = resolve(fileURLToPath(parsed));
-  if (!isWithin(entryPath, nodeModulesRoot)) fail("RUNTIME_IDENTITY_INVALID", `${specifier} resolves outside node_modules`, "RUNTIME_IDENTITY");
+  if (!resolutionRoots.some((root) => isWithin(entryPath, root))) fail("RUNTIME_IDENTITY_INVALID", `${specifier} resolves outside the installed dependency graph`, "RUNTIME_IDENTITY");
   await canonicalFile(entryPath, `${specifier} ESM target`);
   return { specifier, url: resolvedUrl, entryPath };
 }
 
-async function findPackageRoot(entryPath: string, packageName: string, expectedVersion: string, nodeModulesRoot: string): Promise<string> {
-  const boundary = resolve(nodeModulesRoot);
+async function findPackageRoot(entryPath: string, packageName: string, expectedVersion: string, resolutionRoots: readonly string[]): Promise<string> {
+  const boundaries = new Set(resolutionRoots.map((root) => resolve(root)));
   let current = resolve(dirname(entryPath));
-  while (current !== boundary) {
-    if (!isWithin(current, boundary)) fail("RUNTIME_IDENTITY_INVALID", `${packageName} package-root walk escaped node_modules`, "RUNTIME_IDENTITY");
+  while (!boundaries.has(current)) {
     await canonicalDirectory(current, `${packageName} package-root walk`);
     const packageJson = await optionalJsonRecord(join(current, "package.json"), `${packageName} package.json`);
     if (packageJson !== undefined) {
@@ -437,27 +449,40 @@ async function findPackageRoot(entryPath: string, packageName: string, expectedV
       exactString(packageJson["version"], expectedVersion, `${packageName} package version`);
       return current;
     }
-    current = resolve(current, "..");
+    const parent = resolve(current, "..");
+    if (parent === current) break;
+    current = parent;
   }
   fail("RUNTIME_IDENTITY_INVALID", `${packageName} package root was not found`, "RUNTIME_IDENTITY");
 }
 
-async function matchingPackageRoots(root: string, packageName: string, current: string): Promise<readonly string[]> {
-  const entries = await readdir(current, { withFileTypes: true });
-  const matches: string[] = [];
-  const packageJson = await optionalJsonRecord(join(current, "package.json"), `${packageName} package.json`);
-  if (packageJson !== undefined && packageJson["name"] === packageName) matches.push(resolve(current));
-  for (const entry of entries) {
-    const path = join(current, entry.name);
-    if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) matches.push(...await matchingPackageRoots(root, packageName, path));
+async function matchingPackageRoots(packageName: string, resolutionRoots: readonly string[]): Promise<readonly string[]> {
+  const matches = new Set<string>();
+  for (const resolutionRoot of resolutionRoots) {
+    const candidate = join(resolutionRoot, packageName);
+    try {
+      await canonicalDirectory(candidate, `${packageName} package root candidate`);
+      const packageJson = await readJsonRecord(join(candidate, "package.json"), `${packageName} package.json`);
+      if (packageJson["name"] === packageName) matches.add(resolve(candidate));
+    } catch (error: unknown) {
+      if (!isNotFound(error)) throw error;
+    }
   }
-  return matches;
+  return [...matches].sort();
 }
 
-function lockEntry(lock: JsonRecord, packagePath: string, label: string): JsonRecord {
-  const packages = record(lock["packages"], `${label}.packages`);
-  return record(packages[packagePath], `${label}.${packagePath}`);
+async function runtimeResolutionRoots(root: string): Promise<readonly string[]> {
+  const candidates = new Set<string>();
+  const local = join(root, "node_modules");
+  try { await canonicalDirectory(local, "package-local node_modules"); candidates.add(local); }
+  catch (error: unknown) { if (!isNotFound(error)) throw error; }
+  const parent = resolve(root, "..");
+  if (basename(parent) === "node_modules") {
+    await canonicalDirectory(parent, "hoisted node_modules");
+    candidates.add(parent);
+  }
+  if (candidates.size === 0) fail("RUNTIME_IDENTITY_INVALID", "No package dependency resolution root is available", "RUNTIME_IDENTITY");
+  return Object.freeze([...candidates].sort());
 }
 
 async function verifyPackage(
@@ -467,23 +492,18 @@ async function verifyPackage(
   expectedIntegrity: string,
   expectedResolved: string,
   expectedTree: Sha256Digest,
-  nodeModulesRoot: string,
-  lock: JsonRecord,
+  resolutionRoots: readonly string[],
+  includeNestedNodeModules = true,
 ): Promise<PackageIdentity> {
-  const rootPath = await findPackageRoot(target.entryPath, packageName, expectedVersion, nodeModulesRoot);
-  const expectedRoot = resolve(nodeModulesRoot, packageName);
-  if (rootPath !== expectedRoot || !isWithin(rootPath, nodeModulesRoot)) fail("RUNTIME_IDENTITY_INVALID", `${packageName} package root is unexpected`, "RUNTIME_IDENTITY");
+  const rootPath = await findPackageRoot(target.entryPath, packageName, expectedVersion, resolutionRoots);
+  if (!resolutionRoots.some((root) => isWithin(rootPath, root))) fail("RUNTIME_IDENTITY_INVALID", `${packageName} package root is outside the installed dependency graph`, "RUNTIME_IDENTITY");
   await canonicalDirectory(rootPath, `${packageName} package root`);
   const packageJson = await readJsonRecord(join(rootPath, "package.json"), `${packageName} package.json`);
   exactString(packageJson["name"], packageName, `${packageName} package name`);
   exactString(packageJson["version"], expectedVersion, `${packageName} package version`);
-  const entry = lockEntry(lock, `node_modules/${packageName}`, packageName);
-  exactString(entry["version"], expectedVersion, `${packageName} lock version`);
-  exactString(entry["resolved"], expectedResolved, `${packageName} lock resolved`);
-  exactString(entry["integrity"], expectedIntegrity, `${packageName} lock integrity`);
-  const roots = await matchingPackageRoots(nodeModulesRoot, packageName, nodeModulesRoot);
+  const roots = await matchingPackageRoots(packageName, resolutionRoots);
   if (roots.length !== 1 || roots[0] !== rootPath) fail("RUNTIME_IDENTITY_INVALID", `${packageName} has duplicate or substituted roots`, "RUNTIME_IDENTITY");
-  const tree = await installedTreeDigest(rootPath);
+  const tree = await installedTreeDigest(rootPath, includeNestedNodeModules);
   if (tree !== expectedTree) fail("RUNTIME_IDENTITY_INVALID", `${packageName} installed-tree digest mismatch`, "RUNTIME_IDENTITY");
   return {
     specifier: target.specifier,
@@ -527,39 +547,44 @@ async function installationRoot(): Promise<string> {
 
 async function loadRuntimeBoundary(): Promise<RuntimeBoundary> {
   const root = await installationRoot();
-  const nodeModulesRoot = await canonicalDirectory(join(root, "node_modules"), "installation node_modules");
-  const lockPath = await canonicalFile(join(root, "package-lock.json"), "installation package-lock.json");
-  const lock = await readJsonRecord(lockPath, "installation package-lock.json");
-  const rootEntry = lockEntry(lock, "", "installation lockfile");
-  const rootDependencies = record(rootEntry["dependencies"], "installation root dependencies");
+  const resolutionRoots = await runtimeResolutionRoots(root);
+  const packageJson = await readJsonRecord(join(root, "package.json"), "installation package.json");
+  const dependencies = record(packageJson["dependencies"], "installation package dependencies");
   const [agentExpected, aiExpected, providersExpected] = M6_RUNTIME_MODULES;
-  exactString(rootDependencies[agentExpected.package_name], agentExpected.package_version, "root Agent dependency");
-  exactString(rootDependencies[aiExpected.package_name], aiExpected.package_version, "root AI dependency");
-  const agentTarget = await resolvePublicEsm(agentExpected.specifier, nodeModulesRoot);
-  const aiTarget = await resolvePublicEsm(aiExpected.specifier, nodeModulesRoot);
-  const providersTarget = await resolvePublicEsm(providersExpected.specifier, nodeModulesRoot);
-  const agentIdentity = await verifyPackage(agentTarget, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, nodeModulesRoot, lock);
-  const aiIdentity = await verifyPackage(aiTarget, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, nodeModulesRoot, lock);
+  for (const expected of [agentExpected, aiExpected, CODING_AGENT_RUNTIME]) {
+    exactString(dependencies[expected.package_name], expected.package_version, `${expected.package_name} installation dependency`);
+  }
+  const agentTarget = await resolvePublicEsm(agentExpected.specifier, resolutionRoots);
+  const aiTarget = await resolvePublicEsm(aiExpected.specifier, resolutionRoots);
+  const providersTarget = await resolvePublicEsm(providersExpected.specifier, resolutionRoots);
+  const codingAgentTarget = await resolvePublicEsm(CODING_AGENT_MODULE_SPECIFIER, resolutionRoots);
+  const agentIdentity = await verifyPackage(agentTarget, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, resolutionRoots);
+  const aiIdentity = await verifyPackage(aiTarget, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, resolutionRoots);
+  const codingAgentIdentity = await verifyPackage(codingAgentTarget, CODING_AGENT_RUNTIME.package_name, CODING_AGENT_RUNTIME.package_version, CODING_AGENT_RUNTIME.registry_integrity, CODING_AGENT_RUNTIME.registry_resolved, CODING_AGENT_RUNTIME.installed_tree_sha256, resolutionRoots, false);
   if (!isWithin(providersTarget.entryPath, aiIdentity.rootPath)) fail("RUNTIME_IDENTITY_INVALID", "providers/all is outside the verified Pi AI root", "RUNTIME_IDENTITY");
-  const providersRoot = await findPackageRoot(providersTarget.entryPath, providersExpected.package_name, providersExpected.package_version, nodeModulesRoot);
+  const providersRoot = await findPackageRoot(providersTarget.entryPath, providersExpected.package_name, providersExpected.package_version, resolutionRoots);
   if (providersRoot !== aiIdentity.rootPath) fail("RUNTIME_IDENTITY_INVALID", "providers/all root differs from Pi AI root", "RUNTIME_IDENTITY");
 
-  type FixedRuntimeSpecifier = typeof AGENT_MODULE_SPECIFIER | typeof AI_MODULE_SPECIFIER | typeof PROVIDERS_MODULE_SPECIFIER;
-  const importFixed = async (specifier: FixedRuntimeSpecifier): Promise<unknown> => import(specifier);
+  const importFixed = async (specifier: string): Promise<unknown> => import(specifier);
   const agentModule = record(await importFixed(AGENT_MODULE_SPECIFIER), "Agent module");
   const aiModule = record(await importFixed(AI_MODULE_SPECIFIER), "AI module");
   const providersModule = record(await importFixed(PROVIDERS_MODULE_SPECIFIER), "providers module");
-  const agentAfter = await resolvePublicEsm(AGENT_MODULE_SPECIFIER, nodeModulesRoot);
-  const aiAfter = await resolvePublicEsm(AI_MODULE_SPECIFIER, nodeModulesRoot);
-  const providersAfter = await resolvePublicEsm(PROVIDERS_MODULE_SPECIFIER, nodeModulesRoot);
-  if (agentAfter.url !== agentTarget.url || aiAfter.url !== aiTarget.url || providersAfter.url !== providersTarget.url) {
+  const codingAgentModule = record(await importFixed(CODING_AGENT_MODULE_SPECIFIER), "coding-agent module");
+  const agentAfter = await resolvePublicEsm(AGENT_MODULE_SPECIFIER, resolutionRoots);
+  const aiAfter = await resolvePublicEsm(AI_MODULE_SPECIFIER, resolutionRoots);
+  const providersAfter = await resolvePublicEsm(PROVIDERS_MODULE_SPECIFIER, resolutionRoots);
+  const codingAgentAfter = await resolvePublicEsm(CODING_AGENT_MODULE_SPECIFIER, resolutionRoots);
+  if (agentAfter.url !== agentTarget.url || aiAfter.url !== aiTarget.url || providersAfter.url !== providersTarget.url || codingAgentAfter.url !== codingAgentTarget.url) {
     fail("RUNTIME_IDENTITY_INVALID", "ESM URL changed across import", "RUNTIME_IDENTITY");
   }
-  if (agentAfter.entryPath !== agentTarget.entryPath || aiAfter.entryPath !== aiTarget.entryPath || providersAfter.entryPath !== providersTarget.entryPath) {
+  if (agentAfter.entryPath !== agentTarget.entryPath || aiAfter.entryPath !== aiTarget.entryPath || providersAfter.entryPath !== providersTarget.entryPath || codingAgentAfter.entryPath !== codingAgentTarget.entryPath) {
     fail("RUNTIME_IDENTITY_INVALID", "ESM entry path changed across import", "RUNTIME_IDENTITY");
   }
-  await verifyPackage(agentAfter, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, nodeModulesRoot, lock);
-  await verifyPackage(aiAfter, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, nodeModulesRoot, lock);
+  await verifyPackage(agentAfter, agentExpected.package_name, agentExpected.package_version, agentExpected.registry_integrity, agentExpected.registry_resolved, agentExpected.installed_tree_sha256, resolutionRoots);
+  await verifyPackage(aiAfter, aiExpected.package_name, aiExpected.package_version, aiExpected.registry_integrity, aiExpected.registry_resolved, aiExpected.installed_tree_sha256, resolutionRoots);
+  await verifyPackage(codingAgentAfter, CODING_AGENT_RUNTIME.package_name, CODING_AGENT_RUNTIME.package_version, CODING_AGENT_RUNTIME.registry_integrity, CODING_AGENT_RUNTIME.registry_resolved, CODING_AGENT_RUNTIME.installed_tree_sha256, resolutionRoots, false);
+  exactString(codingAgentModule["VERSION"], CODING_AGENT_RUNTIME.package_version, "coding-agent VERSION");
+  callable(readProperty(codingAgentModule, "readStoredCredential", "coding-agent module"), "coding-agent readStoredCredential");
   const agentExport = readProperty(agentModule, "Agent", "Agent module");
   if (typeof agentExport !== "function") fail("RUNTIME_CAPABILITY_INVALID", "Agent export is not constructible", "RUNTIME_GUARD");
   try { Reflect.construct(String, [], agentExport); }
@@ -570,7 +595,7 @@ async function loadRuntimeBoundary(): Promise<RuntimeBoundary> {
   for (const name of ["builtinModels", "getBuiltinProviders", "getBuiltinModels"]) {
     callable(readProperty(providersModule, name, "providers module"), `providers module.${name}`);
   }
-  return { agentModule, aiModule, providersModule, agentIdentity, aiIdentity, providersTarget };
+  return { agentModule, aiModule, providersModule, codingAgentModule, agentIdentity, aiIdentity, codingAgentIdentity, providersTarget };
 }
 
 function guardModels(value: unknown): ModelsRuntime {

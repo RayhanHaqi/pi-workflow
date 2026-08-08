@@ -1060,7 +1060,15 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
       selected = "BLOCK"; blockingReason = "BLOCKED_BUDGET_EXHAUSTED"; reservation = null; routes = continuationRoutes("BLOCK", true);
     }
   }
-  const candidateHardReached = budget.some((entry) => entry.status === "HARD_LIMIT_REACHED" && ["HARD_ENFORCEABLE", "SOFT_ENFORCEABLE"].includes(entry.enforcement_class));
+  const candidateHardReached = budget.some((entry) => {
+    if (entry.status !== "HARD_LIMIT_REACHED" || !["HARD_ENFORCEABLE", "SOFT_ENFORCEABLE"].includes(entry.enforcement_class)) return false;
+    // A first worker reservation may exactly consume its hard limit. The
+    // aggregateBudget overflow check above still rejects current usage plus a
+    // candidate reservation when it exceeds the limit.
+    if (request.intent === "AUTHORIZE_WORK" && entry.dimension === "WORKER_INVOCATION" && entry.hard_limit !== null &&
+        entry.active_reservation_amount > 0 && entry.effective_charged_amount + entry.active_reservation_amount <= entry.hard_limit) return false;
+    return true;
+  });
   const candidateSoftReached = budget.some((entry) => entry.status === "SOFT_LIMIT_REACHED");
   if (request.intent === "AUTHORIZE_WORK" && (openingHardReached || candidateHardReached || (openingSoftReached && reservation?.purpose !== "REQUIRED_CLOSEOUT") ||
       (candidateSoftReached && reservation?.purpose !== "REQUIRED_CLOSEOUT"))) {

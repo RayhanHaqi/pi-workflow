@@ -15,6 +15,12 @@ const FORBIDDEN_EXECUTABLES = new Set([
   "mount", "umount", "unshare", "nsenter", "strace", "gdb", "modprobe", "insmod", "rmmod",
 ]);
 const FORBIDDEN_ENV = /^(?:NODE_OPTIONS|PYTHONPATH|PERL5LIB|RUBYOPT|LD_PRELOAD|LD_LIBRARY_PATH|GIT_CONFIG(?:_|$)|GIT_DIR$|GIT_WORK_TREE$|SSH_AUTH_SOCK$)/;
+const INTERPRETER_BASENAMES = new Set(["node", "python", "bash", "sh", "dash", "zsh", "perl", "ruby", "fish"]);
+
+export function isInterpreterExecutablePath(path: string): boolean {
+  const name = basename(path).replace(/\.(?:exe|cmd)$/i, "");
+  return INTERPRETER_BASENAMES.has(name) || /^python3(?:\.\d+)?$/u.test(name);
+}
 
 interface FrozenFileIdentity {
   readonly realpath: string;
@@ -117,9 +123,6 @@ export async function validateCommandCatalog(
       const dispatcher = executableNames.some((name) => ["env", "xargs"].includes(name)) || forbiddenIdentity?.kind === "DISPATCHER";
       throw new ScopedToolGatewayError(dispatcher ? "GENERIC_DISPATCHER_FORBIDDEN" : "COMMAND_FORBIDDEN", "Command executable class is forbidden", { command_id: spec.command_id });
     }
-    if (spec.argv.some((value) => value === "-c") && executableNames.some((name) => /(?:sh|bash|python|node)/.test(name))) {
-      throw new ScopedToolGatewayError("COMMAND_FORBIDDEN", "Shell or interpreter evaluation mode is forbidden", { command_id: spec.command_id });
-    }
     if (spec.argv[0] !== spec.executable_invocation_path) throw new ScopedToolGatewayError("COMMAND_SPEC_MISMATCH", "argv[0] must equal the frozen invocation path");
     const cwd = cwdPath(repository, spec.cwd);
     let cwdStats: Awaited<ReturnType<typeof lstat>>; let cwdPhysical: string; let cwdRepository: M3RepositoryIdentityDocument;
@@ -142,9 +145,12 @@ export async function validateCommandCatalog(
         throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution-input identity is invalid", { command_id: spec.command_id });
       }
     }
-    const interpreter = executableNames.some((name) => /^(?:python(?:3(?:\.\d+)?)?|node|perl|ruby)$/.test(name));
-    if (interpreter && spec.argv[1] !== undefined && !spec.argv[1].startsWith("-") && (!isAbsolute(spec.argv[1]) || !seenInputs.has(spec.argv[1]))) {
-      throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Interpreter command lacks a frozen execution input", { command_id: spec.command_id });
+    const interpreter = executableNames.some((name) => isInterpreterExecutablePath(name));
+    if (interpreter) {
+      const script = spec.argv[1];
+      if (script === undefined || script.startsWith("-") || !isAbsolute(script) || !seenInputs.has(script)) {
+        throw new ScopedToolGatewayError("COMMAND_FORBIDDEN", "Interpreter commands require a frozen absolute script as argv[1]", { command_id: spec.command_id });
+      }
     }
     const seenEnvironment = new Set<string>();
     for (const entry of spec.environment) {

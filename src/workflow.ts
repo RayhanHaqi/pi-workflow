@@ -27,7 +27,7 @@ import {
   type WorktreeLockHandle,
 } from "./repository/index.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
-import { commandSpecProjection } from "./scoped-tools/commands.js";
+import { commandSpecProjection, isInterpreterExecutablePath } from "./scoped-tools/commands.js";
 import { assertM4CanonicalPath } from "./secure-fs/path.js";
 import {
   assertDocumentValid,
@@ -53,6 +53,8 @@ import {
   type WorkflowState,
 } from "./schemas/index.js";
 import { createInitialState } from "./state-machine/index.js";
+import { classifyM6Authority } from "./persistence/m6-authority.js";
+import { readM6WorkerRecords } from "./persistence/store.js";
 import { runDirectReadOnlyLunaWorker, type M6DirectReadOnlyWorkerInput, type M6WorkerExecutionResult } from "./pi-adapter/worker.js";
 import type { ScopedToolGateway } from "./scoped-tools/types.js";
 import { resolveExecutable } from "./repository/lock.js";
@@ -68,10 +70,6 @@ const CONTROLLER_VERSION = "0.1.0" as const;
 // outside the existing worker and scoped-tool envelopes.
 const M6_MODEL_TURNS = 2;
 const M6_TOOL_CALLS = 2;
-// Existing direct M5 reservation arithmetic needs one active reservation plus
-// one eventual measured invocation. This is accounting capacity, not an M7
-// worker allowance: the Goal and reducer both admit exactly one attempt.
-const M5_DIRECT_WORKER_ACCOUNTING_LIMIT = 2;
 const M6_MAX_READ_BYTES = 65_536;
 const M6_MAX_WALL_TIME_MS = 120_000;
 const M4_MAX_COMMAND_TIME_MS = 1_800_000;
@@ -163,6 +161,8 @@ export interface WorkflowRunResult {
   readonly outcome: WorkflowOutcome;
   readonly reason: string;
   readonly task: TaskDocument;
+  /** Present only when durable post-admission terminalization is uncertain. */
+  readonly evidenceRoot?: string;
   readonly finalState?: WorkflowState;
   readonly m5Decision?: M5ControlDecisionDocument;
   readonly m6?: M6WorkerExecutionResult;
@@ -191,6 +191,8 @@ export interface WorkflowExecutionOptions {
   readonly executeApproved?: (context: WorkflowExecutionHookContext) => Promise<WorkflowRunResult>;
   /** Package-private M6 seam used only with a verifier-owned faux runtime. */
   readonly worker?: (input: M6DirectReadOnlyWorkerInput) => Promise<M6WorkerExecutionResult>;
+  /** Package-private public-credential seam used only with deterministic tests. */
+  readonly credentialReader?: (providerId: string) => Promise<unknown> | unknown;
   readonly signal?: AbortSignal;
 }
 
@@ -286,13 +288,20 @@ function normalizeGoal(value: unknown): EphemeralGoal {
     if (!Array.isArray(command["argv"]) || (command["argv"] as readonly unknown[]).length === 0 || (command["argv"] as readonly unknown[]).length > 128) invalid(`Goal.verification_commands[${index}].argv is invalid`);
     const argv = (command["argv"] as readonly unknown[]).map((argument, argumentIndex) => nonempty(argument, `Goal.verification_commands[${index}].argv[${argumentIndex}]`, 4096));
     if (!isAbsolute(argv[0]!)) invalid("Verification argv[0] must be an absolute M4 executable identity; PATH lookup is not authority");
-    if (argv.some((argument) => argument === "-c" || argument === "--command")) invalid("Shell/interpreter command evaluation is not admitted by M7");
+    if (isInterpreterExecutablePath(argv[0]!)) invalid("M7 Goal verification commands must use direct non-interpreter executables");
+    if (argv.slice(1).some((argument) => isAbsolute(argument))) invalid("M7 Goal verification commands cannot create authority for absolute argv operands");
     if (command["cwd"] !== "REPOSITORY_ROOT") invalid("Verification cwd must be the exact authorized repository root");
     const timeout = safeInteger(command["timeout_ms"], `Goal.verification_commands[${index}].timeout_ms`, 1, M4_MAX_COMMAND_TIME_MS);
     if (command["network"] !== "FORBIDDEN") invalid("M7 verification commands require network FORBIDDEN");
     return { command_id: commandId, argv, cwd: "REPOSITORY_ROOT", timeout_ms: timeout, network: "FORBIDDEN" };
   });
   if (new Set(verification.map((command) => command.command_id)).size !== verification.length) invalid("Goal.verification_commands contains duplicate command IDs");
+  const commandIds = new Set(verification.map((command) => command.command_id));
+  for (const criterion of acceptance) {
+    if (criterion.evidence_kind !== "COMMAND" || !commandIds.has(criterion.criterion_id)) {
+      invalid(`Goal criterion ${criterion.criterion_id} must bind one exact authorized COMMAND verification result`);
+    }
+  }
 
   const budgetInput = record(input["budget"], "Goal.budget");
   exactKeys(budgetInput, BUDGET_KEYS, "Goal.budget");
@@ -521,7 +530,7 @@ function budgetDocument(goal: EphemeralGoal): BudgetDocument {
       max_leaves: 1,
       max_attempts_per_leaf: 1,
       max_replans: 0,
-      max_worker_invocations: M5_DIRECT_WORKER_ACCOUNTING_LIMIT,
+      max_worker_invocations: goal.budget.max_worker_invocations,
       max_model_turns: goal.budget.max_model_turns,
       max_tool_calls: goal.budget.max_tool_calls,
       max_input_tokens: 1_000_000,
@@ -573,7 +582,7 @@ function contractDocument(goal: EphemeralGoal, task: TaskDocument, routeApproval
       max_leaves: 1,
       max_attempts_per_leaf: 1,
       max_replans: 0,
-      max_worker_invocations: M5_DIRECT_WORKER_ACCOUNTING_LIMIT,
+      max_worker_invocations: budget.limits.max_worker_invocations,
       max_model_turns: goal.budget.max_model_turns,
       max_tool_calls: goal.budget.max_tool_calls,
       max_input_tokens: 1_000_000,
@@ -599,7 +608,7 @@ function reducerPolicy(goal: EphemeralGoal, task: TaskDocument, scopeSha: Sha256
       max_attempts_per_leaf: 1,
       max_replans: 0,
       max_leaves: 1,
-      max_worker_invocations: M5_DIRECT_WORKER_ACCOUNTING_LIMIT,
+      max_worker_invocations: budget.limits.max_worker_invocations,
     },
     tasks: [{
       task_id: task.task_id,
@@ -633,7 +642,7 @@ function m5Policy(
   acceptanceSha: Sha256Digest,
 ): M5ControlPolicyDocument {
   const dimensions = [
-    ["WORKER_INVOCATION", M5_DIRECT_WORKER_ACCOUNTING_LIMIT, M5_DIRECT_WORKER_ACCOUNTING_LIMIT, "HARD_ENFORCEABLE"],
+    ["WORKER_INVOCATION", budget.limits.max_worker_invocations, budget.limits.max_worker_invocations, "HARD_ENFORCEABLE"],
     ["MODEL_TURN", 2, 2, "HARD_ENFORCEABLE"],
     ["PROVIDER_REQUEST", null, null, "UNAVAILABLE"],
     ["TOOL_CALL", 2, 2, "HARD_ENFORCEABLE"],
@@ -769,6 +778,7 @@ async function commandSpecification(
   const cwdPhysical = await realpath(cwd);
   if (!cwdStats.isDirectory() || cwdPhysical !== cwd) throw new Error("Repository root is not a canonical directory");
   const executionInputs: Array<{ path: string; realpath: string; device: number; inode: number; mode: number; size: number; digest: Sha256Digest }> = [];
+  if (command.argv.slice(1).some((argument) => isAbsolute(argument))) throw new Error("Goal verification command has an unauthorized absolute argv operand");
   const seen = new Set<string>();
   for (const argument of command.argv) {
     if (!isAbsolute(argument) || seen.has(argument)) continue;
@@ -966,19 +976,57 @@ function usageEvidence(
 }
 
 const PI_CODING_AGENT_SPECIFIER: string = "@earendil-works/pi-coding-agent";
+const PI_AI_SPECIFIER: string = "@earendil-works/pi-ai";
+type CredentialReader = (providerId: string) => Promise<unknown> | unknown;
 
-async function publicCredentialStore(): Promise<unknown> {
-  // M7 deliberately performs no credential operation. Verify the supported
-  // public package boundary and exact version, then give the worker a store
-  // whose operations fail closed without touching user credential state.
+async function publicCredentialStore(providerId: string, reader?: CredentialReader): Promise<unknown> {
   const moduleValue: unknown = await import(PI_CODING_AGENT_SPECIFIER);
   if (moduleValue === null || typeof moduleValue !== "object" ||
       (moduleValue as Record<string, unknown>)["VERSION"] !== "0.83.0" ||
       typeof (moduleValue as Record<string, unknown>)["readStoredCredential"] !== "function") {
     throw new Error("Public Pi 0.83.0 credential boundary is unavailable");
   }
-  const unavailable = async (): Promise<never> => { throw new Error("M7 credential operations are forbidden"); };
-  return { read: unavailable, list: unavailable, modify: unavailable, delete: unavailable };
+  const publicReader = reader ?? ((moduleValue as Record<string, unknown>)["readStoredCredential"] as CredentialReader);
+  const credential = await publicReader(providerId);
+  if (credential === undefined) throw new Error("Public Pi credential is unavailable for the selected provider");
+  const aiModule: unknown = await import(PI_AI_SPECIFIER);
+  if (aiModule === null || typeof aiModule !== "object" || typeof (aiModule as Record<string, unknown>)["InMemoryCredentialStore"] !== "function") {
+    throw new Error("Public Pi InMemoryCredentialStore boundary is unavailable");
+  }
+  const Store = (aiModule as Record<string, unknown>)["InMemoryCredentialStore"] as new () => { modify: (id: string, fn: (current: unknown) => Promise<unknown>) => Promise<unknown> };
+  const store = new Store();
+  await store.modify(providerId, async () => credential);
+  return store;
+}
+
+async function assertCanonicalM6Execution(stateRoot: string, runId: string, execution: M6WorkerExecutionResult): Promise<void> {
+  try {
+    assertDocumentValid("pi_gacw_m6_worker_invocation_v0", execution.invocation);
+    assertDocumentValid("pi_gacw_m6_worker_result_v0", execution.result);
+  } catch (error: unknown) {
+    throw new Error(`M6 returned schema-invalid authority: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (execution.invocation.run_id !== runId || execution.result.run_id !== runId || execution.result.invocation_content_sha256 !== execution.invocation.content_sha256) {
+    throw new Error("M6 returned authority is bound to the wrong run or invocation");
+  }
+  const location = { stateRoot, runId };
+  const [inspection, records] = await Promise.all([inspectRunStorage(location), readM6WorkerRecords(location)]);
+  const persistedInvocation = records.invocations.find((value) => value.content_sha256 === execution.invocation.content_sha256);
+  const persistedResult = records.results.find((value) => value.content_sha256 === execution.result.content_sha256);
+  if (inspection.status !== "HEALTHY" || persistedInvocation === undefined || persistedResult === undefined ||
+      canonicalize(persistedInvocation) !== canonicalize(execution.invocation) || canonicalize(persistedResult) !== canonicalize(execution.result)) {
+    throw new Error("M6 returned authority is not the exact persisted managed record");
+  }
+  const classifications = classifyM6Authority({
+    runId,
+    objects: inspection.managedObjects.filter((object) => object.kind === "M6_WORKER_INVOCATION" || object.kind === "M6_WORKER_RESULT"),
+    invocations: new Map(records.invocations.map((value) => [value.content_sha256, value])),
+    results: new Map(records.results.map((value) => [value.content_sha256, value])),
+  });
+  for (const [kind, digest] of [["M6_WORKER_INVOCATION", execution.invocation.content_sha256], ["M6_WORKER_RESULT", execution.result.content_sha256]] as const) {
+    const classification = classifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest);
+    if (classification?.classification !== "AUTHORITATIVE_MANAGED_RECORD") throw new Error(`M6 ${kind} is not an authoritative managed record`);
+  }
 }
 
 async function m5Block(
@@ -1017,6 +1065,10 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
   let lock: WorktreeLockHandle | undefined;
   let currentM5Decision: M5ControlDecisionDocument | undefined;
   let finalState: WorkflowState | undefined;
+  let admissionBegun = false;
+  let terminalizationAttempted = false;
+  let preserveOwnedRoot = false;
+  let terminalizePostAdmission: ((reason: string, usage?: readonly M5UsageEvidenceDocument[], m6?: M6WorkerExecutionResult) => Promise<WorkflowRunResult>) | undefined;
   try {
     const repository = await resolveRepositoryIdentity({ requestedPath: cwd, requireHead: true });
     const route = routeMap();
@@ -1121,6 +1173,26 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
       authoritativeSources: sources,
       production: true,
     });
+    terminalizePostAdmission = async (reason: string, usage: readonly M5UsageEvidenceDocument[] = [], m6?: M6WorkerExecutionResult): Promise<WorkflowRunResult> => {
+      terminalizationAttempted = true;
+      try {
+        const blocked = await m5Block(kernel, stateRoot, m5, sources, reason, usage);
+        finalState = blocked.state;
+        currentM5Decision = blocked.decision;
+        return { outcome: "BLOCKED", reason: blocked.decision.blocking_reason ?? reason, task, finalState, m5Decision: currentM5Decision, ...(m6 === undefined ? {} : { m6 }) };
+      } catch (error: unknown) {
+        preserveOwnedRoot = true;
+        try { finalState = (await currentExpected(stateRoot, RUN_ID)).inspection.workflowState!; } catch { /* preserve the evidence root even when state inspection is unavailable */ }
+        return {
+          outcome: "BLOCKED",
+          reason: `BLOCKED_TERMINALIZATION_UNCERTAIN:STATE_PUBLICATION_FAILURE:${reason}:${error instanceof Error ? error.message : String(error)}`,
+          task,
+          evidenceRoot: ownedRoot,
+          ...(finalState === undefined ? {} : { finalState }),
+          ...(currentM5Decision === undefined ? {} : { m5Decision: currentM5Decision }),
+        };
+      }
+    };
     const validateExpected = await currentExpected(stateRoot, RUN_ID);
     let decisionResult = await kernel.evaluateControlDecision({
       intent: "VALIDATE_CONTRACT",
@@ -1178,6 +1250,7 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
     if (decisionResult.decision.outcome !== "AUTHORIZE" || decisionResult.decision.reservation === null) {
       return { outcome: "BLOCKED", reason: decisionResult.decision.blocking_reason ?? "BLOCKED_M5_ADMISSION", task, finalState, m5Decision: currentM5Decision };
     }
+    admissionBegun = true;
     const workerInput: M6DirectReadOnlyWorkerInput = {
       stateRoot,
       runId: RUN_ID,
@@ -1198,7 +1271,7 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
       approvedResources: [],
       systemPrompt: "You are the one bounded M7 read-only/report-only worker. Use exactly one scoped read and one structured terminal report. Never mutate, execute commands, or request another worker.",
       userPrompt: task.objective,
-      credentialStoreCallback: publicCredentialStore,
+      credentialStoreCallback: (providerId) => publicCredentialStore(providerId, options.credentialReader),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
     const worker = options.worker ?? runDirectReadOnlyLunaWorker;
@@ -1206,34 +1279,39 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
     try {
       execution = await worker(workerInput);
     } catch (error: unknown) {
-      const blocked = await m5Block(kernel, stateRoot, m5, sources, `BLOCKED_M6_${error instanceof Error ? error.name : "FAILURE"}`);
-      finalState = blocked.state;
-      return { outcome: "BLOCKED", reason: blocked.decision.blocking_reason ?? "BLOCKED_M6_FAILURE", task, finalState, m5Decision: blocked.decision };
+      return await terminalizePostAdmission!( `BLOCKED_M6_${error instanceof Error ? error.name : "FAILURE"}`);
     }
+    await assertCanonicalM6Execution(stateRoot, RUN_ID, execution);
     const usage = usageEvidence(m5, decisionResult.decision, execution);
     if (execution.result.outcome !== "COMPLETED") {
-      const blocked = await m5Block(kernel, stateRoot, m5, sources, "BLOCKED_M6_RESULT", [usage]);
-      finalState = blocked.state;
-      return { outcome: "BLOCKED", reason: blocked.decision.blocking_reason ?? "BLOCKED_M6_RESULT", task, finalState, m5Decision: blocked.decision, m6: execution };
+      return await terminalizePostAdmission("BLOCKED_M6_RESULT", [usage], execution);
     }
     const runningExpected = await currentExpected(stateRoot, RUN_ID);
     const afterAttempt = await commitEvent(stateRoot, { statePointer: runningExpected.inspection.statePointer!, workflowState: runningExpected.inspection.workflowState! }, reducer, "COMPLETE_DIRECT_ATTEMPT", 24, {}, [canonicalEvidence(execution.invocation), canonicalEvidence(execution.result)]);
-    void afterAttempt;
-    const afterVerification = await currentExpected(stateRoot, RUN_ID);
-    await commitEvent(stateRoot, { statePointer: afterVerification.inspection.statePointer!, workflowState: afterVerification.inspection.workflowState! }, reducer, "PASS_DIRECT_POSTFLIGHT", 25, {}, verificationResults.map((value) => canonicalEvidence(value)));
+    const afterVerificationExpected = await currentExpected(stateRoot, RUN_ID);
+    const afterVerification = await commitEvent(stateRoot, { statePointer: afterVerificationExpected.inspection.statePointer!, workflowState: afterVerificationExpected.inspection.workflowState! }, reducer, "PASS_DIRECT_POSTFLIGHT", 25, {}, verificationResults.map((value) => canonicalEvidence(value)));
     const terminalExpected = await currentExpected(stateRoot, RUN_ID);
-    // The M4 command records remain durable and are archived with the
-    // transition evidence. Each successful command also binds the latest
-    // postflight token; use that existing authoritative predecessor as the
-    // M5 evidence identity without making M5 execute or reinterpret commands.
-    const obligationEvidence = m5.obligations.map((obligation) => ({ descriptorSha256: obligation.descriptor_sha256 as Sha256Digest, value: obligation.declaration === "report" ? "COMPLETED" : "PASS", evidenceContentSha256: admittedState.content_sha256 as Sha256Digest }));
+    const terminalSources: M5AuthoritativeSources = {
+      ...sources,
+      m4CommandResults: verificationResults,
+    };
+    const commandResultsById = new Map(verificationResults.map((value) => [value.command_id, value]));
+    const obligationEvidence = m5.obligations.map((obligation) => {
+      if (obligation.declaration === "report") {
+        return { descriptorSha256: obligation.descriptor_sha256 as Sha256Digest, value: "COMPLETED", evidenceContentSha256: terminalExpected.inspection.workflowState!.content_sha256 as Sha256Digest };
+      }
+      const commandId = obligation.declaration.slice("acceptance.".length);
+      const result = commandResultsById.get(commandId);
+      if (result === undefined || result.outcome !== "PASS") throw new Error(`M4 command criterion ${commandId} has no authoritative PASS result`);
+      return { descriptorSha256: obligation.descriptor_sha256 as Sha256Digest, value: "PASS", evidenceContentSha256: result.content_sha256 as Sha256Digest };
+    });
     const terminal = await kernel.evaluateControlDecision({
       intent: "EVALUATE_TERMINAL",
       ...terminalExpected,
       transitionId: "m7-evaluate-terminal",
       processMetadata: processMetadata(),
       availableLogicalRoles: ["LUNA_EXECUTOR"],
-      authoritativeSources: sources,
+      authoritativeSources: terminalSources,
       usageEvidence: [usage],
       obligationEvidence,
     });
@@ -1248,10 +1326,13 @@ async function executeProduction(prepared: PreparedWorkflow, approvedContentSha2
       m6: execution,
     };
   } catch (error: unknown) {
+    if (admissionBegun && !terminalizationAttempted && terminalizePostAdmission !== undefined) {
+      return await terminalizePostAdmission(`BLOCKED_M7_POST_ADMISSION_FAILURE:${error instanceof Error ? error.message : String(error)}`);
+    }
     return { outcome: "BLOCKED", reason: error instanceof Error ? error.message : "BLOCKED_M7_ORCHESTRATION", task, ...(finalState === undefined ? {} : { finalState }), ...(currentM5Decision === undefined ? {} : { m5Decision: currentM5Decision }) };
   } finally {
     if (lock !== undefined) await releaseWorktreeLock(lock).catch(() => undefined);
-    await rm(ownedRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (!preserveOwnedRoot) await rm(ownedRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

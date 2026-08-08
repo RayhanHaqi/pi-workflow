@@ -160,6 +160,10 @@ function deterministicRecalculationError(
     ...(input.m4Catalogs?.get(policy.command_catalog_content_sha256) === undefined ? {} : { m4CommandCatalog: input.m4Catalogs.get(policy.command_catalog_content_sha256)! }),
     ...(input.authoritativeSources ?? {}),
   };
+  const requestedM4ResultIds = new Set([
+    ...value.obligation_evidence.map((entry) => entry.evidence_content_sha256),
+    ...value.progress.evidence_content_sha256,
+  ]);
   const requestSources: M5AuthoritativeSources = {
     ...(persistedSources.contract === undefined ? {} : { contract: persistedSources.contract }),
     ...(persistedSources.budget === undefined ? {} : { budget: persistedSources.budget }),
@@ -167,6 +171,7 @@ function deterministicRecalculationError(
     ...(persistedSources.m4CommandCatalog === undefined ? {} : { m4CommandCatalog: persistedSources.m4CommandCatalog }),
     ...(persistedSources.routeMap === undefined ? {} : { routeMap: persistedSources.routeMap }),
     ...(persistedSources.routeMapApproval === undefined ? {} : { routeMapApproval: persistedSources.routeMapApproval }),
+    m4CommandResults: (persistedSources.m4CommandResults ?? []).filter((entry) => requestedM4ResultIds.has(entry.content_sha256)),
     m3StateTokens: persistedSources.m3StateTokens ?? [],
     m3Postflights: persistedSources.m3Postflights ?? [],
   };
