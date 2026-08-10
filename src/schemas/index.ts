@@ -4,6 +4,8 @@ export type {
   BaselineApprovalDocument,
   BaselineDocument,
   BudgetDocument,
+  BoundedWorkerInvocationDocument,
+  BoundedWorkerResultDocument,
   ConcreteExecutionMode,
   ContractDocument,
   EvidenceManifestDocument,

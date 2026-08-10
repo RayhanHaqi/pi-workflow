@@ -302,8 +302,15 @@ export function orderDecisionHistory(values: readonly M5ControlDecisionDocument[
 
 function sourceProjection(sources: M5AuthoritativeSources | undefined): readonly Sha256Digest[] {
   if (sources === undefined) return [];
+  // The bounded static controller deliberately excludes growing runtime sets so
+  // later M3/M4 evidence cannot rewrite a historical request identity. Accepted
+  // M5 behavior remains byte-for-byte unchanged for every other policy.
+  const values = sources.boundedStaticPreM8 === true
+    ? [sources.contract, sources.budget, sources.m4ToolPolicy, sources.m4CommandCatalog, sources.routeMap, sources.routeMapApproval,
+      ...(sources.planApprovals ?? []), ...(sources.taskGraphs ?? []), ...(sources.tasks ?? [])]
+    : Object.values(sources);
   const ids: Sha256Digest[] = [];
-  for (const value of Object.values(sources)) {
+  for (const value of values) {
     if (Array.isArray(value)) for (const entry of value) if (entry !== null && typeof entry === "object" && "content_sha256" in entry) ids.push((entry as { content_sha256: Sha256Digest }).content_sha256);
     else if (value !== null && typeof value === "object" && "content_sha256" in value) ids.push((value as { content_sha256: Sha256Digest }).content_sha256);
   }
@@ -374,7 +381,7 @@ function assertUsageSourceAuthority(
   ];
   for (const [value, kind, layer] of singular) if (value !== undefined && "content_sha256" in value) add(String((value as { content_sha256: string }).content_sha256), kind, layer);
   const groups: readonly [readonly { readonly content_sha256: string }[] | undefined, string, M5UsageEvidenceDocument["source_layer"]][] = [
-    [sources.m4CommandResults, "M4_COMMAND_RESULT", "M4"], [sources.m3StateTokens, "M3_REPOSITORY_STATE_TOKEN", "M3"],
+    [sources.m4CommandResults, "M4_COMMAND_RESULT", "M4"], [sources.boundedWorkerResults, "BOUNDED_WORKER_RESULT", "CONTROLLER"], [sources.m3StateTokens, "M3_REPOSITORY_STATE_TOKEN", "M3"],
     [sources.m3Postflights, "M3_POSTFLIGHT", "M3"], [sources.workflowStates, "WORKFLOW_STATE", "M1"],
     [sources.transitionEvents, "TRANSITION_EVENT", "M1"], [sources.transitionCommits, "TRANSITION_COMMIT", "M2"],
     [sources.planApprovals, "PLAN_APPROVAL", "M1"], [sources.taskGraphs, "TASK_GRAPH", "M1"], [sources.tasks, "TASK", "M1"],
@@ -420,6 +427,7 @@ export function assertAuthoritativeSources(policy: M5ControlPolicyDocument, sour
   validate("pi_gacw_route_map_v0", actual.routeMap, "Route-map authority");
   validate("pi_gacw_route_map_approval_v0", actual.routeMapApproval, "Route-map approval authority");
   for (const result of actual.m4CommandResults ?? []) validate("pi_gacw_command_result_v0", result, "M4 command result");
+  for (const result of actual.boundedWorkerResults ?? []) validate("pi_gacw_bounded_worker_result_v0", result, "Bounded worker result");
   for (const token of actual.m3StateTokens ?? []) validate("pi_gacw_repository_state_token_v0", token, "M3 state-token authority");
   for (const postflight of actual.m3Postflights ?? []) validate("pi_gacw_postflight_v0", postflight, "M3 postflight authority");
   for (const state of actual.workflowStates ?? []) validate("pi_gacw_state_v0", state, "Workflow-state authority");
@@ -453,14 +461,25 @@ export function assertAuthoritativeSources(policy: M5ControlPolicyDocument, sour
   return actual;
 }
 
+function isBoundedStaticPreM8(policy: M5ControlPolicyDocument): boolean {
+  const worker = policy.limits.find((entry) => entry.dimension === "WORKER_INVOCATION");
+  const model = policy.limits.find((entry) => entry.dimension === "MODEL_TURN");
+  return worker?.hard_limit === (policy.route_facts.leaf_count + (policy.requested_mode === "ROUTED_DAG" ? 2 : 0)) &&
+    model?.enforcement_class === "SOFT_ENFORCEABLE" && model.hard_limit === null &&
+    policy.role_reservation_envelopes.every((entry) => entry.logical_role !== "SOL_REPLAN");
+}
+
 function sourceHardLimits(
   dimension: (typeof DIMENSIONS)[number],
   state: WorkflowState,
   reducer: ReducerPolicy,
   sources: M5AuthoritativeSources,
 ): readonly (number | null)[] {
+  const boundedStaticRouted = reducer.limits.max_attempts_per_leaf === 1 && reducer.limits.max_replans === 0 &&
+    reducer.limits.max_worker_invocations === reducer.tasks.length + 2;
   const architecture = dimension === "WORKER_INVOCATION"
-    ? state.execution_mode === "DIRECT_LUNA_HIGH" ? 2 : state.execution_mode === "SINGLE_OWNER_SOL" ? 1 : Math.min(20, 2 * reducer.tasks.length + 4)
+    ? state.execution_mode === "DIRECT_LUNA_HIGH" ? 2 : state.execution_mode === "SINGLE_OWNER_SOL" ? 1
+      : boundedStaticRouted ? Math.min(20, reducer.tasks.length + 2) : Math.min(20, 2 * reducer.tasks.length + 4)
     : null;
   const m1 = dimension === "WORKER_INVOCATION" ? reducer.limits.max_worker_invocations : null;
   const contract = sources.contract?.limits;
@@ -484,7 +503,11 @@ const ENFORCEMENT_STRENGTH = Object.freeze({ UNAVAILABLE: 0, ESTIMATED_ONLY: 1, 
 function effectiveEnforcementClass(
   declared: M5ControlPolicyDocument["limits"][number]["enforcement_class"],
   authoritativeHardLimits: readonly (number | null)[],
+  boundedStaticPreM8: boolean,
 ): BudgetEntry["enforcement_class"] {
+  // A declared SOFT class is deliberate telemetry reconciliation authority only
+  // for the new bounded path. Existing M5 policies retain lower-layer upgrades.
+  if (boundedStaticPreM8 && declared === "SOFT_ENFORCEABLE") return declared;
   const lower = authoritativeHardLimits.some((value) => value !== null) ? "HARD_ENFORCEABLE" as const : "UNAVAILABLE" as const;
   return ENFORCEMENT_STRENGTH[lower] > ENFORCEMENT_STRENGTH[declared] ? lower : declared;
 }
@@ -497,7 +520,9 @@ function aggregateBudget(
   priorDecisions: readonly M5ControlDecisionDocument[],
   candidateReservation: M5ControlDecisionDocument["reservation"],
   sources: M5AuthoritativeSources,
+  allowHistoricalReservationOverflow = false,
 ): readonly BudgetEntry[] {
+  const boundedStaticPreM8 = isBoundedStaticPreM8(policy);
   const reconciliations = new Map<string, M5UsageEvidenceDocument>();
   for (const item of usage) {
     if (item.reservation_decision_content_sha256 === null) continue;
@@ -519,7 +544,11 @@ function aggregateBudget(
   return DIMENSIONS.map((dimension) => {
     const declared = policy.limits.find((entry) => entry.dimension === dimension)!;
     const lowerHardLimits = sourceHardLimits(dimension, state, reducer, sources);
-    const hardLimit = minDefined([...lowerHardLimits, declared.hard_limit]);
+    // The bounded controller's numeric telemetry envelopes do not upgrade a
+    // declared soft dimension into a hard provider/process authority.
+    const hardLimit = boundedStaticPreM8 && declared.enforcement_class === "SOFT_ENFORCEABLE"
+      ? declared.hard_limit
+      : minDefined([...lowerHardLimits, declared.hard_limit]);
     const contractSoft = dimension === "WORKER_INVOCATION" ? null : null;
     const softLimit = minDefined([declared.soft_limit, contractSoft, hardLimit]);
     let validated = 0; let observed = 0; let estimated = 0; let active = 0; let reconciled = 0;
@@ -542,9 +571,13 @@ function aggregateBudget(
     const opening = dimension === "WORKER_INVOCATION" ? state.counters.worker_invocations.total : 0;
     const charged = Math.max(opening, measured);
     const authorityAmount = checkedAdd(charged, active);
-    const enforcement = effectiveEnforcementClass(declared.enforcement_class, lowerHardLimits);
+    const enforcement = effectiveEnforcementClass(declared.enforcement_class, lowerHardLimits, boundedStaticPreM8);
     const enforceable = ["HARD_ENFORCEABLE", "SOFT_ENFORCEABLE"].includes(enforcement);
-    if (hardLimit !== null && authorityAmount > hardLimit && enforceable) throw controlError("BUDGET_EXHAUSTED", `${dimension} reservation exceeds the effective hard limit`);
+    // An unresolved historical reservation can overlap a state counter that
+    // already reflects its admission. Bounded terminal BLOCK may snapshot that
+    // fail-closed condition so it can terminalize/reconcile; all other paths
+    // retain the existing arithmetic rejection.
+    if (hardLimit !== null && authorityAmount > hardLimit && enforceable && !allowHistoricalReservationOverflow) throw controlError("BUDGET_EXHAUSTED", `${dimension} reservation exceeds the effective hard limit`);
     const hardRemaining = hardLimit === null ? null : Math.max(0, hardLimit - authorityAmount);
     const softRemaining = softLimit === null ? null : Math.max(0, softLimit - authorityAmount);
     const status: BudgetEntry["status"] = enforcement === "UNAVAILABLE" ? "UNAVAILABLE"
@@ -576,6 +609,7 @@ function progressEvaluation(
     policy.content_sha256, reducer.content_sha256, policy.plan_approval_sha256, state.content_sha256,
     ...usage.map((entry) => entry.source_record_content_sha256),
     ...(sources.m4CommandResults ?? []).map((entry) => entry.content_sha256 as Sha256Digest),
+    ...(sources.boundedWorkerResults ?? []).map((entry) => entry.content_sha256 as Sha256Digest),
     ...(sources.m4CommandCatalog === undefined ? [] : [sources.m4CommandCatalog.content_sha256 as Sha256Digest]),
     ...(sources.m3StateTokens ?? []).map((entry) => entry.content_sha256 as Sha256Digest),
     ...(sources.m3Postflights ?? []).map((entry) => entry.content_sha256 as Sha256Digest),
@@ -712,7 +746,7 @@ function contractGate(
   const authoritativeEvidenceIds = new Set<string>([policy.content_sha256, state.content_sha256]);
   if (policy.plan_approval_sha256 !== null) authoritativeEvidenceIds.add(policy.plan_approval_sha256);
   for (const value of [sources.contract, sources.budget, sources.m4ToolPolicy, sources.m4CommandCatalog]) if (value !== undefined) authoritativeEvidenceIds.add(value.content_sha256);
-  for (const values of [sources.m4CommandResults, sources.m3StateTokens, sources.m3Postflights, sources.workflowStates, sources.transitionEvents, sources.transitionCommits, sources.planApprovals]) {
+  for (const values of [sources.m4CommandResults, sources.boundedWorkerResults, sources.m3StateTokens, sources.m3Postflights, sources.workflowStates, sources.transitionEvents, sources.transitionCommits, sources.planApprovals]) {
     for (const value of values ?? []) authoritativeEvidenceIds.add(value.content_sha256);
   }
   const sourceBundlePresent = sources.contract !== undefined || sources.budget !== undefined || sources.m4ToolPolicy !== undefined || sources.m4CommandCatalog !== undefined ||
@@ -744,7 +778,7 @@ function contractGate(
     }
     for (const edge of taskGraph.edges) {
       if (!graphIds.has(edge.from) || !graphIds.has(edge.to)) missingDependency = true;
-      else graph.set(edge.from, [...(graph.get(edge.from) ?? []), edge.to]);
+      else graph.set(edge.to, [...(graph.get(edge.to) ?? []), edge.from]);
     }
   }
   const syntheticNodes = new Set(["task-only", "contract", "controller", "owner"]);
@@ -816,7 +850,8 @@ function contractGate(
   const routeAvailable = new Set([...available].filter((role) => routeRoles.size === 0 || routeRoles.has(role as LogicalModelRole)));
   const desired = selectInitialRoute(policy, state, routeAvailable).selected;
   if (desired === null) add("ROUTE_UNAVAILABLE", policy.route_map_approval_sha256 as Sha256Digest);
-  const requiredInvocations = desired === "ROUTED_DAG" ? 2 * policy.route_facts.leaf_count + 4 : 1;
+  const boundedStaticRouted = isBoundedStaticPreM8(policy) && policy.requested_mode === "ROUTED_DAG";
+  const requiredInvocations = desired === "ROUTED_DAG" ? boundedStaticRouted ? policy.route_facts.leaf_count + 2 : 2 * policy.route_facts.leaf_count + 4 : 1;
   const requiredByDimension: Readonly<Record<(typeof DIMENSIONS)[number], number>> = {
     WORKER_INVOCATION: requiredInvocations, MODEL_TURN: desired === null ? 1 : 1, PROVIDER_REQUEST: 0, TOOL_CALL: desired === "ROUTED_DAG" ? policy.route_facts.leaf_count : 0,
     INPUT_TOKEN: 0, OUTPUT_TOKEN: 0, COST_MICROUSD: 0, WALL_TIME_MS: 0,
@@ -991,7 +1026,7 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
   if (strictSources) {
     const sourceIds = new Set<string>([policy.content_sha256, state.content_sha256, reducerPolicy.content_sha256, ...priorDecisions.map((entry) => entry.content_sha256)]);
     for (const value of [sources.contract, sources.budget, sources.m4ToolPolicy, sources.m4CommandCatalog]) if (value !== undefined) sourceIds.add(value.content_sha256);
-    for (const values of [sources.m4CommandResults, sources.m3StateTokens, sources.m3Postflights, sources.workflowStates, sources.transitionEvents, sources.transitionCommits, sources.planApprovals, sources.taskGraphs, sources.tasks]) {
+    for (const values of [sources.m4CommandResults, sources.boundedWorkerResults, sources.m3StateTokens, sources.m3Postflights, sources.workflowStates, sources.transitionEvents, sources.transitionCommits, sources.planApprovals, sources.taskGraphs, sources.tasks]) {
       for (const value of values ?? []) sourceIds.add(value.content_sha256);
     }
     for (const failure of request.failures ?? []) {
@@ -1049,7 +1084,8 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
       reserved_route: state.execution_mode, amounts: policy.role_reservation_envelopes[index]!.amounts, source_envelope_index: index,
       status: "ACTIVE", reconciliation_evidence_content_sha256: null };
   }
-  const openingBudget = aggregateBudget(policy, state, reducerPolicy, usage, priorDecisions, null, sources);
+  const openingBudget = aggregateBudget(policy, state, reducerPolicy, usage, priorDecisions, null, sources,
+    request.intent === "BLOCK" && isBoundedStaticPreM8(policy));
   const openingHardReached = openingBudget.some((entry) => entry.status === "HARD_LIMIT_REACHED" && ["HARD_ENFORCEABLE", "SOFT_ENFORCEABLE"].includes(entry.enforcement_class));
   const openingSoftReached = openingBudget.some((entry) => entry.status === "SOFT_LIMIT_REACHED");
   let budget = openingBudget;
@@ -1070,19 +1106,18 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
     return true;
   });
   const candidateSoftReached = budget.some((entry) => entry.status === "SOFT_LIMIT_REACHED");
-  if (request.intent === "AUTHORIZE_WORK" && (openingHardReached || candidateHardReached || (openingSoftReached && reservation?.purpose !== "REQUIRED_CLOSEOUT") ||
-      (candidateSoftReached && reservation?.purpose !== "REQUIRED_CLOSEOUT"))) {
+  if (request.intent === "AUTHORIZE_WORK" && (openingHardReached || candidateHardReached || openingSoftReached || candidateSoftReached)) {
     selected = "BLOCK"; blockingReason = "BLOCKED_BUDGET_EXHAUSTED"; reservation = null; routes = continuationRoutes("BLOCK", true); budget = openingBudget;
   }
-  if (request.intent === "AUTHORIZE_CONTINUATION" && openingHardReached) {
+  if (request.intent === "AUTHORIZE_CONTINUATION" && (openingHardReached || openingSoftReached)) {
     selected = "BLOCK"; blockingReason = "BLOCKED_BUDGET_EXHAUSTED"; routes = continuationRoutes("BLOCK", true);
   }
   const unresolvedReservation = priorDecisions.some((decision) => decision.reservation !== null &&
     !usage.some((entry) => entry.reservation_decision_content_sha256 === decision.content_sha256 && entry.disposition !== "OUTCOME_UNCERTAIN"));
   const terminalPhase = ["DIRECT_VERIFYING", "SINGLE_OWNER_VERIFYING", "CLOSEOUT_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE"].includes(state.phase);
-  let pass = request.intent === "EVALUATE_TERMINAL" && terminalPhase && gate.status === "SATISFIED" && failures.length === 0 && !unresolvedReservation;
+  let pass = request.intent === "EVALUATE_TERMINAL" && terminalPhase && gate.status === "SATISFIED" && failures.length === 0 && !unresolvedReservation && !openingSoftReached;
   if (request.intent === "EVALUATE_TERMINAL" && !pass) {
-    selected = "BLOCK"; blockingReason ??= unresolvedReservation ? "BLOCKED_UNRECONCILED_RESERVATION" : "BLOCKED_TERMINAL_PRECONDITION"; routes = continuationRoutes("BLOCK", true);
+    selected = "BLOCK"; blockingReason ??= unresolvedReservation ? "BLOCKED_UNRECONCILED_RESERVATION" : openingSoftReached ? "BLOCKED_BUDGET_EXHAUSTED" : "BLOCKED_TERMINAL_PRECONDITION"; routes = continuationRoutes("BLOCK", true);
   }
   let blocked = selected === null || selected === "BLOCK" || selected === "REQUEST_OWNER_DECISION" || blockingReason !== null;
   let outcome: "AUTHORIZE" | "PASS" | "BLOCK" = pass ? "PASS" : blocked ? "BLOCK" : "AUTHORIZE";

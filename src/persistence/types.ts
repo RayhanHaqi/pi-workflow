@@ -84,7 +84,9 @@ export type StoredObjectKind =
   | "M5_USAGE_EVIDENCE"
   | "M5_CONTROL_DECISION"
   | "M6_WORKER_INVOCATION"
-  | "M6_WORKER_RESULT";
+  | "M6_WORKER_RESULT"
+  | "BOUNDED_WORKER_INVOCATION"
+  | "BOUNDED_WORKER_RESULT";
 
 export interface InspectedObject {
   readonly kind: StoredObjectKind;

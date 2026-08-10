@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 import { canonicalize } from "../canonical-json/index.js";
@@ -190,6 +191,7 @@ interface AgentRuntime {
   readonly clearAllQueues: () => void;
   readonly hasQueuedMessages: () => boolean;
   readonly reset: () => void;
+  readonly dispose?: () => Promise<void>;
 }
 
 interface ToolResultRuntime {
@@ -640,9 +642,9 @@ function guardCredentialStore(value: unknown): CredentialStoreRuntime {
   };
 }
 
-function assertAgentTools(value: unknown): void {
+function assertAgentTools(value: unknown, expectedNames: readonly string[] = ["read_scoped", "submit_worker_report"]): void {
   const tools = array(value, "Agent state tools");
-  if (tools.length !== 2) fail("RUNTIME_CAPABILITY_INVALID", "Agent must expose exactly two tools", "RUNTIME_GUARD");
+  if (tools.length !== expectedNames.length) fail("RUNTIME_CAPABILITY_INVALID", "Agent tool count differs from the bounded profile", "RUNTIME_GUARD");
   const names = tools.map((tool, index) => {
     const toolRecord = record(tool, `Agent tool ${index}`);
     string(toolRecord["label"], `Agent tool ${index} label`);
@@ -651,10 +653,10 @@ function assertAgentTools(value: unknown): void {
     callable(toolRecord["execute"], `Agent tool ${index}.execute`);
     return string(toolRecord["name"], `Agent tool ${index} name`);
   });
-  if (names[0] !== "read_scoped" || names[1] !== "submit_worker_report" || new Set(names).size !== 2) fail("RUNTIME_CAPABILITY_INVALID", "Agent tool registration is not the bounded direct pair", "RUNTIME_GUARD");
+  if (canonicalize(names) !== canonicalize(expectedNames) || new Set(names).size !== names.length) fail("RUNTIME_CAPABILITY_INVALID", "Agent tool registration differs from the bounded profile", "RUNTIME_GUARD");
 }
 
-function guardAgent(value: unknown): AgentRuntime {
+function guardAgent(value: unknown, expectedNames: readonly string[] = ["read_scoped", "submit_worker_report"]): AgentRuntime {
   const object = record(value, "Agent instance");
   const promptMethod = method(object, "prompt", "Agent");
   const abortMethod = method(object, "abort", "Agent");
@@ -666,7 +668,7 @@ function guardAgent(value: unknown): AgentRuntime {
   const stateValue = (): AgentStateRuntime => {
     const state = record(object["state"], "Agent state");
     const messages = array(state["messages"], "Agent state messages");
-    assertAgentTools(state["tools"]);
+    assertAgentTools(state["tools"], expectedNames);
     const pending = state["pendingToolCalls"];
     if (!(pending instanceof Set)) fail("RUNTIME_CAPABILITY_INVALID", "Agent pendingToolCalls is not a Set", "RUNTIME_GUARD");
     return {
@@ -690,16 +692,17 @@ function guardAgent(value: unknown): AgentRuntime {
     clearAllQueues: () => { clearQueuesMethod(); },
     hasQueuedMessages: () => boolean(queuedMethod(), "Agent queue state"),
     reset: () => { resetMethod(); },
+    ...(typeof object["dispose"] === "function" ? { dispose: async () => { await promiseResult(method(object, "dispose", "Agent")(), "Agent.dispose"); } } : {}),
   };
 }
 
-function constructAgent(moduleValue: JsonRecord, options: JsonRecord): AgentRuntime {
+function constructAgent(moduleValue: JsonRecord, options: JsonRecord, expectedNames: readonly string[] = ["read_scoped", "submit_worker_report"]): AgentRuntime {
   const constructorValue = readProperty(moduleValue, "Agent", "Agent module");
   if (typeof constructorValue !== "function") fail("RUNTIME_CAPABILITY_INVALID", "Agent export is not constructible", "RUNTIME_GUARD");
   let value: object;
   try { value = Reflect.construct(constructorValue, [options]); }
   catch { fail("SDK_INITIALIZATION_FAILED", "Agent construction failed", "SDK_INITIALIZATION"); }
-  return guardAgent(value);
+  return guardAgent(value, expectedNames);
 }
 
 function providerIdsFromCatalogue(moduleValue: JsonRecord): readonly string[] {
@@ -762,7 +765,7 @@ function streamOptions(value: unknown): JsonRecord {
   return { ...withoutApiKey, maxRetries: 0, maxRetryDelayMs: 0 };
 }
 
-function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object): PreparedRuntime {
+function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object, effort: "high" | "max" = "high"): PreparedRuntime {
   const getSupportedThinkingLevels = method(boundary.aiModule, "getSupportedThinkingLevels", "AI module");
   const builtinModels = method(boundary.providersModule, "builtinModels", "providers module");
   const officialIds = verifyOfficialCatalogue(boundary.providersModule);
@@ -794,7 +797,7 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
   if (model === undefined) fail("RUNTIME_CAPABILITY_INVALID", "Exact provider/model lookup returned no model", "RUNTIME_GUARD");
   modelIdentity(model, providerId, modelId);
   const levels = array(getSupportedThinkingLevels(model), "supported thinking levels").map((value, index) => string(value, `thinking level[${index}]`));
-  if (!levels.includes("high")) fail("RUNTIME_CAPABILITY_INVALID", "Selected model does not support high effort", "RUNTIME_GUARD");
+  if (!levels.includes(effort)) fail("RUNTIME_CAPABILITY_INVALID", "Selected model does not support the M5-selected effort", "RUNTIME_GUARD");
   const preparedModels: ModelsRuntime = {
     ...models,
     getSupportedThinkingLevels: () => levels,
@@ -1550,4 +1553,193 @@ export async function runDirectReadOnlyLunaWorkerForTests(input: M6DirectReadOnl
     fail("AUTHORITY_REJECTED", "No registered test-only faux runtime provenance is active", "M1_M5_ADMISSION");
   }
   return runWorker(input, activeFauxRuntimeAuthority);
+}
+
+export interface BoundedPiTool {
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: JsonRecord;
+  readonly execute: (toolCallId: string, params: unknown, signal?: AbortSignal) => Promise<ToolResultRuntime>;
+}
+
+export interface BoundedPiAgentInput {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly effort: "high" | "max";
+  readonly systemPrompt: string;
+  readonly userPrompt: string;
+  readonly tools: readonly BoundedPiTool[];
+  readonly maxM4ToolCalls: number;
+  readonly maxModelTurns: number;
+  readonly deadlineMs: number;
+}
+
+export interface BoundedPiAgentResult {
+  readonly completed: boolean;
+  readonly firstFailureCode?: string;
+  readonly firstFailureStage?: string;
+  readonly modelTurns: number | null;
+  readonly providerRequests: number | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly costMicrousd: number | null;
+  readonly cleanupCertain: boolean;
+}
+
+async function publicCredentialStore(providerId: string): Promise<CredentialStoreRuntime> {
+  const coding = record(await import(CODING_AGENT_MODULE_SPECIFIER), "Pi coding-agent public module");
+  const reader = callable(coding["readStoredCredential"], "Pi public credential reader");
+  const credential = await promiseResult(reader(providerId), "Pi public credential reader");
+  if (credential === undefined) fail("AUTHORITY_REJECTED", "Pi credential authority is unavailable", "CREDENTIAL");
+  const ai = record(await import(AI_MODULE_SPECIFIER), "Pi AI public module");
+  const Store = ai["InMemoryCredentialStore"];
+  if (typeof Store !== "function") fail("RUNTIME_CAPABILITY_INVALID", "Pi in-memory credential boundary is unavailable", "RUNTIME_GUARD");
+  let raw: object;
+  try { raw = Reflect.construct(Store, []); }
+  catch { fail("SDK_INITIALIZATION_FAILED", "Pi credential store construction failed", "SDK_INITIALIZATION"); }
+  const store = guardCredentialStore(raw);
+  await store.modify(providerId, async () => credential);
+  return store;
+}
+
+/**
+ * Generic bounded Pi agent adapter. It accepts only M5-selected route facts and
+ * the caller's finite tool profile, uses public credential APIs for that exact
+ * provider, disables retries, and settles all resources before returning.
+ */
+async function runBoundedPiAgentImpl(
+  input: BoundedPiAgentInput,
+  fauxAuthority: object | undefined,
+  testCredentialStore: CredentialStoreRuntime | undefined,
+): Promise<BoundedPiAgentResult> {
+  if (!Number.isSafeInteger(input.maxModelTurns) || input.maxModelTurns < 0) {
+    fail("RUNTIME_CAPABILITY_INVALID", "bounded model-turn limit is invalid", "RUNTIME_GUARD");
+  }
+  // No request is admitted when the M5-selected remainder is already exhausted.
+  // This occurs before runtime, credential, provider, or Agent construction.
+  if (input.maxModelTurns === 0) return {
+    completed: false, firstFailureCode: "MODEL_TURN_BUDGET_EXHAUSTED", firstFailureStage: "MODEL_TURN_ADMISSION",
+    modelTurns: 0, providerRequests: 0, inputTokens: null, outputTokens: null, costMicrousd: null, cleanupCertain: true,
+  };
+  let boundary: RuntimeBoundary | undefined;
+  let runtime: PreparedRuntime | undefined;
+  let agent: AgentRuntime | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let prompt: Promise<void> | undefined;
+  let firstFailure: { code: string; stage: string } | undefined;
+  let providerRequests = 0;
+  let generationStarts = 0;
+  let settledGenerationTurns = 0;
+  let toolCalls = 0;
+  let promptSettled = false;
+  let idle = false;
+  let cleanupCertain = true;
+  const latch = (code: string, stage: string): void => { firstFailure ??= { code: code.slice(0, 128), stage: stage.slice(0, 128) }; };
+  try {
+    boundary = await loadRuntimeBoundary();
+    const credentials = testCredentialStore ?? await publicCredentialStore(input.providerId);
+    runtime = prepareRuntime(boundary, input.providerId, input.modelId, credentials, fauxAuthority, input.effort);
+    const names = input.tools.map((tool) => tool.name);
+    if (names.length === 0 || new Set(names).size !== names.length) fail("RUNTIME_CAPABILITY_INVALID", "bounded tool profile is invalid", "RUNTIME_GUARD");
+    const started = performance.now();
+    const options: JsonRecord = {
+      initialState: { systemPrompt: input.systemPrompt, model: runtime.model, thinkingLevel: input.effort, tools: input.tools },
+      streamFn: (model: unknown, context: unknown, optionsValue?: unknown): unknown => {
+        if (performance.now() - started > input.deadlineMs) { latch("WORKER_DEADLINE_EXCEEDED", "DEADLINE"); throw new Error("bounded worker deadline exceeded"); }
+        if (generationStarts >= input.maxModelTurns) {
+          latch("MODEL_TURN_BUDGET_EXHAUSTED", "MODEL_TURN_ADMISSION");
+          throw new Error("bounded model-turn admission rejected");
+        }
+        generationStarts += 1;
+        providerRequests += 1;
+        return runtime!.streamFn(model, context, optionsValue);
+      },
+      toolExecution: "sequential",
+      maxRetryDelayMs: 0,
+      beforeToolCall: async (context: unknown): Promise<JsonRecord | undefined> => {
+        if (performance.now() - started > input.deadlineMs || toolCalls >= input.maxM4ToolCalls || settledGenerationTurns >= input.maxModelTurns) {
+          latch(settledGenerationTurns >= input.maxModelTurns ? "MODEL_TURN_BUDGET_EXHAUSTED" : toolCalls >= input.maxM4ToolCalls ? "M4_TOOL_BUDGET_EXHAUSTED" : "WORKER_DEADLINE_EXCEEDED", "TOOL_ADMISSION");
+          return { block: true, reason: "bounded tool admission rejected" };
+        }
+        const call = record(record(context, "beforeToolCall context")["toolCall"], "tool call");
+        if (!names.includes(string(call["name"], "tool call name"))) { latch("PROFILE_TOOL_DENIED", "TOOL_ADMISSION"); return { block: true, reason: "tool is outside bounded profile" }; }
+        return undefined;
+      },
+      afterToolCall: async (context: unknown): Promise<JsonRecord | undefined> => {
+        const value = record(context, "afterToolCall context");
+        const call = record(value["toolCall"], "tool call");
+        const name = string(call["name"], "tool call name");
+        if (boolean(value["isError"], "tool result error state")) { latch("TOOL_EXECUTION_FAILED", "TOOL_EXECUTION"); agent?.abort(); return { terminate: true }; }
+        if (name.startsWith("submit_")) return { terminate: true };
+        return undefined;
+      },
+    };
+    agent = constructAgent(boundary.agentModule, options, names);
+    const initial = agent.state;
+    if (initial.model !== runtime.model || initial.thinkingLevel !== input.effort || initial.messages.length !== 0 || initial.pendingToolCalls.size !== 0) {
+      fail("RUNTIME_CAPABILITY_INVALID", "fresh bounded agent state differs from selected runtime", "RUNTIME_GUARD");
+    }
+    unsubscribe = agent.subscribe((event: unknown) => {
+      const type = string(record(event, "Agent event")["type"], "Agent event type");
+      if (type === "turn_end" && settledGenerationTurns < generationStarts) settledGenerationTurns += 1;
+      if (type === "tool_execution_start") toolCalls += 1;
+    });
+    timer = setTimeout(() => { latch("WORKER_DEADLINE_EXCEEDED", "DEADLINE"); agent?.abort(); }, input.deadlineMs);
+    timer.unref();
+    prompt = agent.prompt(input.userPrompt);
+    try { await prompt; promptSettled = true; }
+    catch (error: unknown) { promptSettled = true; latch(error instanceof Error ? error.name : "PROMPT_FAILED", "PROMPT"); }
+    try { await agent.waitForIdle(); idle = true; }
+    catch (error: unknown) { latch(error instanceof Error ? error.name : "AGENT_IDLE", "IDLE"); }
+  } catch (error: unknown) {
+    latch(error instanceof M6WorkerError ? error.code : error instanceof Error ? error.name : "RUNTIME_FAILURE", error instanceof M6WorkerError ? error.stage : "RUNTIME");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (agent !== undefined) {
+      try { agent.abort(); } catch { cleanupCertain = false; }
+      if (prompt !== undefined && !promptSettled) try { promptSettled = await waitWithDeadline(prompt.then(() => undefined), 5_000); } catch { cleanupCertain = false; }
+      try { idle = await waitWithDeadline(agent.waitForIdle(), 5_000); } catch { cleanupCertain = false; }
+      try { unsubscribe?.(); } catch { cleanupCertain = false; }
+      try { agent.clearAllQueues(); if (agent.hasQueuedMessages()) cleanupCertain = false; } catch { cleanupCertain = false; }
+      try { agent.reset(); const state = agent.state; if (state.messages.length !== 0 || state.pendingToolCalls.size !== 0 || state.isStreaming) cleanupCertain = false; } catch { cleanupCertain = false; }
+      if (agent.dispose !== undefined) try { await agent.dispose(); } catch { cleanupCertain = false; }
+    }
+    if (runtime !== undefined) {
+      try { runtime.clearProviderState(); runtime.models.clearProviders(); if (runtime.models.getProviders().length !== 0 || runtime.pendingResponseCount() !== 0) cleanupCertain = false; }
+      catch { cleanupCertain = false; }
+    }
+  }
+  const completed = firstFailure === undefined && cleanupCertain && promptSettled && idle;
+  return {
+    completed,
+    ...(firstFailure === undefined && cleanupCertain ? {} : { firstFailureCode: firstFailure?.code ?? "CLEANUP_UNCERTAIN", firstFailureStage: firstFailure?.stage ?? "CLEANUP" }),
+    modelTurns: generationStarts,
+    providerRequests,
+    inputTokens: null,
+    outputTokens: null,
+    costMicrousd: null,
+    cleanupCertain,
+  };
+}
+
+/** Production entrypoint: runtime provenance and credential access are fixed to the verified Pi boundary. */
+export async function runBoundedPiAgent(input: BoundedPiAgentInput): Promise<BoundedPiAgentResult> {
+  return runBoundedPiAgentImpl(input, undefined, undefined);
+}
+
+/** Package-internal test-only entrypoint using the existing fixed-route faux provenance. */
+export async function runBoundedPiAgentForTests(input: BoundedPiAgentInput): Promise<BoundedPiAgentResult> {
+  const fauxAuthority = activeFauxRuntimeAuthority;
+  if (fauxAuthority === undefined || !fauxRuntimeProvenance.has(fauxAuthority)) {
+    fail("AUTHORITY_REJECTED", "No registered test-only faux runtime provenance is active", "M1_M5_ADMISSION");
+  }
+  const credentials: CredentialStoreRuntime = {
+    read: async () => undefined,
+    list: async () => [],
+    modify: async () => undefined,
+    delete: async () => undefined,
+  };
+  return runBoundedPiAgentImpl(input, fauxAuthority, credentials);
 }

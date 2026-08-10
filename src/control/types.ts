@@ -1,6 +1,7 @@
 import type { Sha256Digest } from "../identity/index.js";
 import type {
   BudgetDocument,
+  BoundedWorkerResultDocument,
   ContractDocument,
   LogicalModelRole,
   M3PostflightDocument,
@@ -73,6 +74,8 @@ export interface M5ImmutableRunAuthoritySources {
 }
 
 export interface M5AuthoritativeSources {
+  /** Internal controller marker; never a durable authority record. */
+  readonly boundedStaticPreM8?: boolean;
   readonly contract?: ContractDocument;
   readonly budget?: BudgetDocument;
   readonly m4ToolPolicy?: M4ScopedToolPolicyDocument;
@@ -80,6 +83,7 @@ export interface M5AuthoritativeSources {
   readonly routeMap?: RouteMapDocument;
   readonly routeMapApproval?: RouteMapApprovalDocument;
   readonly m4CommandResults?: readonly M4CommandResultDocument[];
+  readonly boundedWorkerResults?: readonly BoundedWorkerResultDocument[];
   readonly m3StateTokens?: readonly M3RepositoryStateTokenDocument[];
   readonly m3Postflights?: readonly M3PostflightDocument[];
   readonly workflowStates?: readonly WorkflowState[];

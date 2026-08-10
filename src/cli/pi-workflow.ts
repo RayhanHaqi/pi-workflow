@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { readFile, realpath } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
+import { runBoundedMutationWorkflow } from "../workflow-controller.js";
 import {
   approvalLine,
   prepareWorkflow,
@@ -22,13 +24,57 @@ async function stdinText(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function reportResult(result: WorkflowRunResult): number {
+function reportResult(result: Pick<WorkflowRunResult, "outcome" | "reason">): number {
   output(result.outcome);
   output(result.reason);
   return result.outcome === "PASS" ? 0 : 3;
 }
 
+async function runMutationCommand(argv: readonly string[]): Promise<number> {
+  if (argv.length !== 2) {
+    output("BLOCKED (not started): usage is pi-workflow mutate <goal.json>");
+    return 2;
+  }
+  let goal: unknown;
+  try { goal = JSON.parse(await readFile(argv[1]!, "utf8")) as unknown; }
+  catch (error: unknown) {
+    output(`BLOCKED (not started): ${error instanceof Error ? error.message : String(error)}`);
+    return 2;
+  }
+  // The CLI deliberately has no executable authority. A host/controller must
+  // supply the separate controller-owned verification authority programmatically.
+  const approvals = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const result = await runBoundedMutationWorkflow(goal, {
+      cwd: process.cwd(),
+      approveBaseline: async (baseline) => {
+        output(`DIRTY_BASELINE_APPROVAL_REQUIRED ${baseline.content_sha256}`);
+        output(JSON.stringify(baseline.paths.map((entry) => ({ path: entry.path, ownership_class: entry.ownership_class, data_class: entry.data_class, capture_mode: entry.capture_mode, retention_days_after_terminal: entry.retention_days_after_terminal }))));
+        const response = (await approvals.question("Enter APPROVE_BASELINE <baseline-content-sha256> <approved-by> <approved-at-utc>: ")).trim();
+        const match = /^APPROVE_BASELINE\s+(sha256:[0-9a-f]{64})\s+(\S+)\s+(\S+)$/u.exec(response);
+        return match?.[1] === baseline.content_sha256
+          ? { baseline_content_sha256: baseline.content_sha256 as `sha256:${string}`, approved_by: match[2]!, approved_at: match[3]! }
+          : null;
+      },
+      approveTasks: async ({ contract, plan }) => {
+        const target = plan?.content_sha256 ?? contract.content_sha256;
+        output(`EXECUTION_APPROVAL_REQUIRED ${plan === null ? "CONTRACT" : "PLAN"} ${target}`);
+        return (await approvals.question(`Enter ${approvalLine(target as `sha256:${string}`)}: `)).trim() === approvalLine(target as `sha256:${string}`)
+          ? target as `sha256:${string}` : null;
+      },
+      approveOwnerAcceptance: async ({ finalState }) => {
+        output(`OWNER_ACCEPTANCE_REQUIRED ${finalState.content_sha256}`);
+        return (await approvals.question(`Enter OWNER_ACCEPT ${finalState.content_sha256}: `)).trim() === `OWNER_ACCEPT ${finalState.content_sha256}`;
+      },
+    });
+    return reportResult(result);
+  } finally {
+    approvals.close();
+  }
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv[0] === "mutate") return runMutationCommand(argv);
   if (argv.length !== 1) {
     output("BLOCKED (not started): usage is pi-workflow <goal.json>");
     return 2;

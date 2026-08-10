@@ -1,0 +1,309 @@
+import { performance } from "node:perf_hooks";
+
+import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../identity/index.js";
+import { publishBoundedWorkerRecord } from "../persistence/store.js";
+import type { WorktreeLockHandle } from "../repository/index.js";
+import { lockAcquisitionAuthority } from "../repository/lock.js";
+import { runBoundedPiAgent } from "./worker.js";
+import type { ScopedToolGateway } from "../scoped-tools/types.js";
+import {
+  identifyContractDocument,
+  type BoundedWorkerInvocationDocument,
+  type BoundedWorkerResultDocument,
+  type M3RepositoryStateTokenDocument,
+  type M5ControlDecisionDocument,
+  type PlanApprovalDocument,
+  type TaskDocument,
+  type TaskGraphDocument,
+} from "../schemas/index.js";
+
+export type BoundedWorkerToolProfile = "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT";
+
+export interface BoundedWorkerRoute {
+  readonly logicalRole: "LUNA_EXECUTOR" | "SOL_OWNER" | "SOL_PLANNER" | "SOL_CLOSEOUT";
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly effort: "high" | "max";
+}
+
+export interface BoundedWorkerTools {
+  readonly readPath: (path: string) => Promise<{ readonly content: string | null; readonly resultContentSha256: Sha256Digest }>;
+  readonly writePath: (input: {
+    readonly path: string;
+    readonly operation: "CREATE" | "REPLACE" | "DELETE";
+    readonly replacementBytes: Uint8Array | null;
+    readonly expectedPreimageExists: boolean;
+    readonly expectedPreimageDigest: Sha256Digest | null;
+    readonly expectedPreimageSize: number | null;
+    readonly expectedPreimageMode: number | null;
+  }) => Promise<Sha256Digest>;
+  readonly readEvidence: (kind: string, contentSha256: Sha256Digest) => Promise<Sha256Digest>;
+  readonly submitReport: (report: string) => void;
+}
+
+/** A narrow seam for deterministic tests and the accepted Pi runtime adapter. */
+export interface BoundedWorkerRuntime {
+  execute(input: {
+    readonly route: BoundedWorkerRoute;
+    readonly profile: BoundedWorkerToolProfile;
+    readonly systemPrompt: string;
+    readonly userPrompt: string;
+    readonly tools: BoundedWorkerTools;
+    readonly maxM4ToolCalls: number;
+    readonly maxModelTurns: number;
+    readonly deadlineMs: number;
+  }): Promise<{
+    readonly completed: boolean;
+    readonly firstFailureCode?: string;
+    readonly firstFailureStage?: string;
+    readonly modelTurns?: number | null;
+    readonly providerRequests?: number | null;
+    readonly inputTokens?: number | null;
+    readonly outputTokens?: number | null;
+    readonly costMicrousd?: number | null;
+    readonly cleanupCertain: boolean;
+  }>;
+}
+
+export interface RunBoundedWorkerInput {
+  readonly stateRoot: string;
+  readonly runId: string;
+  readonly operationId: string;
+  readonly reservation: M5ControlDecisionDocument;
+  readonly task: TaskDocument | null;
+  readonly taskGraph: TaskGraphDocument | null;
+  readonly plan: PlanApprovalDocument | null;
+  readonly inputStateToken: M3RepositoryStateTokenDocument;
+  readonly lock: WorktreeLockHandle;
+  readonly gateway: ScopedToolGateway;
+  readonly route: BoundedWorkerRoute;
+  readonly profile: BoundedWorkerToolProfile;
+  readonly systemPrompt: string;
+  readonly userPrompt: string;
+  readonly allowedReadPaths: readonly string[];
+  readonly allowedEditPaths: readonly string[];
+  readonly maxM4ToolCalls: number;
+  readonly maxModelTurns: number;
+  readonly deadlineMs: number;
+  readonly now?: () => string;
+}
+
+export interface BoundedWorkerExecutionResult {
+  readonly invocation: BoundedWorkerInvocationDocument;
+  readonly result: BoundedWorkerResultDocument;
+}
+
+function dateNow(input: RunBoundedWorkerInput): string { return (input.now ?? (() => new Date().toISOString()))(); }
+function canonicalPathAllowed(path: string, values: readonly string[]): boolean { return values.includes(path); }
+function failure(error: unknown): { readonly code: string; readonly stage: string } {
+  const code = error !== null && typeof error === "object" && "code" in error ? String((error as { readonly code: unknown }).code) : "RUNTIME_FAILURE";
+  return { code: code.slice(0, 128) || "RUNTIME_FAILURE", stage: "BOUNDED_WORKER" };
+}
+
+function toolResult(text: string, terminate = false): { readonly content: readonly Record<string, unknown>[]; readonly details: Record<string, unknown>; readonly terminate?: boolean } {
+  return { content: [{ type: "text", text }], details: {}, ...(terminate ? { terminate: true } : {}) };
+}
+function toolParams(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("tool parameters must be an object"), { code: "TOOL_REQUEST_INVALID" });
+  return value as Record<string, unknown>;
+}
+function stringParam(value: Record<string, unknown>, key: string): string {
+  const result = value[key];
+  if (typeof result !== "string" || result.length === 0) throw Object.assign(new Error(`tool parameter ${key} is invalid`), { code: "TOOL_REQUEST_INVALID" });
+  return result;
+}
+
+/** The production default is the accepted guarded Pi runtime, not a provider shim. */
+const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
+  async execute(input: Parameters<BoundedWorkerRuntime["execute"]>[0]) {
+    const readTool = {
+      name: "read_scoped", label: "Scoped read", description: "Read one allowed repository path through M4.",
+      parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" } } },
+      async execute(_id: string, params: unknown) { const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
+    };
+    const patchTool = {
+      name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4.",
+      parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
+        path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
+      } },
+      async execute(_id: string, params: unknown) {
+        const value = toolParams(params); const operation = stringParam(value, "operation");
+        if (operation !== "CREATE" && operation !== "REPLACE" && operation !== "DELETE") throw Object.assign(new Error("patch operation is invalid"), { code: "TOOL_REQUEST_INVALID" });
+        const exists = value["expected_preimage_exists"]; if (typeof exists !== "boolean") throw Object.assign(new Error("preimage existence is invalid"), { code: "TOOL_REQUEST_INVALID" });
+        const content = value["replacement_base64"]; const replacementBytes = content === null ? null : typeof content === "string" ? Buffer.from(content, "base64") : (() => { throw Object.assign(new Error("replacement bytes are invalid"), { code: "TOOL_REQUEST_INVALID" }); })();
+        const digest = value["expected_preimage_digest"]; const size = value["expected_preimage_size"]; const mode = value["expected_preimage_mode"];
+        await input.tools.writePath({ path: stringParam(value, "path"), operation, replacementBytes, expectedPreimageExists: exists,
+          expectedPreimageDigest: digest === null ? null : typeof digest === "string" ? digest as Sha256Digest : (() => { throw Object.assign(new Error("preimage digest is invalid"), { code: "TOOL_REQUEST_INVALID" }); })(),
+          expectedPreimageSize: size === null ? null : typeof size === "number" && Number.isSafeInteger(size) ? size : (() => { throw Object.assign(new Error("preimage size is invalid"), { code: "TOOL_REQUEST_INVALID" }); })(),
+          expectedPreimageMode: mode === null ? null : typeof mode === "number" && Number.isSafeInteger(mode) ? mode : (() => { throw Object.assign(new Error("preimage mode is invalid"), { code: "TOOL_REQUEST_INVALID" }); })(), });
+        return toolResult("applied");
+      },
+    };
+    const evidenceTool = {
+      name: "read_authoritative_evidence", label: "Authoritative evidence read", description: "Read only an allowed durable evidence record through M4.",
+      parameters: { type: "object", additionalProperties: false, required: ["kind", "content_sha256"], properties: { kind: { type: "string" }, content_sha256: { type: "string" } } },
+      async execute(_id: string, params: unknown) { const value = toolParams(params); await input.tools.readEvidence(stringParam(value, "kind"), stringParam(value, "content_sha256") as Sha256Digest); return toolResult("evidence read"); },
+    };
+    const submitName = input.profile === "SOL_PLANNER" ? "submit_candidate_plan_report" : input.profile === "SOL_CLOSEOUT" ? "submit_closeout_report" : "submit_worker_report";
+    const submitTool = {
+      name: submitName, label: "Bounded report", description: "Submit one bounded advisory report and end this worker.",
+      parameters: { type: "object", additionalProperties: false, required: ["report"], properties: { report: { type: "string", maxLength: 8192 } } },
+      async execute(_id: string, params: unknown) { const value = toolParams(params); input.tools.submitReport(stringParam(value, "report")); return toolResult("accepted", true); },
+    };
+    const tools = input.profile === "MUTATION_EXECUTOR" ? [readTool, patchTool, submitTool] : input.profile === "SOL_PLANNER" ? [readTool, submitTool] : [evidenceTool, submitTool];
+    return runBoundedPiAgent({ providerId: input.route.providerId, modelId: input.route.modelId, effort: input.route.effort, systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
+      tools, maxM4ToolCalls: input.maxM4ToolCalls, maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs });
+  },
+});
+
+export type BoundedWorkerFauxRuntimeFactory = (route: BoundedWorkerRoute) => BoundedWorkerRuntime | undefined;
+
+const fauxRuntimeProvenance = new WeakMap<object, BoundedWorkerFauxRuntimeFactory>();
+let activeFauxRuntimeAuthority: object | undefined;
+
+/** Package-internal test-only registration; production never reads this provenance. */
+export function configureBoundedWorkerFauxRuntimeForTests(factory?: BoundedWorkerFauxRuntimeFactory): void {
+  activeFauxRuntimeAuthority = undefined;
+  if (factory === undefined) return;
+  const authority = Object.freeze(Object.create(null)) as object;
+  fauxRuntimeProvenance.set(authority, factory);
+  activeFauxRuntimeAuthority = authority;
+}
+
+/**
+ * Persist-before-provider bounded worker. Its runtime receives only selected
+ * route facts and the narrowly profiled M4 closures; it never receives a shell,
+ * filesystem handle, command registry, credential, or controller authority.
+ */
+async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: BoundedWorkerRuntime): Promise<BoundedWorkerExecutionResult> {
+  if (input.reservation.outcome !== "AUTHORIZE" || input.reservation.reservation === null || input.reservation.operation_id !== input.operationId ||
+      input.reservation.reservation.logical_role !== input.route.logicalRole || input.reservation.reservation.reservation_decision_key === undefined) {
+    throw new Error("Bounded worker requires an exact active M5 reservation");
+  }
+  const createdAt = dateNow(input);
+  const invocation = identifyContractDocument("pi_gacw_bounded_worker_invocation_v0", {
+    schema_id: "pi_gacw_bounded_worker_invocation_v0",
+    schema_version: "0.1.0",
+    content_projection_id: "document-content-v1",
+    invocation_key: sha256Canonical({ run: input.runId, operation: input.operationId, reservation: input.reservation.content_sha256 }),
+    run_id: input.runId,
+    operation_id: input.operationId,
+    m5_reservation_decision_content_sha256: input.reservation.content_sha256,
+    m5_reservation_decision_key: input.reservation.reservation.reservation_decision_key,
+    task_content_sha256: input.task?.content_sha256 ?? null,
+    task_graph_sha256: input.taskGraph?.content_sha256 ?? null,
+    plan_approval_sha256: input.plan?.content_sha256 ?? null,
+    input_m3_state_token_content_sha256: input.inputStateToken.content_sha256,
+    system_prompt_sha256: sha256Bytes(Buffer.from(input.systemPrompt, "utf8")),
+    user_prompt_sha256: sha256Bytes(Buffer.from(input.userPrompt, "utf8")),
+    created_at: createdAt,
+  }) as BoundedWorkerInvocationDocument;
+  await publishBoundedWorkerRecord({ stateRoot: input.stateRoot, runId: input.runId, kind: "BOUNDED_WORKER_INVOCATION", document: invocation });
+
+  const m3Evidence = new Set<Sha256Digest>();
+  const m4Evidence = new Set<Sha256Digest>();
+  let toolCalls = 0;
+  let advisoryReport: string | null = null;
+  const start = performance.now();
+  const requireBudget = (): void => {
+    if (toolCalls >= input.maxM4ToolCalls) throw Object.assign(new Error("M4 tool-call budget exhausted"), { code: "M4_TOOL_BUDGET_EXHAUSTED" });
+    if (performance.now() - start > input.deadlineMs) throw Object.assign(new Error("bounded worker deadline exceeded"), { code: "WORKER_DEADLINE_EXCEEDED" });
+  };
+  const tools: BoundedWorkerTools = {
+    async readPath(path) {
+      if (!canonicalPathAllowed(path, input.allowedReadPaths)) throw Object.assign(new Error("path is outside task read scope"), { code: "OUT_OF_SCOPE_READ" });
+      if (input.profile === "SOL_CLOSEOUT") throw Object.assign(new Error("closeout can read evidence only"), { code: "PROFILE_TOOL_DENIED" });
+      requireBudget(); toolCalls += 1;
+      const result = await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path, offset: 0, length: 65_536, mode: "TEXT" });
+      m4Evidence.add(result.resultRecord.content_sha256 as Sha256Digest);
+      return { content: result.content, resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest };
+    },
+    async writePath(request) {
+      if (input.profile !== "MUTATION_EXECUTOR") throw Object.assign(new Error("worker profile cannot mutate"), { code: "PROFILE_TOOL_DENIED" });
+      if (!canonicalPathAllowed(request.path, input.allowedEditPaths)) throw Object.assign(new Error("path is outside task edit scope"), { code: "OUT_OF_SCOPE_WRITE" });
+      requireBudget(); toolCalls += 1;
+      const result = await input.gateway.apply_patch_scoped({
+        stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest,
+        lockAcquisitionContentSha256: lockAcquisitionAuthority(input.lock).content_sha256 as Sha256Digest,
+        operation: request.operation,
+        path: request.path,
+        ownershipClass: "OWNER_ACCEPTED_MUTABLE",
+        dataClass: "PUBLIC_SOURCE",
+        expectedPreimageExists: request.expectedPreimageExists,
+        expectedPreimageDigest: request.expectedPreimageDigest,
+        expectedPreimageSize: request.expectedPreimageSize,
+        expectedPreimageMode: request.expectedPreimageMode,
+        replacementBytes: request.replacementBytes,
+        requestedFinalMode: request.operation === "DELETE" ? null : 0o644,
+      });
+      m4Evidence.add(result.receipt.content_sha256 as Sha256Digest);
+      m3Evidence.add(result.acceptedState.content_sha256 as Sha256Digest);
+      return result.receipt.content_sha256 as Sha256Digest;
+    },
+    async readEvidence(kind, contentSha256) {
+      if (input.profile !== "SOL_CLOSEOUT") throw Object.assign(new Error("worker profile cannot read evidence"), { code: "PROFILE_TOOL_DENIED" });
+      requireBudget(); toolCalls += 1;
+      const result = await input.gateway.read_evidence({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, kind, contentSha256 });
+      m4Evidence.add(result.resultRecord.content_sha256 as Sha256Digest);
+      return result.resultRecord.content_sha256 as Sha256Digest;
+    },
+    submitReport(report) {
+      if (report.length > 8_192) throw Object.assign(new Error("advisory report exceeds bound"), { code: "REPORT_TOO_LARGE" });
+      advisoryReport = report;
+    },
+  };
+
+  let report: Awaited<ReturnType<BoundedWorkerRuntime["execute"]>> | undefined;
+  let first: { readonly code: string; readonly stage: string } | null = null;
+  try {
+    report = await runtime.execute({
+      route: input.route, profile: input.profile, systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, tools,
+      maxM4ToolCalls: input.maxM4ToolCalls, maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs,
+    });
+    if (!report.completed) first = { code: report.firstFailureCode ?? "WORKER_BLOCKED", stage: report.firstFailureStage ?? "BOUNDED_WORKER" };
+  } catch (error: unknown) { first = failure(error); }
+  const cleanupCertain = report?.cleanupCertain ?? false;
+  const completed = first === null && cleanupCertain;
+  if (!completed && first === null) first = { code: "CLEANUP_UNCERTAIN", stage: "CLEANUP" };
+  const result = identifyContractDocument("pi_gacw_bounded_worker_result_v0", {
+    schema_id: "pi_gacw_bounded_worker_result_v0",
+    schema_version: "0.1.0",
+    content_projection_id: "document-content-v1",
+    invocation_content_sha256: invocation.content_sha256,
+    outcome: completed ? "COMPLETED" : "BLOCKED",
+    first_failure_code: first?.code ?? null,
+    first_failure_stage: first?.stage ?? null,
+    m3_evidence_content_sha256: [...m3Evidence].sort(),
+    m4_evidence_content_sha256: [...m4Evidence].sort(),
+    actual_usage: {
+      worker_invocations: 1,
+      m4_tool_calls: toolCalls,
+      model_turns: report?.modelTurns ?? null,
+      provider_requests: report?.providerRequests ?? null,
+      input_tokens: report?.inputTokens ?? null,
+      output_tokens: report?.outputTokens ?? null,
+      cost_microusd: report?.costMicrousd ?? null,
+      wall_time_ms: Math.max(0, Math.ceil(performance.now() - start)),
+    },
+    cleanup_certain: cleanupCertain,
+    advisory_report: advisoryReport,
+    completed_at: dateNow(input),
+  }) as BoundedWorkerResultDocument;
+  await publishBoundedWorkerRecord({ stateRoot: input.stateRoot, runId: input.runId, kind: "BOUNDED_WORKER_RESULT", document: result });
+  return { invocation, result };
+}
+
+/** Production entrypoint: the verified official Pi runtime is not caller-replaceable. */
+export async function runBoundedWorker(input: RunBoundedWorkerInput): Promise<BoundedWorkerExecutionResult> {
+  return runBoundedWorkerImpl(input, acceptedPiRuntime);
+}
+
+/** Package-internal test-only entrypoint; provenance must be registered first. */
+export async function runBoundedWorkerForTests(input: RunBoundedWorkerInput): Promise<BoundedWorkerExecutionResult> {
+  const authority = activeFauxRuntimeAuthority;
+  const factory = authority === undefined ? undefined : fauxRuntimeProvenance.get(authority);
+  if (factory === undefined) throw Object.assign(new Error("No registered test-only bounded runtime provenance is active"), { code: "TEST_RUNTIME_PROVENANCE_REQUIRED" });
+  const runtime = factory(input.route);
+  if (runtime === undefined) throw Object.assign(new Error("Test-only bounded runtime provenance does not bind the selected route"), { code: "TEST_RUNTIME_ROUTE_MISMATCH" });
+  return runBoundedWorkerImpl(input, runtime);
+}

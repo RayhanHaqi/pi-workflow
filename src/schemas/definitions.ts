@@ -2036,6 +2036,55 @@ export const M6WorkerResultSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m6_worker_result_v0.schema.json" },
 );
 
+const BoundedWorkerTelemetrySchema = StrictObject({
+  worker_invocations: Type.Integer({ minimum: 0, maximum: 1 }),
+  m4_tool_calls: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  model_turns: M5ActualOrNullSchema,
+  provider_requests: M5ActualOrNullSchema,
+  input_tokens: M5ActualOrNullSchema,
+  output_tokens: M5ActualOrNullSchema,
+  cost_microusd: M5ActualOrNullSchema,
+  wall_time_ms: BoundedInteger(Number.MAX_SAFE_INTEGER),
+});
+
+/** Durable pre-provider authority for the constrained pre-M8 worker path. */
+export const BoundedWorkerInvocationSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_bounded_worker_invocation_v0"),
+    invocation_key: Digest(),
+    run_id: RunId(),
+    operation_id: Identifier(),
+    m5_reservation_decision_content_sha256: Digest(),
+    m5_reservation_decision_key: Digest(),
+    task_content_sha256: NullableDigest(),
+    task_graph_sha256: NullableDigest(),
+    plan_approval_sha256: NullableDigest(),
+    input_m3_state_token_content_sha256: Digest(),
+    system_prompt_sha256: Digest(),
+    user_prompt_sha256: Digest(),
+    created_at: NonEmptyString(64),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_bounded_worker_invocation_v0.schema.json" },
+);
+
+/** Durable outcome containing references, observed usage, and no executable authority. */
+export const BoundedWorkerResultSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_bounded_worker_result_v0"),
+    invocation_content_sha256: Digest(),
+    outcome: Type.Union([Type.Literal("COMPLETED"), Type.Literal("BLOCKED")]),
+    first_failure_code: Type.Union([NonEmptyString(128), Type.Null()]),
+    first_failure_stage: Type.Union([NonEmptyString(128), Type.Null()]),
+    m3_evidence_content_sha256: Type.Array(Digest(), { uniqueItems: true, maxItems: 100_000 }),
+    m4_evidence_content_sha256: Type.Array(Digest(), { uniqueItems: true, maxItems: 100_000 }),
+    actual_usage: BoundedWorkerTelemetrySchema,
+    cleanup_certain: Type.Boolean(),
+    advisory_report: Type.Union([Type.String({ maxLength: 8_192 }), Type.Null()]),
+    completed_at: NonEmptyString(64),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_bounded_worker_result_v0.schema.json" },
+);
+
 export const FinalReportSchema = StrictObject(
   {
     ...DocumentFields("pi_gacw_final_report_v0"),
@@ -2103,6 +2152,8 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_m5_control_decision_v0", fileName: "pi_gacw_m5_control_decision_v0.schema.json", schema: M5ControlDecisionSchema },
   { schemaId: "pi_gacw_m6_worker_invocation_v0", fileName: "pi_gacw_m6_worker_invocation_v0.schema.json", schema: M6WorkerInvocationSchema },
   { schemaId: "pi_gacw_m6_worker_result_v0", fileName: "pi_gacw_m6_worker_result_v0.schema.json", schema: M6WorkerResultSchema },
+  { schemaId: "pi_gacw_bounded_worker_invocation_v0", fileName: "pi_gacw_bounded_worker_invocation_v0.schema.json", schema: BoundedWorkerInvocationSchema },
+  { schemaId: "pi_gacw_bounded_worker_result_v0", fileName: "pi_gacw_bounded_worker_result_v0.schema.json", schema: BoundedWorkerResultSchema },
 ] as const;
 
 // The package-private registry is the sole runtime and emission authority. Every
@@ -2194,3 +2245,5 @@ export type M5UsageEvidenceDocument = Static<typeof M5UsageEvidenceSchema>;
 export type M5ControlDecisionDocument = Static<typeof M5ControlDecisionSchema>;
 export type M6WorkerInvocationDocument = Static<typeof M6WorkerInvocationSchema>;
 export type M6WorkerResultDocument = Static<typeof M6WorkerResultSchema>;
+export type BoundedWorkerInvocationDocument = Static<typeof BoundedWorkerInvocationSchema>;
+export type BoundedWorkerResultDocument = Static<typeof BoundedWorkerResultSchema>;

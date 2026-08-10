@@ -1,6 +1,7 @@
 import { canonicalize } from "../canonical-json/index.js";
 import { type Sha256Digest } from "../identity/index.js";
 import { commitTransition, inspectRunStorage } from "../persistence/index.js";
+import { resolveAuthoritativeBoundedExecution } from "../persistence/bounded-worker-authority.js";
 import { publishM5ManagedRecord, putEvidence, readM5ManagedRecords, withRunExclusive } from "../persistence/store.js";
 import { m5PersistenceCheckpoint } from "../persistence/m5-test-hooks.js";
 import {
@@ -79,6 +80,31 @@ function resolvePersistedSources(
   const budget = strict ? uniquePersistedSource(records.budgets, (entry: BudgetDocument) => entry.budget_sha256, policy.budget_sha256) : undefined;
   const routeMap = strict ? uniquePersistedSource(records.routeMaps, (entry: RouteMapDocument) => entry.route_map_sha256, policy.route_map_sha256) : undefined;
   const routeMapApproval = strict ? uniquePersistedSource(records.routeMapApprovals, (entry: RouteMapApprovalDocument) => entry.route_map_approval_sha256, policy.route_map_approval_sha256) : undefined;
+  const planApprovals = strict ? records.planApprovals.filter((entry) => entry.plan_approval_sha256 === policy.plan_approval_sha256) : [];
+  const taskGraphs = strict ? records.taskGraphs.filter((entry) => entry.task_graph_sha256 === policy.task_graph_sha256) : [];
+  const tasks = strict ? records.tasks : [];
+  const resolvedBoundedWorkerResults = records.boundedWorkerResults.filter((result) => {
+    const invocation = uniquePersistedSource(records.boundedWorkerInvocations, (entry) => entry.content_sha256, result.invocation_content_sha256);
+    if (invocation === undefined) return false;
+    const reservation = uniquePersistedSource(records.decisions, (entry) => entry.content_sha256, invocation.m5_reservation_decision_content_sha256);
+    if (reservation === undefined) return false;
+    const reservationState = uniquePersistedSource(records.workflowStates, (entry) => entry.content_sha256, reservation.current_state_content_sha256);
+    if (reservationState === undefined) return false;
+    const approval = uniquePersistedSource(records.approvals, (entry) => entry.content_sha256, policy.baseline_approval_sha256) ?? null;
+    const baseline = approval === null
+      ? uniquePersistedSource(records.baselines, (entry) => entry.content_sha256, policy.baseline_approval_sha256)
+      : uniquePersistedSource(records.baselines, (entry) => entry.content_sha256, approval.baseline_runtime_content_sha256);
+    const stateToken = uniquePersistedSource(records.stateTokens, (entry) => entry.content_sha256, invocation.input_m3_state_token_content_sha256);
+    const task = invocation.task_content_sha256 === null ? null : uniquePersistedSource(records.tasks, (entry) => entry.content_sha256, invocation.task_content_sha256);
+    const taskGraph = invocation.task_graph_sha256 === null ? null : uniquePersistedSource(records.taskGraphs, (entry) => entry.content_sha256, invocation.task_graph_sha256);
+    const plan = invocation.plan_approval_sha256 === null ? null : uniquePersistedSource(records.planApprovals, (entry) => entry.content_sha256, invocation.plan_approval_sha256);
+    if (baseline === undefined || stateToken === undefined ||
+        (invocation.task_content_sha256 !== null && task === undefined) ||
+        (invocation.task_graph_sha256 !== null && taskGraph === undefined) ||
+        (invocation.plan_approval_sha256 !== null && plan === undefined)) return false;
+    return resolveAuthoritativeBoundedExecution({ invocation, result, reservation, reservationState, policy, baseline, approval, stateToken,
+      task: task ?? null, taskGraph: taskGraph ?? null, plan: plan ?? null, classifications: inspection.managedRecordClassifications }).accepted;
+  });
   return {
     ...(contract === undefined ? {} : { contract }),
     ...(budget === undefined ? {} : { budget }),
@@ -86,6 +112,10 @@ function resolvePersistedSources(
     ...(m4CommandCatalog === undefined ? {} : { m4CommandCatalog }),
     ...(routeMap === undefined ? {} : { routeMap }),
     ...(routeMapApproval === undefined ? {} : { routeMapApproval }),
+    ...(planApprovals.length === 0 ? {} : { planApprovals }),
+    ...(taskGraphs.length === 0 ? {} : { taskGraphs }),
+    ...(tasks.length === 0 ? {} : { tasks }),
+    boundedWorkerResults: resolvedBoundedWorkerResults,
     m3StateTokens: records.stateTokens.filter((entry) => inspection.managedRecordClassifications.some((classification) =>
       classification.object.kind === "M3_REPOSITORY_STATE_TOKEN" && classification.object.contentSha256 === entry.content_sha256 && classification.classification === "AUTHORITATIVE_MANAGED_RECORD")),
     m3Postflights: records.postflights.filter((entry) => inspection.managedRecordClassifications.some((classification) =>
@@ -123,6 +153,9 @@ async function publishStrictSourceEvidence(
     [sources.budget, "application/vnd.pi-gacw.budget+json"],
     [sources.routeMap, "application/vnd.pi-gacw.route-map+json"],
     [sources.routeMapApproval, "application/vnd.pi-gacw.route-map-approval+json"],
+    ...(sources.planApprovals ?? []).map((entry) => [entry, "application/vnd.pi-gacw.plan-approval+json"] as const),
+    ...(sources.taskGraphs ?? []).map((entry) => [entry, "application/vnd.pi-gacw.task-graph+json"] as const),
+    ...(sources.tasks ?? []).map((entry) => [entry, "application/vnd.pi-gacw.task+json"] as const),
   ] as const;
   for (const [document, mediaType] of entries) if (document !== undefined) {
     await putEvidence({ ...location, bytes: canonicalBytes(document), mediaType });
@@ -143,6 +176,14 @@ function assertSuppliedStrictSourcesArePersisted(
       throw controlError("M5_AUTHORITY_INCOMPLETE", `${field} is not an exact durably reconstructed predecessor`);
     }
   }
+  const exactArray = <T extends { readonly content_sha256: string }>(label: string, suppliedValues: readonly T[] | undefined, durableValues: readonly T[] | undefined): void => {
+    if (suppliedValues === undefined) return;
+    const durable = new Map((durableValues ?? []).map((entry) => [entry.content_sha256, canonicalize(entry)]));
+    if (suppliedValues.some((entry) => durable.get(entry.content_sha256) !== canonicalize(entry))) throw controlError("M5_AUTHORITY_INCOMPLETE", `${label} is not an exact durably reconstructed predecessor`);
+  };
+  exactArray("plan approval", supplied.planApprovals, persisted.planApprovals);
+  exactArray("task graph", supplied.taskGraphs, persisted.taskGraphs);
+  exactArray("task", supplied.tasks, persisted.tasks);
 }
 
 function effectivePersistedSources(
@@ -187,6 +228,7 @@ function assertSuppliedM3AuthorityIsPersisted(
       throw controlError("M5_AUTHORITY_INCOMPLETE", `${label} is not an exact persisted authoritative predecessor`);
     }
   };
+  requireExact("bounded worker-result authority", supplied?.boundedWorkerResults, persisted.boundedWorkerResults);
   requireExact("M3 state-token authority", supplied?.m3StateTokens, persisted.m3StateTokens);
   requireExact("M3 postflight authority", supplied?.m3Postflights, persisted.m3Postflights);
 }

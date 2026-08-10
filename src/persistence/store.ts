@@ -40,6 +40,8 @@ import {
   type M5ControlPolicyDocument,
   type M5UsageEvidenceDocument,
   type BudgetDocument,
+  type BoundedWorkerInvocationDocument,
+  type BoundedWorkerResultDocument,
   type M6WorkerInvocationDocument,
   type M6WorkerResultDocument,
   type PersistedStatePointerDocument,
@@ -49,6 +51,9 @@ import {
   type RouteMapApprovalDocument,
   type RouteMapDocument,
   type ContractDocument,
+  type PlanApprovalDocument,
+  type TaskDocument,
+  type TaskGraphDocument,
   type SchemaId,
   type StateTransitionCommitDocument,
   type TransitionEvent,
@@ -59,6 +64,7 @@ import { classifyManagedAuthority } from "./managed-authority.js";
 import { classifyM4Authority } from "./m4-authority.js";
 import { classifyM5Authority } from "./m5-authority.js";
 import { classifyM6Authority } from "./m6-authority.js";
+import { classifyBoundedWorkerAuthority, resolveAuthoritativeBoundedExecution } from "./bounded-worker-authority.js";
 import {
   assertPrivateDirectory,
   assertRegularPrivateFile,
@@ -128,6 +134,8 @@ interface RunLayout {
   readonly m5ControlDecisionDirectory: string;
   readonly m6WorkerInvocationDirectory: string;
   readonly m6WorkerResultDirectory: string;
+  readonly boundedWorkerInvocationDirectory: string;
+  readonly boundedWorkerResultDirectory: string;
   readonly commitsDirectory: string;
 }
 
@@ -166,6 +174,8 @@ interface JsonKindDefinition {
     | "m5ControlDecisionDirectory"
     | "m6WorkerInvocationDirectory"
     | "m6WorkerResultDirectory"
+    | "boundedWorkerInvocationDirectory"
+    | "boundedWorkerResultDirectory"
     | "commitsDirectory"
   >;
 }
@@ -200,6 +210,8 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M5_CONTROL_DECISION", schemaId: "pi_gacw_m5_control_decision_v0", directory: "m5ControlDecisionDirectory" },
   { kind: "M6_WORKER_INVOCATION", schemaId: "pi_gacw_m6_worker_invocation_v0", directory: "m6WorkerInvocationDirectory" },
   { kind: "M6_WORKER_RESULT", schemaId: "pi_gacw_m6_worker_result_v0", directory: "m6WorkerResultDirectory" },
+  { kind: "BOUNDED_WORKER_INVOCATION", schemaId: "pi_gacw_bounded_worker_invocation_v0", directory: "boundedWorkerInvocationDirectory" },
+  { kind: "BOUNDED_WORKER_RESULT", schemaId: "pi_gacw_bounded_worker_result_v0", directory: "boundedWorkerResultDirectory" },
 ]);
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
@@ -355,6 +367,8 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     m5ControlDecisionDirectory: join(recordsDirectory, "m5-control-decisions"),
     m6WorkerInvocationDirectory: join(recordsDirectory, "m6-worker-invocations"),
     m6WorkerResultDirectory: join(recordsDirectory, "m6-worker-results"),
+    boundedWorkerInvocationDirectory: join(recordsDirectory, "bounded-worker-invocations"),
+    boundedWorkerResultDirectory: join(recordsDirectory, "bounded-worker-results"),
     commitsDirectory: join(runDirectory, "commits"),
   };
 }
@@ -594,6 +608,8 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.m5ControlDecisionDirectory);
   await ensurePrivateDirectory(layout.m6WorkerInvocationDirectory);
   await ensurePrivateDirectory(layout.m6WorkerResultDirectory);
+  await ensurePrivateDirectory(layout.boundedWorkerInvocationDirectory);
+  await ensurePrivateDirectory(layout.boundedWorkerResultDirectory);
   await ensurePrivateDirectory(layout.commitsDirectory);
 }
 
@@ -636,6 +652,8 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
     layout.m5ControlDecisionDirectory,
     layout.m6WorkerInvocationDirectory,
     layout.m6WorkerResultDirectory,
+    layout.boundedWorkerInvocationDirectory,
+    layout.boundedWorkerResultDirectory,
     layout.commitsDirectory,
   ]) {
     await assertPrivateDirectory(directory);
@@ -718,7 +736,7 @@ async function readRawEvidence(layout: RunLayout, evidenceSha256: string): Promi
 }
 
 interface M5SourceEvidenceReference {
-  readonly value: ContractDocument | BudgetDocument | RouteMapDocument | RouteMapApprovalDocument;
+  readonly value: ContractDocument | BudgetDocument | RouteMapDocument | RouteMapApprovalDocument | PlanApprovalDocument | TaskGraphDocument | TaskDocument;
   readonly metadataRelativePath: string;
   readonly evidenceRelativePath: string;
 }
@@ -728,6 +746,9 @@ interface M5SourceCandidates {
   readonly budgets: readonly BudgetDocument[];
   readonly routeMaps: readonly RouteMapDocument[];
   readonly routeMapApprovals: readonly RouteMapApprovalDocument[];
+  readonly planApprovals: readonly PlanApprovalDocument[];
+  readonly taskGraphs: readonly TaskGraphDocument[];
+  readonly tasks: readonly TaskDocument[];
   readonly references: readonly M5SourceEvidenceReference[];
 }
 
@@ -744,6 +765,9 @@ async function readM5SourceCandidates(
     budgets: new Map<string, BudgetDocument>(),
     routeMaps: new Map<string, RouteMapDocument>(),
     routeMapApprovals: new Map<string, RouteMapApprovalDocument>(),
+    planApprovals: new Map<string, PlanApprovalDocument>(),
+    taskGraphs: new Map<string, TaskGraphDocument>(),
+    tasks: new Map<string, TaskDocument>(),
   };
   const references: M5SourceEvidenceReference[] = [];
   const parse = async <T extends Record<string, unknown>>(entry: InspectedObject, schemaId: SchemaId): Promise<T | undefined> => {
@@ -776,6 +800,15 @@ async function readM5SourceCandidates(
     } else if (metadata.media_type === "application/vnd.pi-gacw.route-map-approval+json") {
       const value = await parse<RouteMapApprovalDocument>(evidence, "pi_gacw_route_map_approval_v0");
       if (value !== undefined) { candidates.routeMapApprovals.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    } else if (metadata.media_type === "application/vnd.pi-gacw.plan-approval+json") {
+      const value = await parse<PlanApprovalDocument>(evidence, "pi_gacw_plan_approval_v0");
+      if (value !== undefined) { candidates.planApprovals.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    } else if (metadata.media_type === "application/vnd.pi-gacw.task-graph+json") {
+      const value = await parse<TaskGraphDocument>(evidence, "pi_gacw_task_graph_v0");
+      if (value !== undefined) { candidates.taskGraphs.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
+    } else if (metadata.media_type === "application/vnd.pi-gacw.task+json") {
+      const value = await parse<TaskDocument>(evidence, "pi_gacw_task_v0");
+      if (value !== undefined) { candidates.tasks.set(value.content_sha256, value); references.push({ value, metadataRelativePath: object.relativePath, evidenceRelativePath: evidence.relativePath }); }
     }
   }
   return {
@@ -783,6 +816,9 @@ async function readM5SourceCandidates(
     budgets: sortSourceCandidates(candidates.budgets),
     routeMaps: sortSourceCandidates(candidates.routeMaps),
     routeMapApprovals: sortSourceCandidates(candidates.routeMapApprovals),
+    planApprovals: sortSourceCandidates(candidates.planApprovals),
+    taskGraphs: sortSourceCandidates(candidates.taskGraphs),
+    tasks: sortSourceCandidates(candidates.tasks),
     references: references.sort((left, right) => compareText(left.metadataRelativePath, right.metadataRelativePath)),
   };
 }
@@ -797,12 +833,62 @@ function selectM5Sources(policy: M5ControlPolicyDocument, candidates: M5SourceCa
   const budget = selectM5Source(candidates.budgets, (value) => value.budget_sha256, policy.budget_sha256);
   const routeMap = selectM5Source(candidates.routeMaps, (value) => value.route_map_sha256, policy.route_map_sha256);
   const routeMapApproval = selectM5Source(candidates.routeMapApprovals, (value) => value.route_map_approval_sha256, policy.route_map_approval_sha256);
+  const planApproval = candidates.planApprovals.filter((value) => value.plan_approval_sha256 === policy.plan_approval_sha256);
+  const taskGraph = candidates.taskGraphs.filter((value) => value.task_graph_sha256 === policy.task_graph_sha256);
   return {
     ...(contract === undefined ? {} : { contract }),
     ...(budget === undefined ? {} : { budget }),
     ...(routeMap === undefined ? {} : { routeMap }),
     ...(routeMapApproval === undefined ? {} : { routeMapApproval }),
+    ...(planApproval.length === 0 ? {} : { planApprovals: planApproval }),
+    ...(taskGraph.length === 0 ? {} : { taskGraphs: taskGraph }),
+    ...(candidates.tasks.length === 0 ? {} : { tasks: candidates.tasks }),
   };
+}
+
+function uniqueSourceByContent<T extends { readonly content_sha256: string }>(values: readonly T[], digest: string): T | undefined {
+  const matches = values.filter((value) => value.content_sha256 === digest);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** M5 source reconstruction iterates the sole bounded-execution resolver; it does not classify results as execution authority itself. */
+function resolvedBoundedWorkerResultsForM5(
+  results: ReadonlyMap<string, BoundedWorkerResultDocument>,
+  invocations: ReadonlyMap<string, BoundedWorkerInvocationDocument>,
+  decisions: ReadonlyMap<string, M5ControlDecisionDocument>,
+  policies: ReadonlyMap<string, M5ControlPolicyDocument>,
+  baselines: ReadonlyMap<string, M3BaselineRuntimeDocument>,
+  approvals: ReadonlyMap<string, M3BaselineApprovalRuntimeDocument>,
+  tokens: ReadonlyMap<string, M3RepositoryStateTokenDocument>,
+  workflowStates: ReadonlyMap<string, WorkflowState>,
+  candidates: M5SourceCandidates,
+  classifications: readonly ManagedRecordClassification[],
+): readonly BoundedWorkerResultDocument[] {
+  const accepted: BoundedWorkerResultDocument[] = [];
+  for (const result of results.values()) {
+    const invocation = invocations.get(result.invocation_content_sha256);
+    if (invocation === undefined) continue;
+    const reservation = decisions.get(invocation.m5_reservation_decision_content_sha256);
+    if (reservation === undefined) continue;
+    const policy = policies.get(reservation.policy_content_sha256);
+    if (policy === undefined) continue;
+    const approval = approvals.get(policy.baseline_approval_sha256) ?? null;
+    const baseline = approval === null
+      ? baselines.get(policy.baseline_approval_sha256)
+      : baselines.get(approval.baseline_runtime_content_sha256);
+    const token = tokens.get(invocation.input_m3_state_token_content_sha256);
+    const reservationState = workflowStates.get(reservation.current_state_content_sha256);
+    const task = invocation.task_content_sha256 === null ? null : uniqueSourceByContent(candidates.tasks, invocation.task_content_sha256);
+    const taskGraph = invocation.task_graph_sha256 === null ? null : uniqueSourceByContent(candidates.taskGraphs, invocation.task_graph_sha256);
+    const plan = invocation.plan_approval_sha256 === null ? null : uniqueSourceByContent(candidates.planApprovals, invocation.plan_approval_sha256);
+    if (baseline === undefined || token === undefined || reservationState === undefined ||
+        (invocation.task_content_sha256 !== null && task === undefined) ||
+        (invocation.task_graph_sha256 !== null && taskGraph === undefined) ||
+        (invocation.plan_approval_sha256 !== null && plan === undefined)) continue;
+    if (resolveAuthoritativeBoundedExecution({ invocation, result, reservation, reservationState, policy, baseline, approval, stateToken: token,
+      task: task ?? null, taskGraph: taskGraph ?? null, plan: plan ?? null, classifications }).accepted) accepted.push(result);
+  }
+  return accepted.sort((left, right) => compareText(left.content_sha256, right.content_sha256));
 }
 
 function sourceReferenceMatchesPolicy(reference: M5SourceEvidenceReference, policy: M5ControlPolicyDocument): boolean {
@@ -810,7 +896,10 @@ function sourceReferenceMatchesPolicy(reference: M5SourceEvidenceReference, poli
   if (value.schema_id === "pi_gacw_contract_v0") return value.contract_sha256 === policy.contract_sha256;
   if (value.schema_id === "pi_gacw_budget_v0") return value.budget_sha256 === policy.budget_sha256;
   if (value.schema_id === "pi_gacw_route_map_v0") return value.route_map_sha256 === policy.route_map_sha256;
-  return value.route_map_approval_sha256 === policy.route_map_approval_sha256;
+  if (value.schema_id === "pi_gacw_route_map_approval_v0") return value.route_map_approval_sha256 === policy.route_map_approval_sha256;
+  if (value.schema_id === "pi_gacw_plan_approval_v0") return value.plan_approval_sha256 === policy.plan_approval_sha256;
+  if (value.schema_id === "pi_gacw_task_graph_v0") return value.task_graph_sha256 === policy.task_graph_sha256;
+  return value.task_sha256 === policy.objective_sha256 || policy.task_graph_sha256 !== null;
 }
 
 async function adoptedM5SourceObjectPaths(
@@ -1351,6 +1440,8 @@ async function scanLayout(
     "m5-control-decisions",
     "m6-worker-invocations",
     "m6-worker-results",
+    "bounded-worker-invocations",
+    "bounded-worker-results",
   ].sort();
   const recordChildren = (await readdir(layout.recordsDirectory)).sort();
   if (canonicalize(recordChildren) !== canonicalize(expectedRecordNames)) {
@@ -1418,8 +1509,9 @@ const M4_MANAGED_KINDS = new Set<StoredObjectKind>([
 
 const M5_MANAGED_KINDS = new Set<StoredObjectKind>(["M5_CONTROL_POLICY", "M5_USAGE_EVIDENCE", "M5_CONTROL_DECISION"]);
 const M6_MANAGED_KINDS = new Set<StoredObjectKind>(["M6_WORKER_INVOCATION", "M6_WORKER_RESULT"]);
+const BOUNDED_WORKER_MANAGED_KINDS = new Set<StoredObjectKind>(["BOUNDED_WORKER_INVOCATION", "BOUNDED_WORKER_RESULT"]);
 
-const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS, ...M6_MANAGED_KINDS]);
+const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS, ...M6_MANAGED_KINDS, ...BOUNDED_WORKER_MANAGED_KINDS]);
 
 async function terminalAuthorityManagedObjects(
   layout: RunLayout,
@@ -1474,6 +1566,8 @@ async function classifyManagedRecords(
   const m5Decisions = new Map<string, M5ControlDecisionDocument>();
   const m6Invocations = new Map<string, M6WorkerInvocationDocument>();
   const m6Results = new Map<string, M6WorkerResultDocument>();
+  const boundedInvocations = new Map<string, BoundedWorkerInvocationDocument>();
+  const boundedResults = new Map<string, BoundedWorkerResultDocument>();
   const transitionEvents = new Map<string, TransitionEvent>();
   const transitionCommits = new Map<string, StateTransitionCommitDocument>();
   for (const object of objects) {
@@ -1507,6 +1601,8 @@ async function classifyManagedRecords(
     else if (object.kind === "M5_CONTROL_DECISION") m5Decisions.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M6_WORKER_INVOCATION") m6Invocations.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M6_WORKER_RESULT") m6Results.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "BOUNDED_WORKER_INVOCATION") boundedInvocations.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "BOUNDED_WORKER_RESULT") boundedResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
       try {
         const bytes = await readRawEvidence(layout, object.contentSha256);
@@ -1635,23 +1731,50 @@ async function classifyManagedRecords(
   const validPreProviderM4 = (kind: StoredObjectKind, digest: string): boolean => authoritative(kind, digest) || exactOwnerApprovedM4.has(`${kind}:${digest}`);
   const authoritativeM4Policies = new Map([...policies].filter(([digest]) => validPreProviderM4("M4_TOOL_POLICY", digest)));
   const authoritativeM4Catalogs = new Map([...catalogs].filter(([digest]) => validPreProviderM4("M4_COMMAND_CATALOG", digest)));
+  const bounded = classifyBoundedWorkerAuthority({
+    runId: basename(layout.runDirectory),
+    objects: objects.filter((object) => BOUNDED_WORKER_MANAGED_KINDS.has(object.kind)),
+    invocations: boundedInvocations,
+    results: boundedResults,
+  });
   const sourceCandidates = await readM5SourceCandidates(layout, new Map(objects.map((object) => [object.relativePath, object])));
   const sourcePolicies = [...m5Policies.values()].filter((entry) => entry.run_id === basename(layout.runDirectory));
   const persistedM5Sources = sourcePolicies.length === 1 && sourcePolicies[0]!.production_authority === "OWNER_APPROVED"
     ? selectM5Sources(sourcePolicies[0]!, sourceCandidates) : {};
-  const m5 = classifyM5Authority({
-    runId: basename(layout.runDirectory), workflowState: graph.currentState, workflowStates, objects, priorClassifications: [...m3, ...m4],
+  const commonM5Sources = {
+    ...persistedM5Sources,
+    m4CommandResults: [...commandResults.values()].filter((entry) => authoritative("M4_COMMAND_RESULT", entry.content_sha256)),
+    m3StateTokens: [...tokens.values()].filter((entry) => authoritative("M3_REPOSITORY_STATE_TOKEN", entry.content_sha256)),
+    m3Postflights: [...postflights.values()].filter((entry) => authoritative("M3_POSTFLIGHT", entry.content_sha256)),
+    workflowStates: [...workflowStates.values()],
+    transitionEvents: [...transitionEvents.values()].filter((entry) => objects.some((object) => object.kind === "TRANSITION_EVENT" && object.contentSha256 === entry.content_sha256 && graph.reachable.has(object.relativePath))),
+    transitionCommits: [...transitionCommits.values()].filter((entry) => objects.some((object) => object.kind === "TRANSITION_COMMIT" && object.contentSha256 === entry.content_sha256 && graph.reachable.has(object.relativePath))),
+  };
+  const classifyM5WithResolvedBounded = (resolved: readonly BoundedWorkerResultDocument[]): readonly ManagedRecordClassification[] => classifyM5Authority({
+    runId: basename(layout.runDirectory), workflowState: graph.currentState, workflowStates, objects, priorClassifications: [...m3, ...m4, ...bounded],
     policies: m5Policies, usage: m5Usage, decisions: m5Decisions, reducerPolicies, m4Policies: authoritativeM4Policies, m4Catalogs: authoritativeM4Catalogs, reachableRawEvidence, typedTransitionDecisionDigests, runAuthorityValidatedPolicyDigests, committedWorkflowStateDigests,
-    authoritativeSources: {
-      ...persistedM5Sources,
-      m4CommandResults: [...commandResults.values()].filter((entry) => authoritative("M4_COMMAND_RESULT", entry.content_sha256)),
-      m3StateTokens: [...tokens.values()].filter((entry) => authoritative("M3_REPOSITORY_STATE_TOKEN", entry.content_sha256)),
-      m3Postflights: [...postflights.values()].filter((entry) => authoritative("M3_POSTFLIGHT", entry.content_sha256)),
-      workflowStates: [...workflowStates.values()],
-      transitionEvents: [...transitionEvents.values()].filter((entry) => objects.some((object) => object.kind === "TRANSITION_EVENT" && object.contentSha256 === entry.content_sha256 && graph.reachable.has(object.relativePath))),
-      transitionCommits: [...transitionCommits.values()].filter((entry) => objects.some((object) => object.kind === "TRANSITION_COMMIT" && object.contentSha256 === entry.content_sha256 && graph.reachable.has(object.relativePath))),
-    },
+    authoritativeSources: { ...commonM5Sources, boundedWorkerResults: resolved },
   });
+  // Start with no bounded-worker M5 source. Each bounded result enters the next
+  // M5 reconstruction pass only after the sole cross-layer resolver accepted it.
+  let resolvedBoundedWorkerResults: readonly BoundedWorkerResultDocument[] = [];
+  let m5: readonly ManagedRecordClassification[] = [];
+  let resolutionSettled = false;
+  for (let iteration = 0; iteration <= boundedResults.size; iteration += 1) {
+    m5 = classifyM5WithResolvedBounded(resolvedBoundedWorkerResults);
+    const next = resolvedBoundedWorkerResultsForM5(boundedResults, boundedInvocations, m5Decisions, m5Policies, baselines, approvals, tokens, workflowStates, sourceCandidates, [...m3, ...m4, ...bounded, ...m5]);
+    if (next.length === resolvedBoundedWorkerResults.length && next.every((entry, index) => entry.content_sha256 === resolvedBoundedWorkerResults[index]?.content_sha256)) {
+      resolvedBoundedWorkerResults = next;
+      resolutionSettled = true;
+      break;
+    }
+    resolvedBoundedWorkerResults = next;
+  }
+  if (!resolutionSettled) {
+    // A non-convergent reconstruction has no accepted bounded execution source.
+    resolvedBoundedWorkerResults = [];
+    m5 = classifyM5WithResolvedBounded(resolvedBoundedWorkerResults);
+  }
   const rootedByM5 = new Set<string>();
   for (const classification of m5) {
     if (classification.object.kind !== "M5_CONTROL_DECISION" || classification.classification !== "AUTHORITATIVE_MANAGED_RECORD") continue;
@@ -1674,7 +1797,7 @@ async function classifyManagedRecords(
     invocations: m6Invocations,
     results: m6Results,
   });
-  return [...m3.map(promote), ...m4.map(promote), ...m5, ...m6].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
+  return [...m3.map(promote), ...m4.map(promote), ...m5, ...m6, ...bounded].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
 }
 
 function blockedInspection(
@@ -1917,12 +2040,20 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   readonly decisions: readonly M5ControlDecisionDocument[];
   readonly toolPolicies: readonly M4ScopedToolPolicyDocument[];
   readonly commandCatalogs: readonly M4CommandCatalogDocument[];
+  readonly baselines: readonly M3BaselineRuntimeDocument[];
+  readonly approvals: readonly M3BaselineApprovalRuntimeDocument[];
   readonly stateTokens: readonly M3RepositoryStateTokenDocument[];
   readonly postflights: readonly M3PostflightDocument[];
   readonly contracts: readonly ContractDocument[];
   readonly budgets: readonly BudgetDocument[];
   readonly routeMaps: readonly RouteMapDocument[];
   readonly routeMapApprovals: readonly RouteMapApprovalDocument[];
+  readonly planApprovals: readonly PlanApprovalDocument[];
+  readonly taskGraphs: readonly TaskGraphDocument[];
+  readonly tasks: readonly TaskDocument[];
+  readonly workflowStates: readonly WorkflowState[];
+  readonly boundedWorkerInvocations: readonly BoundedWorkerInvocationDocument[];
+  readonly boundedWorkerResults: readonly BoundedWorkerResultDocument[];
 }> {
   const layout = assertLocation(input);
   await assertExistingLayout(layout);
@@ -1941,12 +2072,20 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
     decisions: await load<M5ControlDecisionDocument>("M5_CONTROL_DECISION"),
     toolPolicies: await load<M4ScopedToolPolicyDocument>("M4_TOOL_POLICY"),
     commandCatalogs: await load<M4CommandCatalogDocument>("M4_COMMAND_CATALOG"),
+    baselines: await load<M3BaselineRuntimeDocument>("M3_BASELINE"),
+    approvals: await load<M3BaselineApprovalRuntimeDocument>("M3_BASELINE_APPROVAL"),
     stateTokens: await load<M3RepositoryStateTokenDocument>("M3_REPOSITORY_STATE_TOKEN"),
     postflights: await load<M3PostflightDocument>("M3_POSTFLIGHT"),
     contracts: sourceCandidates.contracts,
     budgets: sourceCandidates.budgets,
     routeMaps: sourceCandidates.routeMaps,
     routeMapApprovals: sourceCandidates.routeMapApprovals,
+    planApprovals: sourceCandidates.planApprovals,
+    taskGraphs: sourceCandidates.taskGraphs,
+    tasks: sourceCandidates.tasks,
+    workflowStates: await load<WorkflowState>("WORKFLOW_STATE"),
+    boundedWorkerInvocations: await load<BoundedWorkerInvocationDocument>("BOUNDED_WORKER_INVOCATION"),
+    boundedWorkerResults: await load<BoundedWorkerResultDocument>("BOUNDED_WORKER_RESULT"),
   });
 }
 
@@ -2020,6 +2159,91 @@ export async function readM6WorkerRecords(input: RunStorageLocation): Promise<{
   return detachedFrozen({
     invocations: await load<M6WorkerInvocationDocument>("M6_WORKER_INVOCATION"),
     results: await load<M6WorkerResultDocument>("M6_WORKER_RESULT"),
+  });
+}
+
+export type BoundedWorkerRecordKind = "BOUNDED_WORKER_INVOCATION" | "BOUNDED_WORKER_RESULT";
+type BoundedWorkerPublicationInput = RunStorageLocation & (
+  | { readonly kind: "BOUNDED_WORKER_INVOCATION"; readonly document: BoundedWorkerInvocationDocument }
+  | { readonly kind: "BOUNDED_WORKER_RESULT"; readonly document: BoundedWorkerResultDocument }
+);
+
+async function assertPublishedBoundedWorkerAuthority(input: BoundedWorkerPublicationInput): Promise<void> {
+  const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+  const classification = inspection.managedRecordClassifications.find((entry) =>
+    entry.object.kind === input.kind && entry.object.contentSha256 === input.document.content_sha256,
+  );
+  if (inspection.status !== "HEALTHY" || classification?.classification !== "AUTHORITATIVE_MANAGED_RECORD") {
+    throw new StateStoreError("BOUNDED_WORKER_RECORD_NOT_AUTHORITATIVE", `${input.kind} publication was not authoritative after reread`);
+  }
+}
+
+/** Package-internal durable boundary for exactly the two pre-M8 bounded-worker records. */
+export async function publishBoundedWorkerRecord(input: BoundedWorkerPublicationInput): Promise<{ readonly reused: boolean }> {
+  assertRecord(input, "bounded worker publication input");
+  assertExactKeys(input, ["stateRoot", "runId", "kind", "document"], "bounded worker publication input");
+  if (!BOUNDED_WORKER_MANAGED_KINDS.has(input.kind)) throw new StateStoreError("INVALID_ARGUMENT", "Unknown bounded worker record kind");
+  if (input.kind === "BOUNDED_WORKER_INVOCATION") {
+    assertDocumentValid("pi_gacw_bounded_worker_invocation_v0", input.document);
+    if (input.document.run_id !== input.runId) throw new StateStoreError("RUN_ID_MISMATCH", "bounded invocation belongs to another run");
+  } else assertDocumentValid("pi_gacw_bounded_worker_result_v0", input.document);
+  return withRunExclusive(input, async () => {
+    const layout = assertLocation(input);
+    const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+    requireUsableInspection(inspection);
+    if (inspection.workflowState.phase === "PASS" || inspection.workflowState.phase === "BLOCKED") {
+      throw new StateStoreError("TERMINAL_STATE_IMMUTABLE", "Cannot publish bounded worker authority to a terminal run");
+    }
+    const existing = await readBoundedWorkerRecords(input);
+    if (input.kind === "BOUNDED_WORKER_INVOCATION") {
+      const document = input.document;
+      const same = existing.invocations.find((entry) => entry.invocation_key === document.invocation_key);
+      if (same !== undefined) {
+        if (same.content_sha256 !== document.content_sha256 || canonicalize(same) !== canonicalize(document)) {
+          throw new StateStoreError("BOUNDED_WORKER_RECORD_CONFLICT", "A different bounded invocation owns this key");
+        }
+        return { reused: true };
+      }
+    } else {
+      const document = input.document;
+      const same = existing.results.find((entry) => entry.invocation_content_sha256 === document.invocation_content_sha256);
+      if (same !== undefined) {
+        if (same.content_sha256 !== document.content_sha256 || canonicalize(same) !== canonicalize(document)) {
+          throw new StateStoreError("BOUNDED_WORKER_RECORD_CONFLICT", "A different bounded result owns this invocation");
+        }
+        return { reused: true };
+      }
+      const invocation = existing.invocations.find((entry) => entry.content_sha256 === document.invocation_content_sha256);
+      const invocationAuthoritative = invocation !== undefined && inspection.managedRecordClassifications.some((entry) =>
+        entry.object.kind === "BOUNDED_WORKER_INVOCATION" && entry.object.contentSha256 === document.invocation_content_sha256 &&
+        entry.classification === "AUTHORITATIVE_MANAGED_RECORD",
+      );
+      if (!invocationAuthoritative) throw new StateStoreError("BOUNDED_WORKER_INVOCATION_MISSING", "bounded result lacks its exact invocation");
+    }
+    const publication = await publishJsonDocument(layout, input.kind, input.document);
+    await readJsonDocument(layout, input.kind, input.document.content_sha256);
+    await assertPublishedBoundedWorkerAuthority(input);
+    return detachedFrozen(publication);
+  });
+}
+
+export async function readBoundedWorkerRecords(input: RunStorageLocation): Promise<{
+  readonly invocations: readonly BoundedWorkerInvocationDocument[];
+  readonly results: readonly BoundedWorkerResultDocument[];
+}> {
+  const layout = assertLocation(input);
+  await assertExistingLayout(layout);
+  const load = async <T extends Record<string, unknown>>(kind: JsonStoredObjectKind): Promise<T[]> => {
+    const definition = JSON_KIND_BY_NAME.get(kind);
+    if (definition === undefined) throw new StateStoreError("UNKNOWN_OBJECT_KIND", kind);
+    const names = (await readdir(layout[definition.directory])).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
+    const values: T[] = [];
+    for (const name of names) values.push(await readJsonDocument<T>(layout, kind, `sha256:${name.slice(0, -5)}`));
+    return values;
+  };
+  return detachedFrozen({
+    invocations: await load<BoundedWorkerInvocationDocument>("BOUNDED_WORKER_INVOCATION"),
+    results: await load<BoundedWorkerResultDocument>("BOUNDED_WORKER_RESULT"),
   });
 }
 

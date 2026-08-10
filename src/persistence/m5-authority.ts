@@ -114,8 +114,8 @@ function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5Contr
   if (value.transition_event !== null && value.predicted_next_state_content_sha256 === null) return "Transition prediction is absent";
   if (value.outcome === "PASS" && value.predicted_next_state_content_sha256 === null) return "PASS has no predicted committed terminal state";
   if ((value.outcome === "BLOCK") !== (value.transition_event?.event_type === "BLOCK")) return "Block outcome and transition event differ";
-  if (value.intent === "SELECT_ROUTE" && value.transition_event !== null && (value.transition_event.event_type !== "SELECT_ROUTE" || value.transition_event.payload["execution_mode"] !== value.selected_route)) return "Route transition payload is false";
-  if (value.intent === "VALIDATE_CONTRACT" && value.transition_event !== null && value.transition_event.event_type !== "VALIDATE_CONTRACT") return "Contract transition event is false";
+  if (value.outcome !== "BLOCK" && value.intent === "SELECT_ROUTE" && value.transition_event !== null && (value.transition_event.event_type !== "SELECT_ROUTE" || value.transition_event.payload["execution_mode"] !== value.selected_route)) return "Route transition payload is false";
+  if (value.outcome !== "BLOCK" && value.intent === "VALIDATE_CONTRACT" && value.transition_event !== null && value.transition_event.event_type !== "VALIDATE_CONTRACT") return "Contract transition event is false";
   const reservationIdentity = value.reservation === null ? null : {
     logical_role: value.reservation.logical_role, purpose: value.reservation.purpose, future_operation_id: value.reservation.future_operation_id ?? null,
     reserved_state_content_sha256: value.reservation.reserved_state_content_sha256 ?? null, reserved_policy_content_sha256: value.reservation.reserved_policy_content_sha256 ?? null,
@@ -127,6 +127,14 @@ function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5Contr
     prior: value.prior_relevant_decision_content_sha256 });
   if (value.decision_key !== expectedKey) return "Decision key differs from exact authority projection";
   return null;
+}
+
+function boundedStaticPreM8(policy: M5ControlPolicyDocument): boolean {
+  const worker = policy.limits.find((entry) => entry.dimension === "WORKER_INVOCATION");
+  const model = policy.limits.find((entry) => entry.dimension === "MODEL_TURN");
+  return worker?.hard_limit === policy.route_facts.leaf_count + (policy.requested_mode === "ROUTED_DAG" ? 2 : 0) &&
+    model?.enforcement_class === "SOFT_ENFORCEABLE" && model.hard_limit === null &&
+    policy.role_reservation_envelopes.every((entry) => entry.logical_role !== "SOL_REPLAN");
 }
 
 function deterministicRecalculationError(
@@ -156,6 +164,7 @@ function deterministicRecalculationError(
     ...(value.progress.current_failure_signature === null ? {} : { currentFailureSignature: value.progress.current_failure_signature as Sha256Digest }),
   } : undefined;
   const persistedSources: M5AuthoritativeSources = {
+    ...(boundedStaticPreM8(policy) ? { boundedStaticPreM8: true } : {}),
     ...(input.m4Policies?.get(policy.tool_policy_content_sha256) === undefined ? {} : { m4ToolPolicy: input.m4Policies.get(policy.tool_policy_content_sha256)! }),
     ...(input.m4Catalogs?.get(policy.command_catalog_content_sha256) === undefined ? {} : { m4CommandCatalog: input.m4Catalogs.get(policy.command_catalog_content_sha256)! }),
     ...(input.authoritativeSources ?? {}),
@@ -164,7 +173,12 @@ function deterministicRecalculationError(
     ...value.obligation_evidence.map((entry) => entry.evidence_content_sha256),
     ...value.progress.evidence_content_sha256,
   ]);
+  const requestedBoundedResultIds = new Set([...value.usage_evidence_content_sha256]
+    .map((digest) => input.usage.get(digest))
+    .filter((entry): entry is M5UsageEvidenceDocument => entry !== undefined && entry.source_kind === "BOUNDED_WORKER_RESULT")
+    .map((entry) => entry.source_record_content_sha256));
   const requestSources: M5AuthoritativeSources = {
+    ...(persistedSources.boundedStaticPreM8 === true ? { boundedStaticPreM8: true } : {}),
     ...(persistedSources.contract === undefined ? {} : { contract: persistedSources.contract }),
     ...(persistedSources.budget === undefined ? {} : { budget: persistedSources.budget }),
     ...(persistedSources.m4ToolPolicy === undefined ? {} : { m4ToolPolicy: persistedSources.m4ToolPolicy }),
@@ -172,8 +186,12 @@ function deterministicRecalculationError(
     ...(persistedSources.routeMap === undefined ? {} : { routeMap: persistedSources.routeMap }),
     ...(persistedSources.routeMapApproval === undefined ? {} : { routeMapApproval: persistedSources.routeMapApproval }),
     m4CommandResults: (persistedSources.m4CommandResults ?? []).filter((entry) => requestedM4ResultIds.has(entry.content_sha256)),
+    boundedWorkerResults: (persistedSources.boundedWorkerResults ?? []).filter((entry) => requestedBoundedResultIds.has(entry.content_sha256)),
     m3StateTokens: persistedSources.m3StateTokens ?? [],
     m3Postflights: persistedSources.m3Postflights ?? [],
+    planApprovals: persistedSources.planApprovals ?? [],
+    taskGraphs: persistedSources.taskGraphs ?? [],
+    tasks: persistedSources.tasks ?? [],
   };
   const requestBase = {
     intent: value.intent,
@@ -267,16 +285,18 @@ export function classifyM5Authority(input: M5AuthorityInput): readonly ManagedRe
     const sourceClasses = sourceObjects.map((candidate) => predecessor.get(key(candidate.kind, candidate.contentSha256)));
     const expectedLayer: Readonly<Partial<Record<StoredObjectKind, M5UsageEvidenceDocument["source_layer"]>>> = {
       WORKFLOW_STATE: "M1", TRANSITION_EVENT: "M1", TRANSITION_COMMIT: "M2", M3_REPOSITORY_STATE_TOKEN: "M3", M3_POSTFLIGHT: "M3",
-      M4_TOOL_POLICY: "M4", M4_COMMAND_CATALOG: "M4", M4_COMMAND_RESULT: "M4", M5_CONTROL_POLICY: "M5", M5_CONTROL_DECISION: "M5",
+      M4_TOOL_POLICY: "M4", M4_COMMAND_CATALOG: "M4", M4_COMMAND_RESULT: "M4", BOUNDED_WORKER_RESULT: "CONTROLLER", M5_CONTROL_POLICY: "M5", M5_CONTROL_DECISION: "M5",
     };
     const exactSource = sourceObjects.some((candidate) => candidate.kind === value.source_kind && expectedLayer[candidate.kind] === value.source_layer);
     const committedStates = input.committedWorkflowStateDigests ?? new Set([input.workflowState.content_sha256]);
     const validOrigin = committedStates.has(value.originating_state_content_sha256);
     const sourceInvalid = sourceClasses.includes(INVALID);
     const sourceIsM5 = sourceObjects.some((candidate) => candidate.kind === "M5_CONTROL_POLICY" || candidate.kind === "M5_CONTROL_DECISION");
+    const resolvedBoundedSource = value.source_kind !== "BOUNDED_WORKER_RESULT" ||
+      input.authoritativeSources?.boundedWorkerResults?.some((entry) => entry.content_sha256 === value.source_record_content_sha256) === true;
     let walk: Walk = "VALID";
     let detail = "Valid M5 usage has no authoritative decision edge";
-    if (!structurallyValid || value.content_sha256 !== digest || value.run_id !== input.runId || !validPolicies.has(value.policy_content_sha256) || conflict || sourceInvalid || !exactSource || !validOrigin) { walk = "INVALID"; detail = "M5 usage has conflicting operation, state, policy, source-kind, or source-layer authority"; }
+    if (!structurallyValid || value.content_sha256 !== digest || value.run_id !== input.runId || !validPolicies.has(value.policy_content_sha256) || conflict || sourceInvalid || !exactSource || !validOrigin || !resolvedBoundedSource) { walk = "INVALID"; detail = "M5 usage has conflicting operation, state, policy, source-kind, source-layer, or resolved bounded-execution authority"; }
     else if (sourceObjects.length === 0) { walk = "INCOMPLETE"; detail = "M5 usage source record is missing"; }
     else if (!sourceIsM5 && sourceClasses.every((classification) => classification === undefined || classification === INCOMPLETE)) { walk = "INCOMPLETE"; detail = "M5 usage source authority is incomplete"; }
     usageWalk.set(digest, walk);
