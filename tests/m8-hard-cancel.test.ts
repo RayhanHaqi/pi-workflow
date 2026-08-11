@@ -7,21 +7,47 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { inspectRunStorage } from "../src/persistence/index.js";
-import { forceStopBoundedMutationWorkflow, runBoundedMutationWorkflowExternalForTests, type BoundedMutationGoal, type ExternalLifecycleFixtureMode } from "../src/workflow-controller.js";
+import { readM5ManagedRecords } from "../src/persistence/store.js";
+import { forceStopBoundedMutationWorkflow, runBoundedMutationWorkflow, runBoundedMutationWorkflowExternalForTests, type BoundedMutationGoal, type ExternalLifecycleFixtureMode } from "../src/workflow-controller.js";
 import { commandSpecification, createM4Fixture } from "./m4-helpers.js";
 import { releaseAdmission } from "./repository-matrix-helpers.js";
 import { removeRepositoryFixture } from "./repository-helpers.js";
 
 const execFileAsync = promisify(execFile);
 
-async function repository(): Promise<string> {
+async function repository(
+  files: readonly { readonly path: string; readonly content: string }[] = [{ path: "verify/input.txt", content: "verify\n" }],
+): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "m8-r1-repo-"));
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: root });
   await execFileAsync("git", ["config", "user.email", "m8@example.invalid"], { cwd: root });
   await execFileAsync("git", ["config", "user.name", "M8"], { cwd: root });
-  await mkdir(join(root, "verify")); await writeFile(join(root, "verify", "input.txt"), "verify\n");
-  await execFileAsync("git", ["add", "verify/input.txt"], { cwd: root }); await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: root });
+  for (const file of files) {
+    await mkdir(dirname(join(root, file.path)), { recursive: true }); await writeFile(join(root, file.path), file.content, { mode: 0o644 });
+  }
+  await execFileAsync("git", ["add", "--", ...files.map((file) => file.path)], { cwd: root }); await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: root });
   return root;
+}
+
+async function s01Repository(): Promise<string> {
+  return repository([
+    { path: "src/service-a.conf", content: "log_level=info\n" },
+    { path: "src/service-b.conf", content: "log_level=info\n" },
+    { path: "verify/check.mjs", content: "process.exit(0);\n" },
+  ]);
+}
+
+function s01Authority() {
+  return { verification_commands: [{ command_id: "m8-s01-verify", executable: "/usr/bin/node", args: ["check.mjs"], cwd: "verify", timeout_ms: 10_000 }] } as const;
+}
+
+function s01Goal(): BoundedMutationGoal {
+  return {
+    objective: "Apply the frozen mechanical edit objective.", stop_condition: "Stop at deterministic acceptance.", execution_mode: "DIRECT_LUNA_HIGH",
+    scope: { readable_paths: ["src/service-a.conf", "src/service-b.conf", "verify", "verify/check.mjs"], editable_paths: ["src/service-a.conf", "src/service-b.conf"], frozen_paths: ["verify"] },
+    required_outputs: ["src/service-a.conf", "src/service-b.conf"],
+    tasks: [{ task_id: "direct-m8-s01", objective: "Own frozen objective.", editable_paths: ["src/service-a.conf", "src/service-b.conf"], required_outputs: ["src/service-a.conf", "src/service-b.conf"], dependencies: [] }],
+  };
 }
 
 function authority() { return { verification_commands: [{ command_id: "verify", executable: "/usr/bin/true", cwd: "verify" }] } as const; }
@@ -136,6 +162,40 @@ test("D-01/R1-T03 COMPLETE remains a recognized successful lifecycle result", as
     const claim = JSON.parse(await readFile(join(dirname(value.capability), "completion.claim.json"), "utf8")) as Record<string, unknown>;
     assert.equal(claim["winner"], "COMPLETED");
   } finally { await dispose(value); }
+});
+
+test("D-06 WORKFLOW S01-equivalent bootstrap reaches approveTasks and returns recognized BLOCKED result", async () => {
+  const root = await s01Repository(); const retained = await mkdtemp(join(tmpdir(), "m8-s01-bootstrap-retained-")); const input = s01Goal(); let approveTaskCalls = 0;
+  try {
+    const result = await runBoundedMutationWorkflow(input, {
+      cwd: root, authority: s01Authority(), retainedArtifactRoot: retained,
+      approveTasks: async ({ mode, contract, tasks, plan, executionAuthority }) => {
+        approveTaskCalls += 1;
+        assert.equal(mode, "DIRECT_LUNA_HIGH"); assert.deepEqual(contract.scope, input.scope); assert.deepEqual(contract.required_outputs, input.required_outputs);
+        assert.equal(tasks.length, 1); const task = tasks[0]; assert.ok(task !== undefined); assert.equal(task.task_id, "direct-m8-s01"); assert.deepEqual(task.scope.editable_paths, input.scope.editable_paths); assert.deepEqual(task.required_outputs, input.required_outputs);
+        assert.equal(plan, null); assert.equal(executionAuthority.mode, "DIRECT_LUNA_HIGH"); assert.equal(executionAuthority.repository.worktree_root, root); assert.equal(executionAuthority.contract.content_sha256, contract.content_sha256);
+        assert.equal(contract.verification_commands.length, 1); const command = contract.verification_commands[0]; assert.ok(command !== undefined);
+        assert.equal(command.command_id, "m8-s01-verify"); assert.deepEqual(command.argv, ["/usr/bin/node", join(root, "verify", "check.mjs")]); assert.equal(command.cwd, "verify"); assert.equal(command.timeout_ms, 10_000);
+        return null;
+      },
+    });
+    assert.equal(approveTaskCalls, 1, "the owner callback is reached exactly once");
+    const recognizedResult = result.lifecycleDiagnostic === undefined;
+    assert.equal(recognizedResult, true, `productive child exited without a recognized RESULT: ${JSON.stringify(result.lifecycleDiagnostic)}`);
+    assert.equal(result.outcome, "BLOCKED", result.reason); assert.match(result.reason, /EXECUTION_APPROVAL_MISMATCH/); assert.equal(result.finalState?.phase, "BLOCKED");
+    const evidenceRoot = result.evidenceRoot; assert.ok(evidenceRoot !== undefined);
+    const [inspection, records] = await Promise.all([
+      inspectRunStorage({ stateRoot: join(evidenceRoot, "state"), runId: "pre-m8-bounded" }),
+      readM5ManagedRecords({ stateRoot: join(evidenceRoot, "state"), runId: "pre-m8-bounded" }),
+    ]);
+    const m5WorkerReservations = records.decisions.filter((decision) => decision.reservation !== null).length;
+    const acceptedM4Usage = records.boundedWorkerResults.reduce((total, worker) => total + worker.actual_usage.m4_tool_calls, 0);
+    const acceptedM4Evidence = records.toolResults.length + records.mutationReceipts.length + records.commandResults.length;
+    assert.equal(inspection.status, "HEALTHY"); assert.equal(inspection.workflowState?.phase, "BLOCKED"); assert.equal(inspection.workflowState?.counters.worker_invocations.total, 0);
+    assert.equal(m5WorkerReservations, 0, "approval rejection occurs before M5 worker reservation");
+    assert.equal(records.boundedWorkerInvocations.length, 0, "no bounded-worker invocation or provider/model entry exists"); assert.equal(records.boundedWorkerResults.length, 0); assert.equal(records.usage.length, 0);
+    assert.equal(acceptedM4Usage, 0); assert.equal(acceptedM4Evidence, 0, "no accepted M4 tool, mutation, or command evidence exists");
+  } finally { await dispose({ root, retained }); }
 });
 
 test("D-02/D-05 early provider-free exit retains process evidence and admits no productive authority", async () => {
