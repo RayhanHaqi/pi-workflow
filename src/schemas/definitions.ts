@@ -1660,6 +1660,41 @@ export const M4CommandResultSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_command_result_v0.schema.json" },
 );
 
+const M4AdmissionAttemptedOperationSchema = StrictObject({
+  projection_id: Type.Literal("m4-admission-attempt-v0"),
+  tool_class: Type.Literal("APPLY_PATCH_SCOPED"),
+  operation: StringEnum(["CREATE", "REPLACE", "DELETE"] as const),
+  target_path: PathString(),
+  expected_preimage: StrictObject({
+    exists: Type.Boolean(),
+    content_sha256: NullableDigest(),
+    byte_length: Type.Union([BoundedInteger(Number.MAX_SAFE_INTEGER), Type.Null()]),
+    mode: Type.Union([Type.Integer({ minimum: 0, maximum: 0o7777 }), Type.Null()]),
+  }),
+  replacement: StrictObject({
+    content_sha256: NullableDigest(),
+    byte_length: BoundedInteger(Number.MAX_SAFE_INTEGER),
+  }),
+  requested_final_mode: Type.Union([Type.Integer({ minimum: 0, maximum: 0o7777 }), Type.Null()]),
+  ownership_class: Type.Literal("OWNER_ACCEPTED_MUTABLE"),
+  data_class: Type.Literal("PUBLIC_SOURCE"),
+});
+
+/** Immutable producer-owned refusal at the bounded-worker M4 mutation admission boundary. */
+export const M4AdmissionRefusalSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_m4_admission_refusal_v0"),
+    run_id: RunId(),
+    bounded_worker_invocation_content_sha256: Digest(),
+    admission_state_token_content_sha256: Digest(),
+    attempted_operation: M4AdmissionAttemptedOperationSchema,
+    attempted_operation_content_sha256: Digest(),
+    disposition: Type.Literal("REFUSED"),
+    refusal_code: StringEnum(["M4_TOOL_BUDGET_EXHAUSTED", "OUT_OF_SCOPE_WRITE"] as const),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m4_admission_refusal_v0.schema.json" },
+);
+
 export const M5_BUDGET_DIMENSIONS = [
   "WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL",
   "INPUT_TOKEN", "OUTPUT_TOKEN", "COST_MICROUSD", "WALL_TIME_MS",
@@ -2147,6 +2182,7 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_mutation_receipt_v0", fileName: "pi_gacw_mutation_receipt_v0.schema.json", schema: M4MutationReceiptSchema },
   { schemaId: "pi_gacw_tool_result_v0", fileName: "pi_gacw_tool_result_v0.schema.json", schema: M4ToolResultSchema },
   { schemaId: "pi_gacw_command_result_v0", fileName: "pi_gacw_command_result_v0.schema.json", schema: M4CommandResultSchema },
+  { schemaId: "pi_gacw_m4_admission_refusal_v0", fileName: "pi_gacw_m4_admission_refusal_v0.schema.json", schema: M4AdmissionRefusalSchema },
   { schemaId: "pi_gacw_m5_control_policy_v0", fileName: "pi_gacw_m5_control_policy_v0.schema.json", schema: M5ControlPolicySchema },
   { schemaId: "pi_gacw_m5_usage_evidence_v0", fileName: "pi_gacw_m5_usage_evidence_v0.schema.json", schema: M5UsageEvidenceSchema },
   { schemaId: "pi_gacw_m5_control_decision_v0", fileName: "pi_gacw_m5_control_decision_v0.schema.json", schema: M5ControlDecisionSchema },
@@ -2240,6 +2276,7 @@ export type M4MutationJournal = Static<typeof M4MutationJournalSchema>;
 export type M4MutationReceiptDocument = Static<typeof M4MutationReceiptSchema>;
 export type M4ToolResultDocument = Static<typeof M4ToolResultSchema>;
 export type M4CommandResultDocument = Static<typeof M4CommandResultSchema>;
+export type M4AdmissionRefusalDocument = Static<typeof M4AdmissionRefusalSchema>;
 export type M5ControlPolicyDocument = Static<typeof M5ControlPolicySchema>;
 export type M5UsageEvidenceDocument = Static<typeof M5UsageEvidenceSchema>;
 export type M5ControlDecisionDocument = Static<typeof M5ControlDecisionSchema>;

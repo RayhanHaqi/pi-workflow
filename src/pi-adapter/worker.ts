@@ -1570,9 +1570,10 @@ export interface BoundedPiAgentInput {
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly tools: readonly BoundedPiTool[];
-  readonly maxM4ToolCalls: number;
   readonly maxModelTurns: number;
   readonly deadlineMs: number;
+  /** Controller cancellation remains authoritative at every local admission seam. */
+  readonly signal?: AbortSignal;
 }
 
 export interface BoundedPiAgentResult {
@@ -1616,37 +1617,59 @@ async function runBoundedPiAgentImpl(
   if (!Number.isSafeInteger(input.maxModelTurns) || input.maxModelTurns < 0) {
     fail("RUNTIME_CAPABILITY_INVALID", "bounded model-turn limit is invalid", "RUNTIME_GUARD");
   }
-  // No request is admitted when the M5-selected remainder is already exhausted.
-  // This occurs before runtime, credential, provider, or Agent construction.
+  // Cancellation and exhausted M5 authority both fail before runtime,
+  // credential, provider, or Agent construction.
+  if (input.signal?.aborted === true) return {
+    completed: false, firstFailureCode: "WORKER_ABORTED", firstFailureStage: "PRE_RUNTIME_ADMISSION",
+    modelTurns: 0, providerRequests: 0, inputTokens: null, outputTokens: null, costMicrousd: null, cleanupCertain: true,
+  };
   if (input.maxModelTurns === 0) return {
     completed: false, firstFailureCode: "MODEL_TURN_BUDGET_EXHAUSTED", firstFailureStage: "MODEL_TURN_ADMISSION",
-    modelTurns: 0, providerRequests: 0, inputTokens: null, outputTokens: null, costMicrousd: null, cleanupCertain: true,
+    modelTurns: 0, providerRequests: 0, inputTokens: null, outputTokens: null, costMicrousd: null,
+    cleanupCertain: true,
   };
   let boundary: RuntimeBoundary | undefined;
   let runtime: PreparedRuntime | undefined;
   let agent: AgentRuntime | undefined;
   let unsubscribe: (() => void) | undefined;
   let timer: NodeJS.Timeout | undefined;
+  let abortListener: (() => void) | undefined;
   let prompt: Promise<void> | undefined;
   let firstFailure: { code: string; stage: string } | undefined;
   let providerRequests = 0;
   let generationStarts = 0;
   let settledGenerationTurns = 0;
-  let toolCalls = 0;
   let promptSettled = false;
   let idle = false;
   let cleanupCertain = true;
   const latch = (code: string, stage: string): void => { firstFailure ??= { code: code.slice(0, 128), stage: stage.slice(0, 128) }; };
+  const rejectCancelled = (stage: string): void => {
+    if (input.signal?.aborted !== true) return;
+    latch("WORKER_ABORTED", stage);
+    throw new Error("bounded worker cancellation blocks admission");
+  };
   try {
+    rejectCancelled("PRE_RUNTIME_ADMISSION");
     boundary = await loadRuntimeBoundary();
+    rejectCancelled("POST_RUNTIME_BOUNDARY");
     const credentials = testCredentialStore ?? await publicCredentialStore(input.providerId);
+    rejectCancelled("POST_CREDENTIAL_PREPARATION");
     runtime = prepareRuntime(boundary, input.providerId, input.modelId, credentials, fauxAuthority, input.effort);
+    rejectCancelled("POST_RUNTIME_PREPARATION");
     const names = input.tools.map((tool) => tool.name);
     if (names.length === 0 || new Set(names).size !== names.length) fail("RUNTIME_CAPABILITY_INVALID", "bounded tool profile is invalid", "RUNTIME_GUARD");
+    const tools: readonly BoundedPiTool[] = input.tools.map((tool) => ({
+      ...tool,
+      execute: async (toolCallId, params, signal) => {
+        rejectCancelled("TOOL_ADMISSION");
+        return tool.execute(toolCallId, params, signal);
+      },
+    }));
     const started = performance.now();
     const options: JsonRecord = {
-      initialState: { systemPrompt: input.systemPrompt, model: runtime.model, thinkingLevel: input.effort, tools: input.tools },
+      initialState: { systemPrompt: input.systemPrompt, model: runtime.model, thinkingLevel: input.effort, tools },
       streamFn: (model: unknown, context: unknown, optionsValue?: unknown): unknown => {
+        rejectCancelled("PROVIDER_ADMISSION");
         if (performance.now() - started > input.deadlineMs) { latch("WORKER_DEADLINE_EXCEEDED", "DEADLINE"); throw new Error("bounded worker deadline exceeded"); }
         if (generationStarts >= input.maxModelTurns) {
           latch("MODEL_TURN_BUDGET_EXHAUSTED", "MODEL_TURN_ADMISSION");
@@ -1658,13 +1681,18 @@ async function runBoundedPiAgentImpl(
       },
       toolExecution: "sequential",
       maxRetryDelayMs: 0,
-      beforeToolCall: async (context: unknown): Promise<JsonRecord | undefined> => {
-        if (performance.now() - started > input.deadlineMs || toolCalls >= input.maxM4ToolCalls || settledGenerationTurns >= input.maxModelTurns) {
-          latch(settledGenerationTurns >= input.maxModelTurns ? "MODEL_TURN_BUDGET_EXHAUSTED" : toolCalls >= input.maxM4ToolCalls ? "M4_TOOL_BUDGET_EXHAUSTED" : "WORKER_DEADLINE_EXCEEDED", "TOOL_ADMISSION");
-          return { block: true, reason: "bounded tool admission rejected" };
+      // Pi owns cancellation and runtime sequencing only. Agent core has
+      // already resolved the fixed registered tool and validated its arguments;
+      // accepted-M4 budget and task-scope admission remain in bounded-worker.
+      beforeToolCall: async (): Promise<JsonRecord | undefined> => {
+        if (input.signal?.aborted === true) {
+          latch("WORKER_ABORTED", "TOOL_ADMISSION");
+          return { block: true, reason: "bounded tool admission rejected after cancellation" };
         }
-        const call = record(record(context, "beforeToolCall context")["toolCall"], "tool call");
-        if (!names.includes(string(call["name"], "tool call name"))) { latch("PROFILE_TOOL_DENIED", "TOOL_ADMISSION"); return { block: true, reason: "tool is outside bounded profile" }; }
+        if (performance.now() - started > input.deadlineMs || settledGenerationTurns >= input.maxModelTurns) {
+          latch(settledGenerationTurns >= input.maxModelTurns ? "MODEL_TURN_BUDGET_EXHAUSTED" : "WORKER_DEADLINE_EXCEEDED", "TOOL_ADMISSION");
+          return { block: true, reason: "bounded runtime sequencing rejected tool execution" };
+        }
         return undefined;
       },
       afterToolCall: async (context: unknown): Promise<JsonRecord | undefined> => {
@@ -1676,6 +1704,7 @@ async function runBoundedPiAgentImpl(
         return undefined;
       },
     };
+    rejectCancelled("AGENT_CONSTRUCTION");
     agent = constructAgent(boundary.agentModule, options, names);
     const initial = agent.state;
     if (initial.model !== runtime.model || initial.thinkingLevel !== input.effort || initial.messages.length !== 0 || initial.pendingToolCalls.size !== 0) {
@@ -1684,10 +1713,15 @@ async function runBoundedPiAgentImpl(
     unsubscribe = agent.subscribe((event: unknown) => {
       const type = string(record(event, "Agent event")["type"], "Agent event type");
       if (type === "turn_end" && settledGenerationTurns < generationStarts) settledGenerationTurns += 1;
-      if (type === "tool_execution_start") toolCalls += 1;
     });
     timer = setTimeout(() => { latch("WORKER_DEADLINE_EXCEEDED", "DEADLINE"); agent?.abort(); }, input.deadlineMs);
     timer.unref();
+    if (input.signal !== undefined) {
+      abortListener = () => { latch("WORKER_ABORTED", "ABORT"); agent?.abort(); };
+      if (input.signal.aborted) abortListener();
+      else input.signal.addEventListener("abort", abortListener, { once: true });
+    }
+    rejectCancelled("PROMPT_ADMISSION");
     prompt = agent.prompt(input.userPrompt);
     try { await prompt; promptSettled = true; }
     catch (error: unknown) { promptSettled = true; latch(error instanceof Error ? error.name : "PROMPT_FAILED", "PROMPT"); }
@@ -1696,6 +1730,7 @@ async function runBoundedPiAgentImpl(
   } catch (error: unknown) {
     latch(error instanceof M6WorkerError ? error.code : error instanceof Error ? error.name : "RUNTIME_FAILURE", error instanceof M6WorkerError ? error.stage : "RUNTIME");
   } finally {
+    if (input.signal !== undefined && abortListener !== undefined) input.signal.removeEventListener("abort", abortListener);
     if (timer !== undefined) clearTimeout(timer);
     if (agent !== undefined) {
       try { agent.abort(); } catch { cleanupCertain = false; }

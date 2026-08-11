@@ -3,6 +3,7 @@ import {
   assertDocumentValid,
   type BoundedWorkerInvocationDocument,
   type BoundedWorkerResultDocument,
+  type M4AdmissionRefusalDocument,
   type M5ControlDecisionDocument,
   type M5ControlPolicyDocument,
   type M3BaselineApprovalRuntimeDocument,
@@ -14,6 +15,9 @@ import {
   type WorkflowState,
 } from "../schemas/index.js";
 import type { InspectedObject, ManagedRecordClassification } from "./types.js";
+
+/** Exact producer-owned stage for a settled M4 tool-admission refusal. */
+export const BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE = "M4_TOOL_ADMISSION" as const;
 
 export interface BoundedWorkerAuthorityInput {
   readonly runId: string;
@@ -106,6 +110,7 @@ export interface BoundedExecutionResolutionInput {
   readonly task: TaskDocument | null;
   readonly taskGraph: TaskGraphDocument | null;
   readonly plan: PlanApprovalDocument | null;
+  readonly admissionRefusals: ReadonlyMap<string, M4AdmissionRefusalDocument>;
   readonly classifications: readonly ManagedRecordClassification[];
 }
 
@@ -182,17 +187,61 @@ export function resolveAuthoritativeBoundedExecution(input: BoundedExecutionReso
             input.reservationState.active_task_id === null || input.reservationState.active_task_id !== input.task.task_id)))) {
     return reject("ROUTED_ACTIVE_TASK_BINDING_MISMATCH");
   }
-  if (result.outcome !== "COMPLETED" || !result.cleanup_certain || result.actual_usage.worker_invocations !== 1) return reject(result.cleanup_certain ? "BOUNDED_WORKER_BLOCKED" : "BOUNDED_WORKER_CLEANUP_UNCERTAIN");
+  if (!result.cleanup_certain || result.actual_usage.worker_invocations !== 1) return reject("BOUNDED_WORKER_CLEANUP_UNCERTAIN");
+  if (result.outcome === "COMPLETED" && ((result.first_failure_code ?? null) !== null || (result.first_failure_stage ?? null) !== null)) {
+    return reject("BOUNDED_WORKER_COMPLETION_FAILURE_MISMATCH");
+  }
   const m3Kinds = new Set(["M3_REPOSITORY_STATE_TOKEN", "M3_POSTFLIGHT"]);
-  const m4Kinds = new Set(["M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT"]);
+  const acceptedM4Kinds = new Set(["M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT"]);
+  if (new Set(result.m3_evidence_content_sha256).size !== result.m3_evidence_content_sha256.length ||
+      new Set(result.m4_evidence_content_sha256).size !== result.m4_evidence_content_sha256.length) return reject("PRODUCED_EVIDENCE_NOT_AUTHORITATIVE");
   const m3Evidence = result.m3_evidence_content_sha256.filter((digest) =>
     [...m3Kinds].some((kind) => authoritative(input.classifications, kind, digest)));
-  const m4Evidence = result.m4_evidence_content_sha256.filter((digest) =>
-    [...m4Kinds].some((kind) => authoritative(input.classifications, kind, digest)));
-  if (m3Evidence.length !== result.m3_evidence_content_sha256.length || m4Evidence.length !== result.m4_evidence_content_sha256.length ||
-      result.actual_usage.m4_tool_calls !== m4Evidence.length) return reject("PRODUCED_EVIDENCE_NOT_AUTHORITATIVE");
+  if (m3Evidence.length !== result.m3_evidence_content_sha256.length) return reject("PRODUCED_EVIDENCE_NOT_AUTHORITATIVE");
+  const acceptedM4Evidence: string[] = [];
+  const refusalEvidence: string[] = [];
+  for (const digest of result.m4_evidence_content_sha256) {
+    const acceptedKinds = [...acceptedM4Kinds].filter((kind) => authoritative(input.classifications, kind, digest));
+    const refusal = authoritative(input.classifications, "M4_ADMISSION_REFUSAL", digest);
+    if (acceptedKinds.length + Number(refusal) !== 1) return reject("PRODUCED_EVIDENCE_NOT_AUTHORITATIVE");
+    if (refusal) refusalEvidence.push(digest); else acceptedM4Evidence.push(digest);
+  }
+  if (result.actual_usage.m4_tool_calls !== acceptedM4Evidence.length) return reject("PRODUCED_EVIDENCE_NOT_AUTHORITATIVE");
+  if (result.outcome === "COMPLETED") {
+    if (refusalEvidence.length !== 0) return reject("BOUNDED_WORKER_COMPLETION_REFUSAL_MISMATCH");
+  } else {
+    if (result.first_failure_code === null || result.first_failure_stage !== BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE || refusalEvidence.length !== 1) {
+      return reject("BOUNDED_WORKER_UNTRUSTED_REFUSAL");
+    }
+    const refusal = input.admissionRefusals.get(refusalEvidence[0]!);
+    if (refusal === undefined || refusal.content_sha256 !== refusalEvidence[0]) return reject("M4_ADMISSION_REFUSAL_MISSING");
+    try { assertDocumentValid("pi_gacw_m4_admission_refusal_v0", refusal); }
+    catch { return reject("M4_ADMISSION_REFUSAL_INVALID"); }
+    if (refusal.run_id !== invocation.run_id || refusal.bounded_worker_invocation_content_sha256 !== invocation.content_sha256 ||
+        refusal.disposition !== "REFUSED" || refusal.refusal_code !== result.first_failure_code) {
+      return reject("M4_ADMISSION_REFUSAL_BINDING_MISMATCH");
+    }
+    // M4's policy is the global envelope; a routed worker's active task is the
+    // narrower mutation admission scope. A budget refusal can only follow an
+    // in-task admission, while an out-of-scope refusal can only name a path
+    // outside that active task.
+    const taskOwnsAttempt = input.task?.scope.editable_paths.includes(refusal.attempted_operation.target_path) === true;
+    if (input.task === null ||
+        (refusal.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED" && !taskOwnsAttempt) ||
+        (refusal.refusal_code === "OUT_OF_SCOPE_WRITE" && taskOwnsAttempt)) {
+      return reject("M4_ADMISSION_REFUSAL_SCOPE_MISMATCH");
+    }
+    // The refusal happens at the current trusted M3 state: the invocation state
+    // for a first attempt or an emitted authoritative successor state after an
+    // accepted M4 mutation. The M4 classifier independently validates its M3
+    // repository/worktree/scope predecessor chain.
+    if (refusal.admission_state_token_content_sha256 !== input.stateToken.content_sha256 &&
+        !m3Evidence.includes(refusal.admission_state_token_content_sha256)) {
+      return reject("M4_ADMISSION_REFUSAL_STATE_MISMATCH");
+    }
+  }
   return {
-    accepted: true, reason: null, acceptedM3Evidence: m3Evidence, acceptedM4Evidence: m4Evidence,
+    accepted: true, reason: null, acceptedM3Evidence: m3Evidence, acceptedM4Evidence,
     acceptedWorkerInvocations: result.actual_usage.worker_invocations,
     acceptedM4ToolCalls: result.actual_usage.m4_tool_calls,
   };

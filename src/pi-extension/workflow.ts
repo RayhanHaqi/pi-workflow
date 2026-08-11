@@ -36,6 +36,8 @@ async function handleMutation(fileArgument: string, ctx: ExtensionCommandContext
     // owns verification authority invokes the controller API directly.
     const result = await runBoundedMutationWorkflow(goal, {
       cwd: ctx.cwd,
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+      onControlCapability: ({ path }) => { ctx.ui.notify(`FORCE_STOP_CAPABILITY ${path}`, "info"); },
       approveBaseline: async (baseline) => {
         const inventory = JSON.stringify(baseline.paths.map((entry) => ({ path: entry.path, ownership_class: entry.ownership_class, data_class: entry.data_class, capture_mode: entry.capture_mode, retention_days_after_terminal: entry.retention_days_after_terminal })));
         const confirmed = ctx.signal === undefined

@@ -1,10 +1,12 @@
 import { performance } from "node:perf_hooks";
 
 import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../identity/index.js";
+import { BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE } from "../persistence/bounded-worker-authority.js";
 import { publishBoundedWorkerRecord } from "../persistence/store.js";
 import type { WorktreeLockHandle } from "../repository/index.js";
 import { lockAcquisitionAuthority } from "../repository/lock.js";
 import { runBoundedPiAgent } from "./worker.js";
+import { publishBoundedWorkerM4AdmissionRefusal } from "../scoped-tools/tool-records.js";
 import type { ScopedToolGateway } from "../scoped-tools/types.js";
 import {
   identifyContractDocument,
@@ -18,6 +20,7 @@ import {
 } from "../schemas/index.js";
 
 export type BoundedWorkerToolProfile = "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT";
+type M4AdmissionRefusalCode = "M4_TOOL_BUDGET_EXHAUSTED" | "OUT_OF_SCOPE_WRITE";
 
 export interface BoundedWorkerRoute {
   readonly logicalRole: "LUNA_EXECUTOR" | "SOL_OWNER" | "SOL_PLANNER" | "SOL_CLOSEOUT";
@@ -49,9 +52,10 @@ export interface BoundedWorkerRuntime {
     readonly systemPrompt: string;
     readonly userPrompt: string;
     readonly tools: BoundedWorkerTools;
-    readonly maxM4ToolCalls: number;
     readonly maxModelTurns: number;
     readonly deadlineMs: number;
+    /** Controller-owned cancellation reaches runtime and every profiled tool. */
+    readonly signal?: AbortSignal;
   }): Promise<{
     readonly completed: boolean;
     readonly firstFailureCode?: string;
@@ -82,9 +86,14 @@ export interface RunBoundedWorkerInput {
   readonly userPrompt: string;
   readonly allowedReadPaths: readonly string[];
   readonly allowedEditPaths: readonly string[];
+  /** Total accepted M4 evidence cap; reads and accepted mutations both count. */
   readonly maxM4ToolCalls: number;
+  /** Accepted mutation-admission cap; reads and evidence reads never count. */
+  readonly maxM4MutationCalls: number;
   readonly maxModelTurns: number;
   readonly deadlineMs: number;
+  /** Controller-owned signal; callers cannot replace it from worker prose. */
+  readonly signal?: AbortSignal;
   readonly now?: () => string;
 }
 
@@ -97,8 +106,23 @@ function dateNow(input: RunBoundedWorkerInput): string { return (input.now ?? ((
 function canonicalPathAllowed(path: string, values: readonly string[]): boolean { return values.includes(path); }
 function failure(error: unknown): { readonly code: string; readonly stage: string } {
   const code = error !== null && typeof error === "object" && "code" in error ? String((error as { readonly code: unknown }).code) : "RUNTIME_FAILURE";
-  return { code: code.slice(0, 128) || "RUNTIME_FAILURE", stage: "BOUNDED_WORKER" };
+  const stage = error !== null && typeof error === "object" && "stage" in error ? String((error as { readonly stage: unknown }).stage) : "BOUNDED_WORKER";
+  return { code: code.slice(0, 128) || "RUNTIME_FAILURE", stage: stage.slice(0, 128) || "BOUNDED_WORKER" };
 }
+function abortError(stage: string): Error {
+  return Object.assign(new Error("Worker cancellation blocks productive admission"), { code: "WORKER_ABORTED", stage });
+}
+function untrustedRuntimeFailure(error: unknown): { readonly code: string; readonly stage: string } {
+  const captured = failure(error);
+  return captured.stage === BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE ? { ...captured, stage: "BOUNDED_WORKER" } : captured;
+}
+
+/** A producer-owned M4 admission seam, not a runtime/model failure claim. */
+class M4ToolAdmissionRefusalError extends Error {
+  public readonly stage = BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE;
+  public constructor(public readonly code: string, message: string) { super(message); }
+}
+function cancelled(signal: AbortSignal | undefined): boolean { return signal?.aborted === true; }
 
 function toolResult(text: string, terminate = false): { readonly content: readonly Record<string, unknown>[]; readonly details: Record<string, unknown>; readonly terminate?: boolean } {
   return { content: [{ type: "text", text }], details: {}, ...(terminate ? { terminate: true } : {}) };
@@ -116,10 +140,13 @@ function stringParam(value: Record<string, unknown>, key: string): string {
 /** The production default is the accepted guarded Pi runtime, not a provider shim. */
 const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
   async execute(input: Parameters<BoundedWorkerRuntime["execute"]>[0]) {
+    const rejectCancelledToolAdmission = (): void => {
+      if (cancelled(input.signal)) throw abortError("PRE_TOOL_ADMISSION");
+    };
     const readTool = {
       name: "read_scoped", label: "Scoped read", description: "Read one allowed repository path through M4.",
       parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" } } },
-      async execute(_id: string, params: unknown) { const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
+      async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
     };
     const patchTool = {
       name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4.",
@@ -127,6 +154,7 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
         path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
       } },
       async execute(_id: string, params: unknown) {
+        rejectCancelledToolAdmission();
         const value = toolParams(params); const operation = stringParam(value, "operation");
         if (operation !== "CREATE" && operation !== "REPLACE" && operation !== "DELETE") throw Object.assign(new Error("patch operation is invalid"), { code: "TOOL_REQUEST_INVALID" });
         const exists = value["expected_preimage_exists"]; if (typeof exists !== "boolean") throw Object.assign(new Error("preimage existence is invalid"), { code: "TOOL_REQUEST_INVALID" });
@@ -142,17 +170,21 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
     const evidenceTool = {
       name: "read_authoritative_evidence", label: "Authoritative evidence read", description: "Read only an allowed durable evidence record through M4.",
       parameters: { type: "object", additionalProperties: false, required: ["kind", "content_sha256"], properties: { kind: { type: "string" }, content_sha256: { type: "string" } } },
-      async execute(_id: string, params: unknown) { const value = toolParams(params); await input.tools.readEvidence(stringParam(value, "kind"), stringParam(value, "content_sha256") as Sha256Digest); return toolResult("evidence read"); },
+      async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); await input.tools.readEvidence(stringParam(value, "kind"), stringParam(value, "content_sha256") as Sha256Digest); return toolResult("evidence read"); },
     };
     const submitName = input.profile === "SOL_PLANNER" ? "submit_candidate_plan_report" : input.profile === "SOL_CLOSEOUT" ? "submit_closeout_report" : "submit_worker_report";
     const submitTool = {
       name: submitName, label: "Bounded report", description: "Submit one bounded advisory report and end this worker.",
       parameters: { type: "object", additionalProperties: false, required: ["report"], properties: { report: { type: "string", maxLength: 8192 } } },
-      async execute(_id: string, params: unknown) { const value = toolParams(params); input.tools.submitReport(stringParam(value, "report")); return toolResult("accepted", true); },
+      async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); input.tools.submitReport(stringParam(value, "report")); return toolResult("accepted", true); },
     };
     const tools = input.profile === "MUTATION_EXECUTOR" ? [readTool, patchTool, submitTool] : input.profile === "SOL_PLANNER" ? [readTool, submitTool] : [evidenceTool, submitTool];
+    if (cancelled(input.signal)) return { completed: false, firstFailureCode: "WORKER_ABORTED", firstFailureStage: "PRE_PROVIDER_ADMISSION", modelTurns: 0, providerRequests: 0, inputTokens: null, outputTokens: null, costMicrousd: null, cleanupCertain: true };
+    // The Pi adapter owns Agent cleanup. Scoped closures below remain the hard
+    // cancellation gate for every productive tool admission.
     return runBoundedPiAgent({ providerId: input.route.providerId, modelId: input.route.modelId, effort: input.route.effort, systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
-      tools, maxM4ToolCalls: input.maxM4ToolCalls, maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs });
+      tools, maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs,
+      ...(input.signal === undefined ? {} : { signal: input.signal }) });
   },
 });
 
@@ -176,6 +208,7 @@ export function configureBoundedWorkerFauxRuntimeForTests(factory?: BoundedWorke
  * filesystem handle, command registry, credential, or controller authority.
  */
 async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: BoundedWorkerRuntime): Promise<BoundedWorkerExecutionResult> {
+  if (cancelled(input.signal)) throw abortError("PRE_WORKER_ADMISSION");
   if (input.reservation.outcome !== "AUTHORIZE" || input.reservation.reservation === null || input.reservation.operation_id !== input.operationId ||
       input.reservation.reservation.logical_role !== input.route.logicalRole || input.reservation.reservation.reservation_decision_key === undefined) {
     throw new Error("Bounded worker requires an exact active M5 reservation");
@@ -202,26 +235,64 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
 
   const m3Evidence = new Set<Sha256Digest>();
   const m4Evidence = new Set<Sha256Digest>();
-  let toolCalls = 0;
+  let acceptedM4ToolCalls = 0;
+  let acceptedMutationAdmissions = 0;
   let advisoryReport: string | null = null;
+  let terminalRefusal: { readonly code: string; readonly stage: typeof BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE } | null = null;
+  let productiveAuthorityClosed = false;
   const start = performance.now();
-  const requireBudget = (): void => {
-    if (toolCalls >= input.maxM4ToolCalls) throw Object.assign(new Error("M4 tool-call budget exhausted"), { code: "M4_TOOL_BUDGET_EXHAUSTED" });
+  const assertProductiveAuthorityOpen = (): void => {
+    if (productiveAuthorityClosed) throw Object.assign(new Error("trusted terminal refusal already closed productive authority"), { code: "PRODUCTIVE_AUTHORITY_CLOSED", stage: "PRODUCTIVE_AUTHORITY" });
+  };
+  const addM4Evidence = (identity: Sha256Digest, accepted: boolean): void => {
+    if (m4Evidence.has(identity)) throw Object.assign(new Error("one M4 operation reused an evidence identity"), { code: "M4_EVIDENCE_DUPLICATE" });
+    m4Evidence.add(identity);
+    if (accepted) acceptedM4ToolCalls += 1;
+  };
+  const requireAcceptedM4ToolBudget = (): void => {
+    assertProductiveAuthorityOpen();
+    if (cancelled(input.signal)) throw abortError("PRE_TOOL_ADMISSION");
+    if (acceptedM4ToolCalls >= input.maxM4ToolCalls) {
+      throw Object.assign(new Error("accepted M4 tool-call budget exhausted before non-mutation admission"), { code: "M4_TOOL_BUDGET_EXHAUSTED", stage: "BOUNDED_WORKER" });
+    }
     if (performance.now() - start > input.deadlineMs) throw Object.assign(new Error("bounded worker deadline exceeded"), { code: "WORKER_DEADLINE_EXCEEDED" });
+  };
+  const refuseMutationAdmission = async (
+    request: Parameters<BoundedWorkerTools["writePath"]>[0],
+    code: M4AdmissionRefusalCode,
+    message: string,
+  ): Promise<never> => {
+    // Close first: even an adversarial runtime issuing concurrent tool calls
+    // cannot produce a second durable refusal while this one is publishing.
+    productiveAuthorityClosed = true;
+    const refusal = await publishBoundedWorkerM4AdmissionRefusal({ stateRoot: input.stateRoot, runId: input.runId }, {
+      boundedWorkerInvocationContentSha256: invocation.content_sha256 as Sha256Digest,
+      admissionStateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest,
+      attemptedMutation: request,
+      refusalCode: code,
+    });
+    addM4Evidence(refusal.content_sha256 as Sha256Digest, false);
+    terminalRefusal = { code, stage: BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE };
+    throw new M4ToolAdmissionRefusalError(code, message);
   };
   const tools: BoundedWorkerTools = {
     async readPath(path) {
+      assertProductiveAuthorityOpen();
       if (!canonicalPathAllowed(path, input.allowedReadPaths)) throw Object.assign(new Error("path is outside task read scope"), { code: "OUT_OF_SCOPE_READ" });
       if (input.profile === "SOL_CLOSEOUT") throw Object.assign(new Error("closeout can read evidence only"), { code: "PROFILE_TOOL_DENIED" });
-      requireBudget(); toolCalls += 1;
+      requireAcceptedM4ToolBudget();
       const result = await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path, offset: 0, length: 65_536, mode: "TEXT" });
-      m4Evidence.add(result.resultRecord.content_sha256 as Sha256Digest);
+      addM4Evidence(result.resultRecord.content_sha256 as Sha256Digest, true);
       return { content: result.content, resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest };
     },
     async writePath(request) {
+      assertProductiveAuthorityOpen();
       if (input.profile !== "MUTATION_EXECUTOR") throw Object.assign(new Error("worker profile cannot mutate"), { code: "PROFILE_TOOL_DENIED" });
-      if (!canonicalPathAllowed(request.path, input.allowedEditPaths)) throw Object.assign(new Error("path is outside task edit scope"), { code: "OUT_OF_SCOPE_WRITE" });
-      requireBudget(); toolCalls += 1;
+      if (cancelled(input.signal)) throw abortError("PRE_TOOL_ADMISSION");
+      if (!canonicalPathAllowed(request.path, input.allowedEditPaths)) await refuseMutationAdmission(request, "OUT_OF_SCOPE_WRITE", "path is outside task edit scope");
+      if (acceptedMutationAdmissions >= input.maxM4MutationCalls) await refuseMutationAdmission(request, "M4_TOOL_BUDGET_EXHAUSTED", "M4 mutation-admission budget exhausted");
+      if (acceptedM4ToolCalls >= input.maxM4ToolCalls) await refuseMutationAdmission(request, "M4_TOOL_BUDGET_EXHAUSTED", "accepted M4 tool-call budget exhausted");
+      if (performance.now() - start > input.deadlineMs) throw Object.assign(new Error("bounded worker deadline exceeded"), { code: "WORKER_DEADLINE_EXCEEDED" });
       const result = await input.gateway.apply_patch_scoped({
         stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest,
         lockAcquisitionContentSha256: lockAcquisitionAuthority(input.lock).content_sha256 as Sha256Digest,
@@ -236,18 +307,22 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
         replacementBytes: request.replacementBytes,
         requestedFinalMode: request.operation === "DELETE" ? null : 0o644,
       });
-      m4Evidence.add(result.receipt.content_sha256 as Sha256Digest);
+      addM4Evidence(result.receipt.content_sha256 as Sha256Digest, true);
+      acceptedMutationAdmissions += 1;
       m3Evidence.add(result.acceptedState.content_sha256 as Sha256Digest);
       return result.receipt.content_sha256 as Sha256Digest;
     },
     async readEvidence(kind, contentSha256) {
+      assertProductiveAuthorityOpen();
       if (input.profile !== "SOL_CLOSEOUT") throw Object.assign(new Error("worker profile cannot read evidence"), { code: "PROFILE_TOOL_DENIED" });
-      requireBudget(); toolCalls += 1;
+      requireAcceptedM4ToolBudget();
       const result = await input.gateway.read_evidence({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, kind, contentSha256 });
-      m4Evidence.add(result.resultRecord.content_sha256 as Sha256Digest);
+      addM4Evidence(result.resultRecord.content_sha256 as Sha256Digest, true);
       return result.resultRecord.content_sha256 as Sha256Digest;
     },
     submitReport(report) {
+      assertProductiveAuthorityOpen();
+      if (cancelled(input.signal)) throw abortError("REPORT_ADMISSION");
       if (report.length > 8_192) throw Object.assign(new Error("advisory report exceeds bound"), { code: "REPORT_TOO_LARGE" });
       advisoryReport = report;
     },
@@ -256,14 +331,24 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
   let report: Awaited<ReturnType<BoundedWorkerRuntime["execute"]>> | undefined;
   let first: { readonly code: string; readonly stage: string } | null = null;
   try {
+    if (cancelled(input.signal)) throw abortError("PRE_PROVIDER_ADMISSION");
     report = await runtime.execute({
       route: input.route, profile: input.profile, systemPrompt: input.systemPrompt, userPrompt: input.userPrompt, tools,
-      maxM4ToolCalls: input.maxM4ToolCalls, maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs,
+      maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
-    if (!report.completed) first = { code: report.firstFailureCode ?? "WORKER_BLOCKED", stage: report.firstFailureStage ?? "BOUNDED_WORKER" };
-  } catch (error: unknown) { first = failure(error); }
-  const cleanupCertain = report?.cleanupCertain ?? false;
-  const completed = first === null && cleanupCertain;
+    if (cancelled(input.signal)) first = { code: "WORKER_ABORTED", stage: "POST_RUNTIME" };
+    else if (terminalRefusal !== null) first = terminalRefusal;
+    else if (!report.completed) {
+      const reported = { code: report.firstFailureCode ?? "WORKER_BLOCKED", stage: report.firstFailureStage ?? "BOUNDED_WORKER" };
+      first = reported.stage === BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE ? { ...reported, stage: "BOUNDED_WORKER" } : reported;
+    }
+  } catch (error: unknown) {
+    if (error instanceof M4ToolAdmissionRefusalError && terminalRefusal !== null) first = terminalRefusal;
+    else first = untrustedRuntimeFailure(error);
+  }
+  const cleanupCertain = report?.cleanupCertain === true;
+  const completed = first === null && report?.completed === true && cleanupCertain;
   if (!completed && first === null) first = { code: "CLEANUP_UNCERTAIN", stage: "CLEANUP" };
   const result = identifyContractDocument("pi_gacw_bounded_worker_result_v0", {
     schema_id: "pi_gacw_bounded_worker_result_v0",
@@ -277,7 +362,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     m4_evidence_content_sha256: [...m4Evidence].sort(),
     actual_usage: {
       worker_invocations: 1,
-      m4_tool_calls: toolCalls,
+      m4_tool_calls: acceptedM4ToolCalls,
       model_turns: report?.modelTurns ?? null,
       provider_requests: report?.providerRequests ?? null,
       input_tokens: report?.inputTokens ?? null,

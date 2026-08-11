@@ -1149,6 +1149,39 @@ Sol Max single-owner implementation
 
 ### M4 — Secure filesystem helper and scoped tool gateway
 
+#### OA-M4-01 — V0 M4 bounded-admission refusal authority
+
+> **V0 M4 bounded-admission refusal authority.** V0 defines one immutable
+> `M4_ADMISSION_REFUSAL` record. Pi runtime `beforeToolCall` admission is
+> limited to cancellation and runtime sequencing; it does not decide accepted
+> M4 budget or active-task mutation scope, and started-tool telemetry is not
+> accepted M4 usage. Only the trusted bounded-worker M4 admission boundary owns
+> those bounded M4 budget/task-scope decisions and may create the record, after
+> publication of the exact bounded invocation and before forwarding the refused
+> operation to the M4 gateway. The record binds the exact invocation, current
+> authoritative M3 execution state, exact attempted-operation identity,
+> `REFUSED` disposition, and refusal code. Invocation identity transitively
+> binds the M5 operation/reservation and Task/Plan authority.
+>
+> A controller hard mutation-admission cap applies only to accepted mutations;
+> it is distinct from total accepted M4 tool-call accounting, which is derived
+> only from authoritative accepted M4 result or receipt evidence.
+>
+> A bounded result claiming terminal M4-admission refusal is authoritative only
+> when its M4 evidence references exactly one matching authoritative refusal
+> record and the sole bounded-execution resolver validates the complete
+> invocation, reservation, route, active task, M3, accepted-M4-evidence,
+> refusal-code, fixed-stage, and cleanup joins. Absence or mismatch of producer
+> refusal evidence leaves the result unresolved.
+>
+> Accepted/admitted M4 result or receipt evidence contributes accepted tool
+> usage. `M4_ADMISSION_REFUSAL` contributes refusal authority and zero accepted
+> tool usage. A resolved refusal is eligible only for M5 `BLOCK`, excludes
+> `PASS` and continuation, and cannot be suppressed by caller-provided source
+> arrays. Historical records remain readable; historical BLOCKED results lacking
+> this producer evidence do not retroactively acquire terminal-refusal
+> authority.
+
 ### M5 — Usage budgets, progress, failures, contract gate, route selection
 
 ### M6 — Pi SDK adapter and fresh isolated workers

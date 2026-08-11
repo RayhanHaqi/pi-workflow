@@ -1,8 +1,10 @@
 import { canonicalize } from "../canonical-json/index.js";
 import { sha256Canonical, type Sha256Digest } from "../identity/index.js";
+import { BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE } from "../persistence/bounded-worker-authority.js";
 import {
   assertDocumentValid,
   identifyContractDocument,
+  type BoundedWorkerResultDocument,
   type LogicalModelRole,
   type M5ControlDecisionDocument,
   type M5ControlPolicyDocument,
@@ -74,7 +76,7 @@ const EXPLICIT_LOWER_LAYER_GROUPS: Readonly<Partial<Record<FailureClass, readonl
     "COMMAND_UNEXPECTED_REPOSITORY_DELTA", "HELPER_PROTOCOL_ERROR",
   ],
   SCOPE_EXPANSION_REQUIRED: [
-    "PATH_OUTSIDE_ROOT", "PATH_NOT_EDITABLE", "FROZEN_PATH", "OWNERSHIP_FORBIDS_MUTATION", "DATA_POLICY_FORBIDS_MUTATION",
+    "OUT_OF_SCOPE_WRITE", "PATH_OUTSIDE_ROOT", "PATH_NOT_EDITABLE", "FROZEN_PATH", "OWNERSHIP_FORBIDS_MUTATION", "DATA_POLICY_FORBIDS_MUTATION",
     "HARDLINK_WRITE_SCOPE_UNSAFE", "FORBIDDEN_PATH_CHANGED", "BASELINE_PATH_UNCLASSIFIED", "BASELINE_SECRET_PRESENT", "BASELINE_SPECIAL_PATH",
     "UNEXPECTED_REPOSITORY_DELTA", "POSTFLIGHT_CLAIMED_PATHS_MISMATCH", "POSTFLIGHT_DELTA_MISMATCH",
   ],
@@ -123,7 +125,7 @@ const EXPLICIT_LOWER_LAYER_GROUPS: Readonly<Partial<Record<FailureClass, readonl
     "MALFORMED_STATE_POINTER", "INVALID_STATE_POINTER", "TERMINAL_STATE_IMMUTABLE",
   ],
   BUDGET_EXHAUSTED: [
-    "INVOCATION_CAP_EXCEEDED", "ROLE_INVOCATION_CAP_EXCEEDED", "ATTEMPT_CAP_EXCEEDED", "SOL_OWNER_CAP_EXCEEDED", "MUTATION_CYCLE_CAP_EXCEEDED",
+    "M4_TOOL_BUDGET_EXHAUSTED", "INVOCATION_CAP_EXCEEDED", "ROLE_INVOCATION_CAP_EXCEEDED", "ATTEMPT_CAP_EXCEEDED", "SOL_OWNER_CAP_EXCEEDED", "MUTATION_CYCLE_CAP_EXCEEDED",
     "REPLAN_CAP_EXCEEDED", "PATCH_LIMIT_EXCEEDED", "READ_LIMIT_EXCEEDED", "SEARCH_LIMIT_EXCEEDED", "LIST_LIMIT_EXCEEDED", "OUTPUT_LIMIT_EXCEEDED",
   ],
   ROUTE_UNAVAILABLE: ["ONE_TASK_REQUIRED", "NO_READY_LEAF", "ROUTE_MISMATCH", "ROUTE_NOT_ELIGIBLE", "NO_ELIGIBLE_ROUTE"],
@@ -336,6 +338,18 @@ export function controlRequestKey(request: EvaluateControlDecisionInput, transit
   }) as Sha256Digest;
 }
 
+const persistedBoundedWorkerSourceProvenance = new WeakSet<object>();
+
+/** Internal capability marker: only persisted resolver reconstruction may supply bounded execution authority to M5. */
+export function markPersistedBoundedWorkerAuthority<T extends M5AuthoritativeSources>(sources: T): T {
+  persistedBoundedWorkerSourceProvenance.add(sources as object);
+  return sources;
+}
+
+function hasPersistedBoundedWorkerAuthority(sources: M5AuthoritativeSources): boolean {
+  return persistedBoundedWorkerSourceProvenance.has(sources as object);
+}
+
 export function assertUsageForPolicy(usage: M5UsageEvidenceDocument, policy: M5ControlPolicyDocument): void {
   try { assertDocumentValid("pi_gacw_m5_usage_evidence_v0", usage); }
   catch (error: unknown) { throw controlError("USAGE_EVIDENCE_INVALID", "Usage evidence failed validation", error); }
@@ -363,11 +377,35 @@ function completeUsageSet(usage: readonly M5UsageEvidenceDocument[], policy: M5C
   return [...byContent.values()].sort((a, b) => compare(a.content_sha256, b.content_sha256));
 }
 
+function assertBoundedWorkerUsage(item: M5UsageEvidenceDocument, result: BoundedWorkerResultDocument): void {
+  const value = result.actual_usage;
+  const expected = new Map<M5UsageEvidenceDocument["measurements"][number]["dimension"], number | null>([
+    ["WORKER_INVOCATION", value.worker_invocations], ["TOOL_CALL", value.m4_tool_calls], ["MODEL_TURN", value.model_turns],
+    ["PROVIDER_REQUEST", value.provider_requests], ["INPUT_TOKEN", value.input_tokens], ["OUTPUT_TOKEN", value.output_tokens],
+    ["COST_MICROUSD", value.cost_microusd], ["WALL_TIME_MS", value.wall_time_ms],
+  ]);
+  if (item.operation_kind !== "WORKER_INVOCATION" || item.disposition !== "COMPLETED" || item.duration_ms !== value.wall_time_ms ||
+      item.measurements.length !== expected.size || new Set(item.measurements.map((entry) => entry.dimension)).size !== expected.size) {
+    throw controlError("USAGE_EVIDENCE_INVALID", "Bounded worker usage does not describe one settled exact worker invocation");
+  }
+  for (const measurement of item.measurements) {
+    if (!expected.has(measurement.dimension) || measurement.amount !== expected.get(measurement.dimension)) {
+      throw controlError("USAGE_EVIDENCE_INVALID", "Bounded worker usage differs from exact durable telemetry");
+    }
+  }
+}
+
 function assertUsageSourceAuthority(
   usage: readonly M5UsageEvidenceDocument[], policy: M5ControlPolicyDocument, state: WorkflowState,
   priorDecisions: readonly M5ControlDecisionDocument[], sources: M5AuthoritativeSources, input: EvaluateControlDecisionInput,
 ): void {
   const sourceKinds = new Map<string, { readonly kind: string; readonly layer: M5UsageEvidenceDocument["source_layer"] }>();
+  const boundedWorkerResults = new Map<string, BoundedWorkerResultDocument>();
+  for (const result of sources.boundedWorkerResults ?? []) {
+    const prior = boundedWorkerResults.get(result.content_sha256);
+    if (prior !== undefined && canonicalize(prior) !== canonicalize(result)) throw controlError("USAGE_EVIDENCE_INVALID", "Bounded worker source identity is ambiguous");
+    boundedWorkerResults.set(result.content_sha256, result);
+  }
   const add = (digest: string, kind: string, layer: M5UsageEvidenceDocument["source_layer"]): void => {
     const prior = sourceKinds.get(digest);
     if (prior !== undefined && (prior.kind !== kind || prior.layer !== layer)) throw controlError("USAGE_EVIDENCE_INVALID", "A source identity aliases different stored record kinds");
@@ -391,11 +429,63 @@ function assertUsageSourceAuthority(
     const source = sourceKinds.get(item.source_record_content_sha256);
     if (source === undefined) throw controlError("USAGE_EVIDENCE_INVALID", "Usage evidence source is not an exact authoritative predecessor");
     if (item.source_kind !== source.kind || item.source_layer !== source.layer) throw controlError("USAGE_EVIDENCE_INVALID", "Usage source kind or layer differs from the loaded predecessor");
+    if (source.kind === "BOUNDED_WORKER_RESULT" && source.layer === "CONTROLLER") {
+      const result = boundedWorkerResults.get(item.source_record_content_sha256);
+      if (result === undefined) throw controlError("USAGE_EVIDENCE_INVALID", "Bounded worker usage source is absent");
+      assertBoundedWorkerUsage(item, result);
+    }
     const admittedStates = new Set([state.content_sha256, ...priorDecisions.map((decision) => decision.current_state_content_sha256)]);
     if (item.reservation_decision_content_sha256 === null && !admittedStates.has(item.originating_state_content_sha256)) throw controlError("USAGE_EVIDENCE_INVALID", "Unreserved usage does not originate at the current state or an exact predecessor admission state");
     if (item.execution_mode !== null && item.execution_mode !== state.execution_mode) throw controlError("USAGE_EVIDENCE_INVALID", "Usage execution mode differs from committed route authority");
     if (item.logical_role !== null && !policy.role_reservation_envelopes.some((envelope) => envelope.logical_role === item.logical_role)) throw controlError("USAGE_EVIDENCE_INVALID", "Usage logical role lacks policy-bound route authority");
     if (item.reservation_decision_content_sha256 !== null && (item.execution_mode === null || item.logical_role === null)) throw controlError("USAGE_EVIDENCE_INVALID", "Reserved usage must bind execution mode and logical role");
+  }
+}
+
+function assertBlockedBoundedWorkerTerminalRequest(
+  request: EvaluateControlDecisionInput,
+  policy: M5ControlPolicyDocument,
+  priorDecisions: readonly M5ControlDecisionDocument[],
+  sources: M5AuthoritativeSources,
+): void {
+  const blocked = (sources.boundedWorkerResults ?? []).filter((result) => result.outcome === "BLOCKED");
+  if (blocked.length === 0) return;
+  if (!hasPersistedBoundedWorkerAuthority(sources)) {
+    throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal refusal authority must come from persisted sole-resolver reconstruction");
+  }
+  if (blocked.length !== 1 || new Set(blocked.map((result) => result.content_sha256)).size !== 1) {
+    throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal refusal authority is ambiguous");
+  }
+  const result = blocked[0]!;
+  if (!result.cleanup_certain || result.actual_usage.worker_invocations !== 1 || result.first_failure_code === null ||
+      result.first_failure_stage !== BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE) {
+    throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal refusal lacks settled durable failure authority");
+  }
+  if (request.intent !== "BLOCK") {
+    throw controlError("FAILURE_CLASSIFICATION_INVALID", "A resolved bounded terminal refusal can only consume M5 BLOCK authority");
+  }
+  const supplied = request.failures ?? [];
+  if (supplied.length !== 1) throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal BLOCK requires one exact refusal failure");
+  const failure = supplied[0]!;
+  if (failure.sourceLayer !== "CONTROLLER" || failure.sourceRecordContentSha256 !== result.content_sha256 ||
+      failure.sourceErrorCode !== result.first_failure_code || failure.operationId === undefined || request.operationId !== failure.operationId ||
+      failure.scopeIdentity !== policy.scope_sha256 || failure.repositoryIdentity !== policy.repository_identity_content_sha256 || failure.worktreeKey !== policy.worktree_key) {
+    throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal BLOCK failure does not bind the exact result identity");
+  }
+  const reservations = priorDecisions.filter((decision) => decision.outcome === "AUTHORIZE" && decision.operation_id === failure.operationId &&
+    decision.reservation !== null && decision.reservation.future_operation_id === failure.operationId);
+  if (reservations.length !== 1) throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal BLOCK lacks one exact reservation predecessor");
+  const reservation = reservations[0]!;
+  const expectedSignature = sha256Canonical({
+    protocol: "bounded-worker-terminal-refusal-v1",
+    bounded_worker_result_content_sha256: result.content_sha256,
+    first_failure_code: result.first_failure_code,
+    first_failure_stage: result.first_failure_stage,
+    operation_id: failure.operationId,
+    reservation_decision_content_sha256: reservation.content_sha256,
+  });
+  if (failure.normalizedSignature !== expectedSignature) {
+    throw controlError("FAILURE_CLASSIFICATION_INVALID", "Bounded terminal BLOCK failure does not bind the exact reservation and failure provenance");
   }
 }
 
@@ -1020,6 +1110,7 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
   if (request.intent === "AUTHORIZE_WORK" && (!WORK_ADMISSION_PHASES.has(state.phase) || request.operationId === undefined)) {
     throw controlError("ROUTE_NOT_ELIGIBLE", "Work authorization requires an exact M1 admission phase and future operation identity");
   }
+  assertBlockedBoundedWorkerTerminalRequest(request, policy, priorDecisions, sources);
   const usage = completeUsageSet([...input.persistedUsage, ...(request.usageEvidence ?? [])], policy);
   assertUsageSourceAuthority(usage, policy, state, priorDecisions, sources, request);
   const failures = classifyFailures(request.failures ?? [], priorDecisions);

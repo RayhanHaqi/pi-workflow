@@ -28,6 +28,7 @@ export type {
   M3RepositoryStateTokenDocument,
   M3RetentionResultDocument,
   M3TerminalRetentionAuthorityDocument,
+  M4AdmissionRefusalDocument,
   M4CommandCatalogDocument,
   M4CommandResultDocument,
   M4CommandSpecification,

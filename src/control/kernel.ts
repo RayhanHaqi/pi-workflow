@@ -15,7 +15,7 @@ import {
   type RouteMapDocument,
 } from "../schemas/index.js";
 import { controlError, ControlDecisionError } from "./errors.js";
-import { assertAuthoritativeSources, controlRequestKey, evaluateAuthority, orderDecisionHistory } from "./evaluate.js";
+import { assertAuthoritativeSources, controlRequestKey, evaluateAuthority, markPersistedBoundedWorkerAuthority, orderDecisionHistory } from "./evaluate.js";
 import { assertControlPolicyAuthority, deepFreezeDetached } from "./policy.js";
 import type {
   ControlDecisionInspection,
@@ -103,7 +103,8 @@ function resolvePersistedSources(
         (invocation.task_graph_sha256 !== null && taskGraph === undefined) ||
         (invocation.plan_approval_sha256 !== null && plan === undefined)) return false;
     return resolveAuthoritativeBoundedExecution({ invocation, result, reservation, reservationState, policy, baseline, approval, stateToken,
-      task: task ?? null, taskGraph: taskGraph ?? null, plan: plan ?? null, classifications: inspection.managedRecordClassifications }).accepted;
+      task: task ?? null, taskGraph: taskGraph ?? null, plan: plan ?? null,
+      admissionRefusals: new Map(records.admissionRefusals.map((entry) => [entry.content_sha256, entry])), classifications: inspection.managedRecordClassifications }).accepted;
   });
   return {
     ...(contract === undefined ? {} : { contract }),
@@ -203,13 +204,16 @@ function effectivePersistedSources(
     ...persisted,
     ...(captured ?? {}),
     ...(requested ?? {}),
+    // PERSISTED_ONLY_FOR_BOUNDED_WORKER_AUTHORITY: source selection is the
+    // resolver-derived persisted reservation scope, never a caller projection.
+    boundedWorkerResults: persisted.boundedWorkerResults ?? [],
     // M3 mutation authority is never caller-replaceable. Only records that M3
     // independently classified from this run's persisted predecessor graph apply.
     m3StateTokens: persisted.m3StateTokens ?? [],
     m3Postflights: persisted.m3Postflights ?? [],
   };
   assertAuthoritativeSources(policy, effective, strict);
-  return effective;
+  return markPersistedBoundedWorkerAuthority(effective);
 }
 
 function assertSuppliedM3AuthorityIsPersisted(

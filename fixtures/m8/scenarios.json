@@ -1,0 +1,2012 @@
+{
+  "protocol": "m8-scenario-fixtures-v1",
+  "scenarios": [
+    {
+      "scenario_id": "M8-S01",
+      "scenario_class": "mechanical edit",
+      "objective": "Apply the frozen mechanical edit objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "src/service-a.conf",
+          "mode": 420,
+          "bytes_base64": "bG9nX2xldmVsPWluZm8K"
+        },
+        {
+          "path": "src/service-b.conf",
+          "mode": 420,
+          "bytes_base64": "bG9nX2xldmVsPWluZm8K"
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "src/service-a.conf",
+        "src/service-b.conf",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/service-a.conf",
+        "src/service-b.conf"
+      ],
+      "frozen_paths": [
+        "verify"
+      ],
+      "required_outputs": [
+        "src/service-a.conf",
+        "src/service-b.conf"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s01",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/service-a.conf",
+                "src/service-b.conf"
+              ],
+              "required_outputs": [
+                "src/service-a.conf",
+                "src/service-b.conf"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/service-a.conf"
+              ],
+              "required_outputs": [
+                "src/service-a.conf"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/service-b.conf"
+              ],
+              "required_outputs": [
+                "src/service-b.conf"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s01",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/service-a.conf",
+                "src/service-b.conf"
+              ],
+              "required_outputs": [
+                "src/service-a.conf",
+                "src/service-b.conf"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "src/service-a.conf",
+          "mode": 420,
+          "bytes_base64": "bG9nX2xldmVsPXdhcm5pbmcK"
+        },
+        {
+          "type": "expected_final_file",
+          "path": "src/service-b.conf",
+          "mode": 420,
+          "bytes_base64": "bG9nX2xldmVsPXdhcm5pbmcK"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/service-a.conf"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/service-b.conf"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/service-a.conf"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/service-b.conf"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s01-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S02",
+      "scenario_class": "bounded bug fix",
+      "objective": "Apply the frozen bounded bug fix objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "src/range.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIGluY2x1ZGVzX2VuZChzdGFydCwgZW5kLCB2YWx1ZSk6CiAgICByZXR1cm4gc3RhcnQgPD0gdmFsdWUgPCBlbmQK"
+        },
+        {
+          "path": "tests/test_range.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucmFuZ2UgaW1wb3J0IGluY2x1ZGVzX2VuZAphc3NlcnQgaW5jbHVkZXNfZW5kKDIsIDUsIDIpCg=="
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "src/range.py",
+        "tests/test_range.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/range.py",
+        "tests/test_range.py"
+      ],
+      "frozen_paths": [
+        "verify"
+      ],
+      "required_outputs": [
+        "src/range.py",
+        "tests/test_range.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s02",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/range.py",
+                "tests/test_range.py"
+              ],
+              "required_outputs": [
+                "src/range.py",
+                "tests/test_range.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/range.py"
+              ],
+              "required_outputs": [
+                "src/range.py"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "tests/test_range.py"
+              ],
+              "required_outputs": [
+                "tests/test_range.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s02",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/range.py",
+                "tests/test_range.py"
+              ],
+              "required_outputs": [
+                "src/range.py",
+                "tests/test_range.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "src/range.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIGluY2x1ZGVzX2VuZChzdGFydCwgZW5kLCB2YWx1ZSk6CiAgICByZXR1cm4gc3RhcnQgPD0gdmFsdWUgPD0gZW5kCg=="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "tests/test_range.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucmFuZ2UgaW1wb3J0IGluY2x1ZGVzX2VuZAphc3NlcnQgaW5jbHVkZXNfZW5kKDIsIDUsIDUpCmFzc2VydCBub3QgaW5jbHVkZXNfZW5kKDIsIDUsIDYpCmFzc2VydCBub3QgaW5jbHVkZXNfZW5kKDIsIDUsIDEpCmFzc2VydCBpbmNsdWRlc19lbmQoMiwgNSwgMikK"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/range.py"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "tests/test_range.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/range.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "tests/test_range.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s02-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S03",
+      "scenario_class": "multi-file feature",
+      "objective": "Apply the frozen multi-file feature objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "src/catalog.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIGFkZChuYW1lLCBjYXRhbG9nKToKICAgIHJldHVybiBuYW1lCg=="
+        },
+        {
+          "path": "src/slug.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIHVuaXF1ZV9zbHVnKG5hbWUsIGNhdGFsb2cpOgogICAgcmV0dXJuIG5hbWUK"
+        },
+        {
+          "path": "tests/test_slug.py",
+          "mode": 420,
+          "bytes_base64": "YXNzZXJ0IFRydWUK"
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "src/catalog.py",
+        "src/slug.py",
+        "tests/test_slug.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/catalog.py",
+        "src/slug.py",
+        "tests/test_slug.py"
+      ],
+      "frozen_paths": [
+        "verify"
+      ],
+      "required_outputs": [
+        "src/catalog.py",
+        "src/slug.py",
+        "tests/test_slug.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 2,
+        "primary_failure_domains": 2,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s03",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/catalog.py",
+                "src/slug.py",
+                "tests/test_slug.py"
+              ],
+              "required_outputs": [
+                "src/catalog.py",
+                "src/slug.py",
+                "tests/test_slug.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/catalog.py"
+              ],
+              "required_outputs": [
+                "src/catalog.py"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/slug.py"
+              ],
+              "required_outputs": [
+                "src/slug.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            },
+            {
+              "task_id": "leaf-3",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "tests/test_slug.py"
+              ],
+              "required_outputs": [
+                "tests/test_slug.py"
+              ],
+              "dependencies": [
+                "leaf-2"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s03",
+              "objective": "Ineligible route placeholder.",
+              "editable_paths": [
+                "src/catalog.py",
+                "src/slug.py",
+                "tests/test_slug.py"
+              ],
+              "required_outputs": [
+                "src/catalog.py",
+                "src/slug.py",
+                "tests/test_slug.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "src/slug.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIHVuaXF1ZV9zbHVnKG5hbWUsIGNhdGFsb2cpOgogICAgYmFzZSA9IG5hbWUuc3RyaXAoKS5sb3dlcigpLnJlcGxhY2UoIiAiLCAiLSIpCiAgICBjYW5kaWRhdGUgPSBiYXNlCiAgICBzdWZmaXggPSAyCiAgICB3aGlsZSBjYW5kaWRhdGUgaW4gY2F0YWxvZzoKICAgICAgICBjYW5kaWRhdGUgPSBmIntiYXNlfS17c3VmZml4fSIKICAgICAgICBzdWZmaXggKz0gMQogICAgcmV0dXJuIGNhbmRpZGF0ZQo="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "src/catalog.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMuc2x1ZyBpbXBvcnQgdW5pcXVlX3NsdWcKZGVmIGFkZChuYW1lLCBjYXRhbG9nKToKICAgIHNsdWcgPSB1bmlxdWVfc2x1ZyhuYW1lLCBjYXRhbG9nKQogICAgY2F0YWxvZy5hZGQoc2x1ZykKICAgIHJldHVybiBzbHVnCg=="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "tests/test_slug.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMuY2F0YWxvZyBpbXBvcnQgYWRkCmNhdGFsb2cgPSB7ImhlbGxvLXdvcmxkIn0KYXNzZXJ0IGFkZCgiSGVsbG8gV29ybGQiLCBjYXRhbG9nKSA9PSAiaGVsbG8td29ybGQtMiIK"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/catalog.py"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/slug.py"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "tests/test_slug.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/catalog.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/slug.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "tests/test_slug.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s03-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S04",
+      "scenario_class": "refactor",
+      "objective": "Apply the frozen refactor objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "src/money.py",
+          "mode": 420,
+          "bytes_base64": "IyBzaGFyZWQgbW9uZXkgaGVscGVycwo="
+        },
+        {
+          "path": "src/pricing.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIHRvdGFsKHByaWNlLCB0YXgpOgogICAgcmV0dXJuIHByaWNlICsgcHJpY2UgKiB0YXgK"
+        },
+        {
+          "path": "tests/test_pricing.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucHJpY2luZyBpbXBvcnQgdG90YWwKYXNzZXJ0IHRvdGFsKDEwMCwgLjEpID09IDExMAo="
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "src/money.py",
+        "src/pricing.py",
+        "tests/test_pricing.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/money.py",
+        "src/pricing.py"
+      ],
+      "frozen_paths": [
+        "tests",
+        "verify"
+      ],
+      "required_outputs": [
+        "src/money.py",
+        "src/pricing.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s04",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/money.py",
+                "src/pricing.py"
+              ],
+              "required_outputs": [
+                "src/money.py",
+                "src/pricing.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/money.py"
+              ],
+              "required_outputs": [
+                "src/money.py"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/pricing.py"
+              ],
+              "required_outputs": [
+                "src/pricing.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s04",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/money.py",
+                "src/pricing.py"
+              ],
+              "required_outputs": [
+                "src/money.py",
+                "src/pricing.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "src/pricing.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMubW9uZXkgaW1wb3J0IHdpdGhfdGF4CmRlZiB0b3RhbChwcmljZSwgdGF4KToKICAgIHJldHVybiB3aXRoX3RheChwcmljZSwgdGF4KQo="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "src/money.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIHdpdGhfdGF4KHByaWNlLCB0YXgpOgogICAgcmV0dXJuIHByaWNlICsgcHJpY2UgKiB0YXgK"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/money.py"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/pricing.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/money.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/pricing.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "tests/test_pricing.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucHJpY2luZyBpbXBvcnQgdG90YWwKYXNzZXJ0IHRvdGFsKDEwMCwgLjEpID09IDExMAo="
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s04-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S05",
+      "scenario_class": "schema/config migration",
+      "objective": "Apply the frozen schema/config migration objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "config/default.json",
+          "mode": 420,
+          "bytes_base64": "eyJ0aW1lb3V0X3NlY29uZHMiOjV9Cg=="
+        },
+        {
+          "path": "config/schema.json",
+          "mode": 420,
+          "bytes_base64": "eyJ0aW1lb3V0X3NlY29uZHMiOnsidHlwZSI6ImludGVnZXIifX0K"
+        },
+        {
+          "path": "src/config.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIHRpbWVvdXQoY29uZmlnKToKICAgIHJldHVybiBjb25maWdbInRpbWVvdXRfc2Vjb25kcyJdCg=="
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "config/default.json",
+        "config/schema.json",
+        "src/config.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "config/default.json",
+        "config/schema.json",
+        "src/config.py"
+      ],
+      "frozen_paths": [
+        "verify"
+      ],
+      "required_outputs": [
+        "config/default.json",
+        "config/schema.json",
+        "src/config.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 2,
+        "primary_failure_domains": 2,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s05",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "config/default.json",
+                "config/schema.json",
+                "src/config.py"
+              ],
+              "required_outputs": [
+                "config/default.json",
+                "config/schema.json",
+                "src/config.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "config/default.json"
+              ],
+              "required_outputs": [
+                "config/default.json"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "config/schema.json"
+              ],
+              "required_outputs": [
+                "config/schema.json"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            },
+            {
+              "task_id": "leaf-3",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/config.py"
+              ],
+              "required_outputs": [
+                "src/config.py"
+              ],
+              "dependencies": [
+                "leaf-2"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s05",
+              "objective": "Ineligible route placeholder.",
+              "editable_paths": [
+                "config/default.json",
+                "config/schema.json",
+                "src/config.py"
+              ],
+              "required_outputs": [
+                "config/default.json",
+                "config/schema.json",
+                "src/config.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "config/schema.json",
+          "mode": 420,
+          "bytes_base64": "eyJ0aW1lb3V0X21zIjp7InR5cGUiOiJpbnRlZ2VyIn19Cg=="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "config/default.json",
+          "mode": 420,
+          "bytes_base64": "eyJ0aW1lb3V0X21zIjo1MDAwfQo="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "src/config.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIHRpbWVvdXQoY29uZmlnKToKICAgIHJldHVybiBjb25maWdbInRpbWVvdXRfbXMiXQo="
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "config/default.json"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "config/schema.json"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/config.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "config/default.json"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "config/schema.json"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/config.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s05-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S06",
+      "scenario_class": "CI repair",
+      "objective": "Apply the frozen CI repair objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": ".ci/checks.json",
+          "mode": 420,
+          "bytes_base64": "eyJ0YXJnZXQiOiJ0ZXN0cy9vbGRfc21va2UucHkifQo="
+        },
+        {
+          "path": "scripts/ci_check.py",
+          "mode": 420,
+          "bytes_base64": "VEFSR0VUID0gInRlc3RzL29sZF9zbW9rZS5weSIK"
+        },
+        {
+          "path": "tests/test_smoke.py",
+          "mode": 420,
+          "bytes_base64": "YXNzZXJ0IFRydWUK"
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        ".ci/checks.json",
+        "scripts/ci_check.py",
+        "tests/test_smoke.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        ".ci/checks.json",
+        "scripts/ci_check.py"
+      ],
+      "frozen_paths": [
+        "tests",
+        "verify"
+      ],
+      "required_outputs": [
+        ".ci/checks.json",
+        "scripts/ci_check.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s06",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                ".ci/checks.json",
+                "scripts/ci_check.py"
+              ],
+              "required_outputs": [
+                ".ci/checks.json",
+                "scripts/ci_check.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                ".ci/checks.json"
+              ],
+              "required_outputs": [
+                ".ci/checks.json"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "scripts/ci_check.py"
+              ],
+              "required_outputs": [
+                "scripts/ci_check.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s06",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                ".ci/checks.json",
+                "scripts/ci_check.py"
+              ],
+              "required_outputs": [
+                ".ci/checks.json",
+                "scripts/ci_check.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": ".ci/checks.json",
+          "mode": 420,
+          "bytes_base64": "eyJ0YXJnZXQiOiJ0ZXN0cy90ZXN0X3Ntb2tlLnB5In0K"
+        },
+        {
+          "type": "expected_final_file",
+          "path": "scripts/ci_check.py",
+          "mode": 420,
+          "bytes_base64": "VEFSR0VUID0gInRlc3RzL3Rlc3Rfc21va2UucHkiCg=="
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": ".ci/checks.json"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "scripts/ci_check.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": ".ci/checks.json"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "scripts/ci_check.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "tests/test_smoke.py",
+          "mode": 420,
+          "bytes_base64": "YXNzZXJ0IFRydWUK"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s06-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S07",
+      "scenario_class": "docs + code",
+      "objective": "Apply the frozen docs + code objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "docs/retry.md",
+          "mode": 420,
+          "bytes_base64": "VGhlIGRlZmF1bHQgcmV0cnkgY291bnQgaXMgMy4K"
+        },
+        {
+          "path": "src/retry.py",
+          "mode": 420,
+          "bytes_base64": "REVGQVVMVF9SRVRSSUVTID0gMwo="
+        },
+        {
+          "path": "tests/test_retry.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucmV0cnkgaW1wb3J0IERFRkFVTFRfUkVUUklFUwphc3NlcnQgREVGQVVMVF9SRVRSSUVTID09IDIK"
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "docs/retry.md",
+        "src/retry.py",
+        "tests/test_retry.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "docs/retry.md",
+        "src/retry.py"
+      ],
+      "frozen_paths": [
+        "tests",
+        "verify"
+      ],
+      "required_outputs": [
+        "docs/retry.md",
+        "src/retry.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 2,
+        "primary_failure_domains": 2,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s07",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "docs/retry.md",
+                "src/retry.py"
+              ],
+              "required_outputs": [
+                "docs/retry.md",
+                "src/retry.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "docs/retry.md"
+              ],
+              "required_outputs": [
+                "docs/retry.md"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own frozen output.",
+              "editable_paths": [
+                "src/retry.py"
+              ],
+              "required_outputs": [
+                "src/retry.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s07",
+              "objective": "Ineligible route placeholder.",
+              "editable_paths": [
+                "docs/retry.md",
+                "src/retry.py"
+              ],
+              "required_outputs": [
+                "docs/retry.md",
+                "src/retry.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "src/retry.py",
+          "mode": 420,
+          "bytes_base64": "REVGQVVMVF9SRVRSSUVTID0gMgo="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "docs/retry.md",
+          "mode": 420,
+          "bytes_base64": "VGhlIGRlZmF1bHQgcmV0cnkgY291bnQgaXMgMi4K"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "docs/retry.md"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/retry.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "docs/retry.md"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/retry.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "tests/test_retry.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucmV0cnkgaW1wb3J0IERFRkFVTFRfUkVUUklFUwphc3NlcnQgREVGQVVMVF9SRVRSSUVTID09IDIK"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s07-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S08",
+      "scenario_class": "approved dirty baseline",
+      "objective": "Apply the frozen approved dirty baseline objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "src/feature.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIGVuYWJsZWQoKToKICAgIHJldHVybiBGYWxzZQo="
+        },
+        {
+          "path": "tests/test_feature.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMuZmVhdHVyZSBpbXBvcnQgZW5hYmxlZAphc3NlcnQgZW5hYmxlZCgpCg=="
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": [
+        {
+          "path": "notes/owner.txt",
+          "mode": 420,
+          "bytes_base64": "b3duZXIgZGlydHkgb3ZlcmxheQo="
+        }
+      ],
+      "readable_paths": [
+        "notes/owner.txt",
+        "src/feature.py",
+        "tests/test_feature.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/feature.py",
+        "tests/test_feature.py"
+      ],
+      "frozen_paths": [
+        "verify"
+      ],
+      "required_outputs": [
+        "src/feature.py",
+        "tests/test_feature.py"
+      ],
+      "expected_behavior": {
+        "terminal": "PASS",
+        "task_success": true,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "PASS"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s08",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/feature.py",
+                "tests/test_feature.py"
+              ],
+              "required_outputs": [
+                "src/feature.py",
+                "tests/test_feature.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Fix feature.",
+              "editable_paths": [
+                "src/feature.py"
+              ],
+              "required_outputs": [
+                "src/feature.py"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Add regression.",
+              "editable_paths": [
+                "tests/test_feature.py"
+              ],
+              "required_outputs": [
+                "tests/test_feature.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s08",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/feature.py",
+                "tests/test_feature.py"
+              ],
+              "required_outputs": [
+                "src/feature.py",
+                "tests/test_feature.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "PASS",
+      "acceptance_facts": [
+        {
+          "type": "expected_final_file",
+          "path": "src/feature.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIGVuYWJsZWQoKToKICAgIHJldHVybiBUcnVlCg=="
+        },
+        {
+          "type": "expected_final_file",
+          "path": "tests/test_feature.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMuZmVhdHVyZSBpbXBvcnQgZW5hYmxlZAphc3NlcnQgZW5hYmxlZCgpCiMgcmVncmVzc2lvbjogZW5hYmxlZCBieSBkZWZhdWx0Cg=="
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/feature.py"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "tests/test_feature.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "src/feature.py"
+        },
+        {
+          "type": "required_changed_path",
+          "path": "tests/test_feature.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "approved_dirty_overlay",
+          "path": "notes/owner.txt",
+          "mode": 420,
+          "bytes_base64": "b3duZXIgZGlydHkgb3ZlcmxheQo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s08-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "PASS"
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S09",
+      "scenario_class": "budget exhaustion",
+      "objective": "Apply the frozen budget exhaustion objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "src/first.txt",
+          "mode": 420,
+          "bytes_base64": "Zmlyc3QK"
+        },
+        {
+          "path": "src/second.txt",
+          "mode": 420,
+          "bytes_base64": "c2Vjb25kCg=="
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "src/first.txt",
+        "src/second.txt",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/first.txt",
+        "src/second.txt"
+      ],
+      "frozen_paths": [
+        "verify"
+      ],
+      "required_outputs": [
+        "src/first.txt",
+        "src/second.txt"
+      ],
+      "expected_behavior": {
+        "terminal": "BLOCKED",
+        "task_success": false,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "BLOCKED"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": 1,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s09",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/first.txt",
+                "src/second.txt"
+              ],
+              "required_outputs": [
+                "src/first.txt",
+                "src/second.txt"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own first frozen output.",
+              "editable_paths": [
+                "src/first.txt"
+              ],
+              "required_outputs": [
+                "src/first.txt"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own second frozen output.",
+              "editable_paths": [
+                "src/second.txt"
+              ],
+              "required_outputs": [
+                "src/second.txt"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s09",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/first.txt",
+                "src/second.txt"
+              ],
+              "required_outputs": [
+                "src/first.txt",
+                "src/second.txt"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "BLOCKED",
+      "acceptance_facts": [
+        {
+          "type": "allowed_changed_path",
+          "path": "src/first.txt"
+        },
+        {
+          "type": "allowed_changed_path",
+          "path": "src/second.txt"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s09-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "BLOCKED"
+        },
+        {
+          "type": "required_budget_fact",
+          "hard_mutation_tool_limit": 1,
+          "accepted_productive_mutations_at_most": 1,
+          "second_productive_mutation_rejected": true,
+          "no_productive_continuation_after_exhaustion": true
+        }
+      ]
+    },
+    {
+      "scenario_id": "M8-S10",
+      "scenario_class": "scope expansion",
+      "objective": "Apply the frozen scope expansion objective.",
+      "representative_rationale": "Deterministic fixture acceptance.",
+      "initial_files": [
+        {
+          "path": "registry/plugins.json",
+          "mode": 420,
+          "bytes_base64": "eyJwbHVnaW5zIjpbXX0K"
+        },
+        {
+          "path": "src/plugin.py",
+          "mode": 420,
+          "bytes_base64": "ZGVmIGVuYWJsZWQoKToKICAgIHJldHVybiBGYWxzZQo="
+        },
+        {
+          "path": "tests/test_plugin.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucGx1Z2luIGltcG9ydCBlbmFibGVkCmFzc2VydCBlbmFibGVkKCkK"
+        },
+        {
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        }
+      ],
+      "approved_dirty_overlay": null,
+      "readable_paths": [
+        "registry/plugins.json",
+        "src/plugin.py",
+        "tests/test_plugin.py",
+        "verify",
+        "verify/check.mjs"
+      ],
+      "editable_paths": [
+        "src/plugin.py",
+        "tests/test_plugin.py"
+      ],
+      "frozen_paths": [
+        "registry",
+        "verify"
+      ],
+      "required_outputs": [
+        "src/plugin.py",
+        "tests/test_plugin.py"
+      ],
+      "expected_behavior": {
+        "terminal": "BLOCKED",
+        "task_success": false,
+        "workflow_correctness": true,
+        "pilot_validity": true
+      },
+      "acceptance_properties": [],
+      "verification": {
+        "executable": "/usr/bin/node",
+        "args": [
+          "verify/check.mjs"
+        ],
+        "cwd": ".",
+        "timeout_ms": 10000,
+        "expected_exit": 0,
+        "expected_result": "BLOCKED"
+      },
+      "stopping_conditions": [
+        "Stop at deterministic acceptance."
+      ],
+      "direct_eligibility": {
+        "coherent_work_units": 1,
+        "primary_failure_domains": 1,
+        "scope_definition_complete": true,
+        "deterministic_acceptance": true,
+        "semantics_frozen": true,
+        "ambiguous_write_ownership": false,
+        "hard_sol_conditions": []
+      },
+      "controller_limits": {
+        "hard_m4_mutation_tool_limit": null,
+        "max_replans": 0
+      },
+      "routes": {
+        "SINGLE_OWNER_SOL": {
+          "tasks": [
+            {
+              "task_id": "sol-m8-s10",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/plugin.py",
+                "tests/test_plugin.py"
+              ],
+              "required_outputs": [
+                "src/plugin.py",
+                "tests/test_plugin.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        },
+        "ROUTED_DAG": {
+          "tasks": [
+            {
+              "task_id": "leaf-1",
+              "objective": "Own plugin output.",
+              "editable_paths": [
+                "src/plugin.py"
+              ],
+              "required_outputs": [
+                "src/plugin.py"
+              ],
+              "dependencies": []
+            },
+            {
+              "task_id": "leaf-2",
+              "objective": "Own test output.",
+              "editable_paths": [
+                "tests/test_plugin.py"
+              ],
+              "required_outputs": [
+                "tests/test_plugin.py"
+              ],
+              "dependencies": [
+                "leaf-1"
+              ]
+            }
+          ]
+        },
+        "DIRECT_LUNA_HIGH": {
+          "tasks": [
+            {
+              "task_id": "direct-m8-s10",
+              "objective": "Own frozen objective.",
+              "editable_paths": [
+                "src/plugin.py",
+                "tests/test_plugin.py"
+              ],
+              "required_outputs": [
+                "src/plugin.py",
+                "tests/test_plugin.py"
+              ],
+              "dependencies": []
+            }
+          ]
+        }
+      },
+      "expected_terminal_policy": "BLOCKED",
+      "acceptance_facts": [
+        {
+          "type": "allowed_changed_path",
+          "path": "src/plugin.py"
+        },
+        {
+          "type": "frozen_file",
+          "path": "registry/plugins.json",
+          "mode": 420,
+          "bytes_base64": "eyJwbHVnaW5zIjpbXX0K"
+        },
+        {
+          "type": "frozen_file",
+          "path": "tests/test_plugin.py",
+          "mode": 420,
+          "bytes_base64": "ZnJvbSBzcmMucGx1Z2luIGltcG9ydCBlbmFibGVkCmFzc2VydCBlbmFibGVkKCkK"
+        },
+        {
+          "type": "frozen_file",
+          "path": "verify/check.mjs",
+          "mode": 420,
+          "bytes_base64": "cHJvY2Vzcy5leGl0KDApOwo="
+        },
+        {
+          "type": "required_command_result",
+          "command_id": "m8-s10-verify",
+          "executable": "/usr/bin/node",
+          "args": [
+            "verify/check.mjs"
+          ],
+          "cwd": "verify",
+          "expected_exit": 0
+        },
+        {
+          "type": "expected_terminal",
+          "terminal": "BLOCKED"
+        },
+        {
+          "type": "required_scope_refusal",
+          "required_objective_unsatisfied": true,
+          "scope_refusal_observed": true
+        }
+      ]
+    }
+  ]
+}

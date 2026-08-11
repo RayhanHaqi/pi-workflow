@@ -189,7 +189,8 @@ export async function runSandboxedCommand(
       shell: false,
       cwd: temporaryRoot,
       env: { LC_ALL: "C", LANG: "C", PYTHONHASHSEED: "0" },
-      detached: true,
+      // The helper creates its own process group, but must inherit the productive
+      // invocation session so the external lifecycle owner can terminate it.
       stdio: ["pipe", "pipe", "pipe", "pipe", executableHandle.fd],
     });
     const stdout: Buffer[] = []; const stderr: Buffer[] = []; let stdoutBytes = 0; let stderrBytes = 0;

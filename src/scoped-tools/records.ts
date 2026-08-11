@@ -9,6 +9,7 @@ import { assertStateRootCapacity } from "../repository/storage.js";
 import { assertAbsoluteNormalizedPath, assertDigest, assertNonemptyString, detachedFrozen, digestHex } from "../repository/utils.js";
 import {
   assertDocumentValid,
+  type M4AdmissionRefusalDocument,
   type M4CommandCatalogDocument,
   type M4CommandResultDocument,
   type M4MutationReceiptDocument,
@@ -31,9 +32,11 @@ export type M4RecordKind =
   | "PATCH_REQUEST"
   | "TOOL_RESULT"
   | "MUTATION_RECEIPT"
-  | "COMMAND_RESULT";
+  | "COMMAND_RESULT"
+  | "ADMISSION_REFUSAL";
 
 export type M4RecordDocumentByKind = {
+  readonly ADMISSION_REFUSAL: M4AdmissionRefusalDocument;
   readonly SECURE_FS_CAPABILITY: M4SecureFilesystemCapabilityDocument;
   readonly SANDBOX_CAPABILITY: M4SandboxCapabilityDocument;
   readonly TOOL_POLICY: M4ScopedToolPolicyDocument;
@@ -59,6 +62,7 @@ export const M4_RECORD_DEFINITIONS: Readonly<Record<M4RecordKind, {
   TOOL_RESULT: { directory: "tool-results", schemaId: "pi_gacw_tool_result_v0", persistenceKind: "M4_TOOL_RESULT" },
   MUTATION_RECEIPT: { directory: "mutation-receipts", schemaId: "pi_gacw_mutation_receipt_v0", persistenceKind: "M4_MUTATION_RECEIPT" },
   COMMAND_RESULT: { directory: "command-results", schemaId: "pi_gacw_command_result_v0", persistenceKind: "M4_COMMAND_RESULT" },
+  ADMISSION_REFUSAL: { directory: "m4-admission-refusals", schemaId: "pi_gacw_m4_admission_refusal_v0", persistenceKind: "M4_ADMISSION_REFUSAL" },
 });
 
 export interface M4StorageLocation { readonly stateRoot: string; readonly runId: string }
@@ -87,7 +91,9 @@ async function assertUsable(location: M4StorageLocation): Promise<void> {
   if (inspection.status !== "HEALTHY") throw new ScopedToolGatewayError("EVIDENCE_PUBLICATION_FAILED", "Run storage is not healthy", { status: inspection.status });
 }
 
-export async function publishM4Record<K extends M4RecordKind>(
+type GenericM4RecordKind = Exclude<M4RecordKind, "ADMISSION_REFUSAL">;
+
+async function publishRecord<K extends M4RecordKind>(
   location: M4StorageLocation,
   kind: K,
   document: M4RecordDocumentByKind[K],
@@ -109,6 +115,48 @@ export async function publishM4Record<K extends M4RecordKind>(
     if (error instanceof ScopedToolGatewayError) throw error;
     throw scopedToolError("EVIDENCE_PUBLICATION_FAILED", `Cannot publish immutable ${kind} record`, error);
   }
+}
+
+/** Generic M4 persistence excludes producer-only admission refusals. */
+export async function publishM4Record<K extends GenericM4RecordKind>(
+  location: M4StorageLocation,
+  kind: K,
+  document: M4RecordDocumentByKind[K],
+): Promise<{ readonly relativePath: string; readonly reused: boolean }> {
+  if ((kind as M4RecordKind) === "ADMISSION_REFUSAL") {
+    throw new ScopedToolGatewayError("EVIDENCE_PUBLICATION_FAILED", "M4 admission refusals require the bounded-worker producer path");
+  }
+  return publishRecord(location, kind, document);
+}
+
+/** Package-internal bounded-admission publication path; not exported by ./scoped-tools. */
+export async function publishM4AdmissionRefusalRecord(
+  location: M4StorageLocation,
+  document: M4AdmissionRefusalDocument,
+): Promise<{ readonly relativePath: string; readonly reused: boolean }> {
+  // Refuse before publication unless the exact immutable invocation already
+  // exists as trusted managed authority; this prevents an orphan refusal from
+  // ever becoming a substitute for the producer ordering guarantee.
+  const predecessor = await inspectRunStorage(location);
+  const invocation = predecessor.managedRecordClassifications.find((entry) =>
+    entry.object.kind === "BOUNDED_WORKER_INVOCATION" && entry.object.contentSha256 === document.bounded_worker_invocation_content_sha256,
+  );
+  if (predecessor.status !== "HEALTHY" || invocation?.classification !== "AUTHORITATIVE_MANAGED_RECORD") {
+    throw new ScopedToolGatewayError("EVIDENCE_PUBLICATION_FAILED", "M4 admission refusal requires a prior authoritative bounded invocation", {
+      invocation: invocation?.classification ?? "ABSENT",
+    });
+  }
+  const published = await publishRecord(location, "ADMISSION_REFUSAL", document);
+  const inspection = await inspectRunStorage(location);
+  const classification = inspection.managedRecordClassifications.find((entry) =>
+    entry.object.kind === "M4_ADMISSION_REFUSAL" && entry.object.contentSha256 === document.content_sha256,
+  );
+  if (inspection.status !== "HEALTHY" || classification?.classification !== "AUTHORITATIVE_MANAGED_RECORD") {
+    throw new ScopedToolGatewayError("EVIDENCE_PUBLICATION_FAILED", "M4 admission refusal lacks exact producer authority", {
+      classification: classification?.classification ?? "ABSENT",
+    });
+  }
+  return published;
 }
 
 export async function readM4Record<K extends M4RecordKind>(

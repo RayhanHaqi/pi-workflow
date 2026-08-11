@@ -27,6 +27,7 @@ import {
   type M3RepositoryStateTokenDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
+  type M4AdmissionRefusalDocument,
   type M4CommandCatalogDocument,
   type M4CommandResultDocument,
   type M4MutationReceiptDocument,
@@ -129,6 +130,7 @@ interface RunLayout {
   readonly toolResultDirectory: string;
   readonly mutationReceiptDirectory: string;
   readonly commandResultDirectory: string;
+  readonly m4AdmissionRefusalDirectory: string;
   readonly m5ControlPolicyDirectory: string;
   readonly m5UsageEvidenceDirectory: string;
   readonly m5ControlDecisionDirectory: string;
@@ -169,6 +171,7 @@ interface JsonKindDefinition {
     | "toolResultDirectory"
     | "mutationReceiptDirectory"
     | "commandResultDirectory"
+    | "m4AdmissionRefusalDirectory"
     | "m5ControlPolicyDirectory"
     | "m5UsageEvidenceDirectory"
     | "m5ControlDecisionDirectory"
@@ -205,6 +208,7 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M4_TOOL_RESULT", schemaId: "pi_gacw_tool_result_v0", directory: "toolResultDirectory" },
   { kind: "M4_MUTATION_RECEIPT", schemaId: "pi_gacw_mutation_receipt_v0", directory: "mutationReceiptDirectory" },
   { kind: "M4_COMMAND_RESULT", schemaId: "pi_gacw_command_result_v0", directory: "commandResultDirectory" },
+  { kind: "M4_ADMISSION_REFUSAL", schemaId: "pi_gacw_m4_admission_refusal_v0", directory: "m4AdmissionRefusalDirectory" },
   { kind: "M5_CONTROL_POLICY", schemaId: "pi_gacw_m5_control_policy_v0", directory: "m5ControlPolicyDirectory" },
   { kind: "M5_USAGE_EVIDENCE", schemaId: "pi_gacw_m5_usage_evidence_v0", directory: "m5UsageEvidenceDirectory" },
   { kind: "M5_CONTROL_DECISION", schemaId: "pi_gacw_m5_control_decision_v0", directory: "m5ControlDecisionDirectory" },
@@ -216,6 +220,9 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
 const JSON_KIND_BY_DIRECTORY = new Map(JSON_KINDS.map((definition) => [definition.directory, definition]));
+/** Historical layouts predate this additive evidence collection and remain read-only compatible. */
+const LEGACY_OPTIONAL_JSON_KINDS = new Set<JsonStoredObjectKind>(["M4_ADMISSION_REFUSAL"]);
+function isLegacyOptionalJsonKind(kind: JsonStoredObjectKind): boolean { return LEGACY_OPTIONAL_JSON_KINDS.has(kind); }
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
@@ -362,6 +369,7 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     toolResultDirectory: join(recordsDirectory, "tool-results"),
     mutationReceiptDirectory: join(recordsDirectory, "mutation-receipts"),
     commandResultDirectory: join(recordsDirectory, "command-results"),
+    m4AdmissionRefusalDirectory: join(recordsDirectory, "m4-admission-refusals"),
     m5ControlPolicyDirectory: join(recordsDirectory, "m5-control-policies"),
     m5UsageEvidenceDirectory: join(recordsDirectory, "m5-usage-evidence"),
     m5ControlDecisionDirectory: join(recordsDirectory, "m5-control-decisions"),
@@ -603,6 +611,7 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.toolResultDirectory);
   await ensurePrivateDirectory(layout.mutationReceiptDirectory);
   await ensurePrivateDirectory(layout.commandResultDirectory);
+  await ensurePrivateDirectory(layout.m4AdmissionRefusalDirectory);
   await ensurePrivateDirectory(layout.m5ControlPolicyDirectory);
   await ensurePrivateDirectory(layout.m5UsageEvidenceDirectory);
   await ensurePrivateDirectory(layout.m5ControlDecisionDirectory);
@@ -657,6 +666,9 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
     layout.commitsDirectory,
   ]) {
     await assertPrivateDirectory(directory);
+  }
+  if (await existingStats(layout.m4AdmissionRefusalDirectory) !== undefined) {
+    await assertPrivateDirectory(layout.m4AdmissionRefusalDirectory);
   }
 }
 
@@ -855,6 +867,7 @@ function uniqueSourceByContent<T extends { readonly content_sha256: string }>(va
 function resolvedBoundedWorkerResultsForM5(
   results: ReadonlyMap<string, BoundedWorkerResultDocument>,
   invocations: ReadonlyMap<string, BoundedWorkerInvocationDocument>,
+  admissionRefusals: ReadonlyMap<string, M4AdmissionRefusalDocument>,
   decisions: ReadonlyMap<string, M5ControlDecisionDocument>,
   policies: ReadonlyMap<string, M5ControlPolicyDocument>,
   baselines: ReadonlyMap<string, M3BaselineRuntimeDocument>,
@@ -886,7 +899,7 @@ function resolvedBoundedWorkerResultsForM5(
         (invocation.task_graph_sha256 !== null && taskGraph === undefined) ||
         (invocation.plan_approval_sha256 !== null && plan === undefined)) continue;
     if (resolveAuthoritativeBoundedExecution({ invocation, result, reservation, reservationState, policy, baseline, approval, stateToken: token,
-      task: task ?? null, taskGraph: taskGraph ?? null, plan: plan ?? null, classifications }).accepted) accepted.push(result);
+      task: task ?? null, taskGraph: taskGraph ?? null, plan: plan ?? null, admissionRefusals, classifications }).accepted) accepted.push(result);
   }
   return accepted.sort((left, right) => compareText(left.content_sha256, right.content_sha256));
 }
@@ -1433,6 +1446,7 @@ async function scanLayout(
     "tool-results",
     "mutation-receipts",
     "command-results",
+    "m4-admission-refusals",
     "transition-events",
     "workflow-states",
     "m5-control-policies",
@@ -1444,7 +1458,9 @@ async function scanLayout(
     "bounded-worker-results",
   ].sort();
   const recordChildren = (await readdir(layout.recordsDirectory)).sort();
-  if (canonicalize(recordChildren) !== canonicalize(expectedRecordNames)) {
+  const optionalRecordNames = new Set(["m4-admission-refusals"]);
+  if (recordChildren.some((name) => !expectedRecordNames.includes(name)) ||
+      expectedRecordNames.some((name) => !optionalRecordNames.has(name) && !recordChildren.includes(name))) {
     throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath: "records", detail: "Records directory has a missing or unexpected entry" });
   }
 
@@ -1463,6 +1479,7 @@ async function scanLayout(
   );
   objects.push(...baselineBlobs.objects); temporaryFiles.push(...baselineBlobs.temporaryFiles);
   for (const definition of JSON_KINDS) {
+    if (isLegacyOptionalJsonKind(definition.kind) && await existingStats(layout[definition.directory]) === undefined) continue;
     const scanned = await scanObjectDirectory(layout, layout[definition.directory], definition.kind, JSON_DIGEST_FILE_PATTERN);
     objects.push(...scanned.objects); temporaryFiles.push(...scanned.temporaryFiles);
   }
@@ -1504,7 +1521,7 @@ const M3_MANAGED_KINDS = new Set<StoredObjectKind>([
 
 const M4_MANAGED_KINDS = new Set<StoredObjectKind>([
   "M4_SECURE_FS_CAPABILITY", "M4_SANDBOX_CAPABILITY", "M4_TOOL_POLICY", "M4_COMMAND_CATALOG",
-  "M4_TOOL_REQUEST", "M4_PATCH_REQUEST", "M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT",
+  "M4_TOOL_REQUEST", "M4_PATCH_REQUEST", "M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT", "M4_ADMISSION_REFUSAL",
 ]);
 
 const M5_MANAGED_KINDS = new Set<StoredObjectKind>(["M5_CONTROL_POLICY", "M5_USAGE_EVIDENCE", "M5_CONTROL_DECISION"]);
@@ -1559,6 +1576,7 @@ async function classifyManagedRecords(
   const toolResults = new Map<string, M4ToolResultDocument>();
   const mutationReceipts = new Map<string, M4MutationReceiptDocument>();
   const commandResults = new Map<string, M4CommandResultDocument>();
+  const admissionRefusals = new Map<string, M4AdmissionRefusalDocument>();
   const workflowStates = new Map<string, WorkflowState>();
   const reducerPolicies = new Map<string, ReducerPolicy>();
   const m5Policies = new Map<string, M5ControlPolicyDocument>();
@@ -1596,6 +1614,7 @@ async function classifyManagedRecords(
     else if (object.kind === "M4_TOOL_RESULT") toolResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M4_MUTATION_RECEIPT") mutationReceipts.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M4_COMMAND_RESULT") commandResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M4_ADMISSION_REFUSAL") admissionRefusals.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M5_CONTROL_POLICY") m5Policies.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M5_USAGE_EVIDENCE") m5Usage.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M5_CONTROL_DECISION") m5Decisions.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
@@ -1637,6 +1656,7 @@ async function classifyManagedRecords(
   const m4 = await classifyM4Authority({
     runId: basename(layout.runDirectory), objects, m3Classifications: m3, baselines, locks: lockAcquisitions, tokens, postflights,
     secureCapabilities, sandboxCapabilities, policies, catalogs, toolRequests, patchRequests, toolResults, mutationReceipts, commandResults,
+    admissionRefusals, boundedInvocations,
   });
   const reachableRawEvidence = new Set([...graph.reachable.values()].filter((entry) => entry.kind === "RAW_EVIDENCE").map((entry) => entry.contentSha256));
   const committedWorkflowStateDigests = new Set([...graph.reachable.values()].filter((entry) => entry.kind === "WORKFLOW_STATE").map((entry) => entry.contentSha256));
@@ -1741,6 +1761,11 @@ async function classifyManagedRecords(
   const sourcePolicies = [...m5Policies.values()].filter((entry) => entry.run_id === basename(layout.runDirectory));
   const persistedM5Sources = sourcePolicies.length === 1 && sourcePolicies[0]!.production_authority === "OWNER_APPROVED"
     ? selectM5Sources(sourcePolicies[0]!, sourceCandidates) : {};
+  const boundedResultReservationDecisionDigests = new Map<string, string>();
+  for (const [digest, result] of boundedResults) {
+    const invocation = boundedInvocations.get(result.invocation_content_sha256);
+    if (invocation !== undefined) boundedResultReservationDecisionDigests.set(digest, invocation.m5_reservation_decision_content_sha256);
+  }
   const commonM5Sources = {
     ...persistedM5Sources,
     m4CommandResults: [...commandResults.values()].filter((entry) => authoritative("M4_COMMAND_RESULT", entry.content_sha256)),
@@ -1754,6 +1779,7 @@ async function classifyManagedRecords(
     runId: basename(layout.runDirectory), workflowState: graph.currentState, workflowStates, objects, priorClassifications: [...m3, ...m4, ...bounded],
     policies: m5Policies, usage: m5Usage, decisions: m5Decisions, reducerPolicies, m4Policies: authoritativeM4Policies, m4Catalogs: authoritativeM4Catalogs, reachableRawEvidence, typedTransitionDecisionDigests, runAuthorityValidatedPolicyDigests, committedWorkflowStateDigests,
     authoritativeSources: { ...commonM5Sources, boundedWorkerResults: resolved },
+    boundedResultReservationDecisionDigests,
   });
   // Start with no bounded-worker M5 source. Each bounded result enters the next
   // M5 reconstruction pass only after the sole cross-layer resolver accepted it.
@@ -1762,7 +1788,11 @@ async function classifyManagedRecords(
   let resolutionSettled = false;
   for (let iteration = 0; iteration <= boundedResults.size; iteration += 1) {
     m5 = classifyM5WithResolvedBounded(resolvedBoundedWorkerResults);
-    const next = resolvedBoundedWorkerResultsForM5(boundedResults, boundedInvocations, m5Decisions, m5Policies, baselines, approvals, tokens, workflowStates, sourceCandidates, [...m3, ...m4, ...bounded, ...m5]);
+    const newlyResolved = resolvedBoundedWorkerResultsForM5(boundedResults, boundedInvocations, admissionRefusals, m5Decisions, m5Policies, baselines, approvals, tokens, workflowStates, sourceCandidates, [...m3, ...m4, ...bounded, ...m5]);
+    // Resolver acceptance is rooted in the exact pre-existing reservation and
+    // must not oscillate when the terminal M5 decision later consumes it.
+    const next = [...new Map([...resolvedBoundedWorkerResults, ...newlyResolved].map((entry) => [entry.content_sha256, entry])).values()]
+      .sort((left, right) => compareText(left.content_sha256, right.content_sha256));
     if (next.length === resolvedBoundedWorkerResults.length && next.every((entry, index) => entry.content_sha256 === resolvedBoundedWorkerResults[index]?.content_sha256)) {
       resolvedBoundedWorkerResults = next;
       resolutionSettled = true;
@@ -2040,6 +2070,11 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   readonly decisions: readonly M5ControlDecisionDocument[];
   readonly toolPolicies: readonly M4ScopedToolPolicyDocument[];
   readonly commandCatalogs: readonly M4CommandCatalogDocument[];
+  /** Narrow M8 durable-evidence reader; records remain validated immutable M4 authority. */
+  readonly toolResults: readonly M4ToolResultDocument[];
+  readonly mutationReceipts: readonly M4MutationReceiptDocument[];
+  readonly commandResults: readonly M4CommandResultDocument[];
+  readonly admissionRefusals: readonly M4AdmissionRefusalDocument[];
   readonly baselines: readonly M3BaselineRuntimeDocument[];
   readonly approvals: readonly M3BaselineApprovalRuntimeDocument[];
   readonly stateTokens: readonly M3RepositoryStateTokenDocument[];
@@ -2061,6 +2096,7 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   const sourceCandidates = await readM5SourceCandidates(layout, new Map([...inspection.reachableObjects, ...inspection.orphanedObjects].map((object) => [object.relativePath, object])));
   const load = async <T extends Record<string, unknown>>(kind: JsonStoredObjectKind): Promise<T[]> => {
     const definition = JSON_KIND_BY_NAME.get(kind)!;
+    if (isLegacyOptionalJsonKind(kind) && await existingStats(layout[definition.directory]) === undefined) return [];
     const names = (await readdir(layout[definition.directory])).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
     const values: T[] = [];
     for (const name of names) values.push(await readJsonDocument<T>(layout, kind, `sha256:${name.slice(0, -5)}`));
@@ -2072,6 +2108,10 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
     decisions: await load<M5ControlDecisionDocument>("M5_CONTROL_DECISION"),
     toolPolicies: await load<M4ScopedToolPolicyDocument>("M4_TOOL_POLICY"),
     commandCatalogs: await load<M4CommandCatalogDocument>("M4_COMMAND_CATALOG"),
+    toolResults: await load<M4ToolResultDocument>("M4_TOOL_RESULT"),
+    mutationReceipts: await load<M4MutationReceiptDocument>("M4_MUTATION_RECEIPT"),
+    commandResults: await load<M4CommandResultDocument>("M4_COMMAND_RESULT"),
+    admissionRefusals: await load<M4AdmissionRefusalDocument>("M4_ADMISSION_REFUSAL"),
     baselines: await load<M3BaselineRuntimeDocument>("M3_BASELINE"),
     approvals: await load<M3BaselineApprovalRuntimeDocument>("M3_BASELINE_APPROVAL"),
     stateTokens: await load<M3RepositoryStateTokenDocument>("M3_REPOSITORY_STATE_TOKEN"),
@@ -2498,6 +2538,29 @@ async function commitTransitionUnlocked(input: CommitTransitionInput, capturedEv
       : { expectedNextWorkflowStateContentSha256: input.expectedNextWorkflowStateContentSha256 }),
     commitKind: "TRANSITION",
   });
+}
+
+export interface ProcessCrashTerminalizationAuthority {
+  readonly inspection: RunStorageInspection & {
+    readonly statePointer: PersistedStatePointerDocument;
+    readonly workflowState: WorkflowState;
+    readonly transitionCommit: StateTransitionCommitDocument;
+    readonly revision: number;
+  };
+  readonly policy: ReducerPolicy;
+}
+
+/** Package-internal exact authority loader for an external lifecycle owner. */
+export async function loadProcessCrashTerminalizationAuthority(input: RunStorageLocation): Promise<ProcessCrashTerminalizationAuthority> {
+  assertRecord(input, "process-crash authority input");
+  assertExactKeys(input, ["stateRoot", "runId"], "process-crash authority input");
+  const layout = assertLocation(input);
+  const inspection = await inspectRunStorage(input);
+  requireUsableInspection(inspection);
+  const policy = await readJsonDocument<ReducerPolicy>(layout, "REDUCER_POLICY", inspection.transitionCommit.reducer_policy_content_sha256);
+  assertReducerPolicy(policy);
+  assertStatePolicyConsistency(inspection.workflowState, policy);
+  return detachedFrozen({ inspection, policy });
 }
 
 export async function terminalizeProcessCrash(input: TerminalizeProcessCrashInput): Promise<CommittedRunState> {

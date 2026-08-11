@@ -1,5 +1,5 @@
 import { canonicalize } from "../canonical-json/index.js";
-import { evaluateAuthority } from "../control/evaluate.js";
+import { evaluateAuthority, markPersistedBoundedWorkerAuthority } from "../control/evaluate.js";
 import type { M5AuthoritativeSources } from "../control/types.js";
 import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../identity/index.js";
 import { assertDocumentValid, type M4CommandCatalogDocument, type M4ScopedToolPolicyDocument, type M5ControlDecisionDocument, type M5ControlPolicyDocument, type M5UsageEvidenceDocument, type ReducerPolicy, type WorkflowState } from "../schemas/index.js";
@@ -18,6 +18,8 @@ export interface M5AuthorityInput {
   readonly m4Policies?: ReadonlyMap<string, M4ScopedToolPolicyDocument>;
   readonly m4Catalogs?: ReadonlyMap<string, M4CommandCatalogDocument>;
   readonly authoritativeSources?: M5AuthoritativeSources;
+  /** Resolver-derived immutable reservation key for each persisted bounded result. */
+  readonly boundedResultReservationDecisionDigests?: ReadonlyMap<string, string>;
   readonly reachableRawEvidence: ReadonlySet<string>;
   readonly typedTransitionDecisionDigests?: ReadonlySet<string>;
   readonly runAuthorityValidatedPolicyDigests?: ReadonlySet<string>;
@@ -173,11 +175,17 @@ function deterministicRecalculationError(
     ...value.obligation_evidence.map((entry) => entry.evidence_content_sha256),
     ...value.progress.evidence_content_sha256,
   ]);
-  const requestedBoundedResultIds = new Set([...value.usage_evidence_content_sha256]
-    .map((digest) => input.usage.get(digest))
-    .filter((entry): entry is M5UsageEvidenceDocument => entry !== undefined && entry.source_kind === "BOUNDED_WORKER_RESULT")
-    .map((entry) => entry.source_record_content_sha256));
-  const requestSources: M5AuthoritativeSources = {
+  const relevantReservationDecisionDigests = new Set(chain
+    .filter((decision) => decision.reservation !== null)
+    .map((decision) => decision.content_sha256));
+  const decisionBoundedResultIds = new Set([
+    ...value.usage_evidence_content_sha256
+      .map((digest) => input.usage.get(digest))
+      .filter((entry): entry is M5UsageEvidenceDocument => entry?.source_kind === "BOUNDED_WORKER_RESULT")
+      .map((entry) => entry.source_record_content_sha256),
+    ...value.failures.map((failure) => failure.source_record_content_sha256),
+  ]);
+  const requestSources = markPersistedBoundedWorkerAuthority({
     ...(persistedSources.boundedStaticPreM8 === true ? { boundedStaticPreM8: true } : {}),
     ...(persistedSources.contract === undefined ? {} : { contract: persistedSources.contract }),
     ...(persistedSources.budget === undefined ? {} : { budget: persistedSources.budget }),
@@ -186,13 +194,21 @@ function deterministicRecalculationError(
     ...(persistedSources.routeMap === undefined ? {} : { routeMap: persistedSources.routeMap }),
     ...(persistedSources.routeMapApproval === undefined ? {} : { routeMapApproval: persistedSources.routeMapApproval }),
     m4CommandResults: (persistedSources.m4CommandResults ?? []).filter((entry) => requestedM4ResultIds.has(entry.content_sha256)),
-    boundedWorkerResults: (persistedSources.boundedWorkerResults ?? []).filter((entry) => requestedBoundedResultIds.has(entry.content_sha256)),
+    // The historical evaluation scope is derived from persisted reservation
+    // decision identities, never a caller or usage source array.
+    boundedWorkerResults: value.intent === "BLOCK"
+      ? persistedSources.boundedWorkerResults ?? []
+      : (persistedSources.boundedWorkerResults ?? []).filter((entry) => {
+        const reservation = input.boundedResultReservationDecisionDigests?.get(entry.content_sha256);
+        return decisionBoundedResultIds.has(entry.content_sha256) ||
+          (reservation !== undefined && relevantReservationDecisionDigests.has(reservation));
+      }),
     m3StateTokens: persistedSources.m3StateTokens ?? [],
     m3Postflights: persistedSources.m3Postflights ?? [],
     planApprovals: persistedSources.planApprovals ?? [],
     taskGraphs: persistedSources.taskGraphs ?? [],
     tasks: persistedSources.tasks ?? [],
-  };
+  });
   const requestBase = {
     intent: value.intent,
     expectedRevision: 0,

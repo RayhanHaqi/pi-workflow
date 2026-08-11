@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-import { runBoundedMutationWorkflow } from "../workflow-controller.js";
+import { forceStopBoundedMutationWorkflow, runBoundedMutationWorkflow } from "../workflow-controller.js";
 import {
   approvalLine,
   prepareWorkflow,
@@ -44,9 +44,13 @@ async function runMutationCommand(argv: readonly string[]): Promise<number> {
   // The CLI deliberately has no executable authority. A host/controller must
   // supply the separate controller-owned verification authority programmatically.
   const approvals = createInterface({ input: process.stdin, output: process.stdout });
+  const abort = new AbortController();
+  const cancel = (): void => { abort.abort(); approvals.close(); };
+  process.once("SIGINT", cancel); process.once("SIGTERM", cancel);
   try {
     const result = await runBoundedMutationWorkflow(goal, {
-      cwd: process.cwd(),
+      cwd: process.cwd(), signal: abort.signal,
+      onControlCapability: ({ path }) => { output(`FORCE_STOP_CAPABILITY ${path}`); },
       approveBaseline: async (baseline) => {
         output(`DIRTY_BASELINE_APPROVAL_REQUIRED ${baseline.content_sha256}`);
         output(JSON.stringify(baseline.paths.map((entry) => ({ path: entry.path, ownership_class: entry.ownership_class, data_class: entry.data_class, capture_mode: entry.capture_mode, retention_days_after_terminal: entry.retention_days_after_terminal }))));
@@ -69,11 +73,21 @@ async function runMutationCommand(argv: readonly string[]): Promise<number> {
     });
     return reportResult(result);
   } finally {
+    process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel);
     approvals.close();
   }
 }
 
+async function runForceStopCommand(argv: readonly string[]): Promise<number> {
+  if (argv.length !== 2) { output("BLOCKED: usage is pi-workflow force-stop <absolute-control-capability-path>"); return 2; }
+  const result = await forceStopBoundedMutationWorkflow(argv[1]!);
+  output(result.disposition); output(result.detail);
+  if (result.retiredCapabilityPath !== null) output(`RETIRED_CAPABILITY ${result.retiredCapabilityPath}`);
+  return result.disposition === "BLOCKED_FORCE_STOP_CAPABILITY_INVALID" || result.disposition === "BLOCKED_FORCE_STOP_DESCENDANT_UNCERTAIN" || result.disposition === "BLOCKED_FORCE_STOP_RECONCILIATION_UNCERTAIN" ? 3 : 0;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv[0] === "force-stop") return runForceStopCommand(argv);
   if (argv[0] === "mutate") return runMutationCommand(argv);
   if (argv.length !== 1) {
     output("BLOCKED (not started): usage is pi-workflow <goal.json>");

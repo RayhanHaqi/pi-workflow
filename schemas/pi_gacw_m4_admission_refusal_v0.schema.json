@@ -1,0 +1,197 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_m4_admission_refusal_v0.schema.json",
+  "additionalProperties": false,
+  "type": "object",
+  "properties": {
+    "schema_id": {
+      "const": "pi_gacw_m4_admission_refusal_v0",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "0.1.0",
+      "type": "string"
+    },
+    "content_projection_id": {
+      "const": "document-content-v1",
+      "type": "string"
+    },
+    "content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "bounded_worker_invocation_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "admission_state_token_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "attempted_operation": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "projection_id": {
+          "const": "m4-admission-attempt-v0",
+          "type": "string"
+        },
+        "tool_class": {
+          "const": "APPLY_PATCH_SCOPED",
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "CREATE",
+            "REPLACE",
+            "DELETE"
+          ]
+        },
+        "target_path": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "expected_preimage": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "exists": {
+              "type": "boolean"
+            },
+            "content_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "byte_length": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "maximum": 4095,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "exists",
+            "content_sha256",
+            "byte_length",
+            "mode"
+          ]
+        },
+        "replacement": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "content_sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "byte_length": {
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "content_sha256",
+            "byte_length"
+          ]
+        },
+        "requested_final_mode": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "maximum": 4095,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownership_class": {
+          "const": "OWNER_ACCEPTED_MUTABLE",
+          "type": "string"
+        },
+        "data_class": {
+          "const": "PUBLIC_SOURCE",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projection_id",
+        "tool_class",
+        "operation",
+        "target_path",
+        "expected_preimage",
+        "replacement",
+        "requested_final_mode",
+        "ownership_class",
+        "data_class"
+      ]
+    },
+    "attempted_operation_content_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "disposition": {
+      "const": "REFUSED",
+      "type": "string"
+    },
+    "refusal_code": {
+      "type": "string",
+      "enum": [
+        "M4_TOOL_BUDGET_EXHAUSTED",
+        "OUT_OF_SCOPE_WRITE"
+      ]
+    }
+  },
+  "required": [
+    "schema_id",
+    "schema_version",
+    "content_projection_id",
+    "content_sha256",
+    "run_id",
+    "bounded_worker_invocation_content_sha256",
+    "admission_state_token_content_sha256",
+    "attempted_operation",
+    "attempted_operation_content_sha256",
+    "disposition",
+    "refusal_code"
+  ]
+}

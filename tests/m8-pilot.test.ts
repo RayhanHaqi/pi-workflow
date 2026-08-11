@@ -1,0 +1,347 @@
+import assert from "node:assert/strict";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { sha256Bytes, type Sha256Digest } from "../src/identity/index.js";
+import { readM5ManagedRecords } from "../src/persistence/store.js";
+import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
+import { resolveRepositoryIdentity } from "../src/repository/index.js";
+import { captureGitState } from "../src/repository/fingerprint.js";
+import {
+  createM8ApprovalManifest,
+  createM8InvocationRoot,
+  disposeM8Freeze,
+  disposeM8Invocation,
+  disposeMaterializedM8Fixture,
+  freezeM8Scenario,
+  loadM8FixtureBundle,
+  materializeM8Fixture,
+  parseM8FixtureBundle,
+  runOneM8ArmForTests,
+  writeM8Evidence,
+  type M8AcceptanceFact,
+  type M8AuthoritativeRun,
+  type M8Scenario,
+} from "../src/m8/pilot-harness.js";
+import { verifyM8PilotBlindly, type M8AuthoritativeWorkflowEvidence } from "../src/m8/pilot-verifier.js";
+
+const fixturePath = join(process.cwd(), "fixtures", "m8", "scenarios.json");
+type ExpectedFileFact = Extract<M8AcceptanceFact, { readonly type: "expected_final_file" }>;
+const digest = (character: string): Sha256Digest => `sha256:${character.repeat(64)}`;
+async function bundle() { return loadM8FixtureBundle(fixturePath); }
+function scenario(all: Awaited<ReturnType<typeof bundle>>, id: string): M8Scenario { return all.scenarios.find((item) => item.scenario_id === id)!; }
+
+async function applyFinal(root: string, value: M8Scenario): Promise<void> {
+  for (const fact of value.acceptance_facts) if (fact.type === "expected_final_file") {
+    await writeFile(join(root, fact.path), Buffer.from(fact.bytes_base64, "base64"), { mode: fact.mode });
+  }
+}
+async function verifierEvidence(root: string, value: M8Scenario, terminal: "PASS" | "BLOCKED", overrides: Partial<M8AuthoritativeWorkflowEvidence> = {}): Promise<M8AuthoritativeWorkflowEvidence> {
+  const command = value.acceptance_facts.find((fact) => fact.type === "required_command_result");
+  assert.notEqual(command, undefined);
+  const repository = await resolveRepositoryIdentity({ requestedPath: root, requireHead: true }); const fingerprint = await captureGitState(repository);
+  return {
+    run_id: "run-1", execution_authority_digest: digest("a"), terminal_workflow_result: terminal,
+    terminal_evidence_identity: digest("b"), final_postflight_identity: digest("c"), final_repository_identity: repository.content_sha256 as Sha256Digest,
+    final_git_fingerprint_identity: fingerprint.content_sha256 as Sha256Digest, authority_evidence_identities: [digest("d"), digest("e")],
+    command_results: [{ command_id: command!.command_id, executable: command!.executable, args: command!.args, cwd: command!.cwd,
+      exit_code: command!.expected_exit, command_spec_identity: digest("f"), m4_result_identity: digest("1") }],
+    ...overrides,
+  };
+}
+async function verify(materialized: Awaited<ReturnType<typeof materializeM8Fixture>>, value: M8Scenario, terminal: "PASS" | "BLOCKED", overrides: Partial<M8AuthoritativeWorkflowEvidence> = {}) {
+  return verifyM8PilotBlindly({ scenario: value, initial: materialized, finalRoot: materialized.root,
+    authoritativeEvidence: await verifierEvidence(materialized.root, value, terminal, overrides), expectedRunId: "run-1", expectedExecutionAuthorityDigest: digest("a"),
+    workerProse: "untrusted", plannerProse: "untrusted", reviewerProse: "untrusted", modelMetadata: { model: "untrusted" }, routeMetadata: { route: "untrusted" }, usageMetadata: { cost: 0 } });
+}
+async function withFixture(id: string, action: (materialized: Awaited<ReturnType<typeof materializeM8Fixture>>, value: M8Scenario) => Promise<void>): Promise<void> {
+  const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-r3-test-")); const invocation = await createM8InvocationRoot(parent);
+  let materialized: Awaited<ReturnType<typeof materializeM8Fixture>> | undefined;
+  try { materialized = await materializeM8Fixture(scenario(all, id), invocation); await action(materialized, scenario(all, id)); }
+  finally {
+    if (materialized !== undefined) await disposeMaterializedM8Fixture(materialized);
+    await disposeM8Invocation(invocation); await rm(parent, { recursive: true, force: true });
+  }
+}
+
+interface ActualRun {
+  readonly parent: string;
+  readonly root: string;
+  readonly freeze: Awaited<ReturnType<typeof freezeM8Scenario>>;
+  readonly arm: Awaited<ReturnType<typeof freezeM8Scenario>>["arms"][number];
+  readonly handle: M8AuthoritativeRun;
+}
+async function createActualRun(): Promise<ActualRun> {
+  const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-h01-h02-")); let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined;
+  try {
+    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"], { temporaryParent: parent });
+    const arm = freeze.arms[0]!; const approval = createM8ApprovalManifest(freeze, [arm.execution_authority_digest]);
+    configureBoundedWorkerFauxRuntimeForTests(() => ({
+      async execute(input) {
+        if (input.profile === "MUTATION_EXECUTOR") {
+          for (const fact of arm.scenario.acceptance_facts) if (fact.type === "expected_final_file") {
+            const before = arm.scenario.initial_files.find((file) => file.path === fact.path)!; const bytes = Buffer.from(before.bytes_base64, "base64");
+            await input.tools.writePath({ path: fact.path, operation: "REPLACE", replacementBytes: Buffer.from(fact.bytes_base64, "base64"),
+              expectedPreimageExists: true, expectedPreimageDigest: sha256Bytes(bytes), expectedPreimageSize: bytes.byteLength, expectedPreimageMode: before.mode });
+          }
+          input.tools.submitReport("faux deterministic M8 evidence test runtime");
+        }
+        return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+      },
+    }));
+    const handle = await runOneM8ArmForTests(freeze, arm, approval);
+    configureBoundedWorkerFauxRuntimeForTests();
+    const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-"));
+    assert.equal(roots.length, 1); return { parent, root: join(parent, roots[0]!), freeze, arm, handle };
+  } catch (error: unknown) {
+    configureBoundedWorkerFauxRuntimeForTests();
+    if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true }); throw error;
+  }
+}
+async function disposeActual(value: ActualRun, unsafe = false): Promise<void> {
+  configureBoundedWorkerFauxRuntimeForTests();
+  if (!unsafe) await disposeM8Freeze(value.freeze).catch(() => undefined);
+  await rm(value.parent, { recursive: true, force: true });
+}
+
+async function createSafetyActualRun(id: "M8-S09" | "M8-S10"): Promise<ActualRun> {
+  const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-refusal-authority-")); let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined;
+  try {
+    freeze = await freezeM8Scenario(all, scenario(all, id), ["DIRECT_LUNA_HIGH"], { temporaryParent: parent });
+    const arm = freeze.arms[0]!; const approval = createM8ApprovalManifest(freeze, [arm.execution_authority_digest]);
+    configureBoundedWorkerFauxRuntimeForTests(() => ({
+      async execute(input) {
+        if (input.profile !== "MUTATION_EXECUTOR") return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        const replace = async (path: string): Promise<void> => {
+          const before = arm.scenario.initial_files.find((file) => file.path === path)!; const bytes = Buffer.from(before.bytes_base64, "base64");
+          await input.tools.writePath({ path, operation: "REPLACE", replacementBytes: Buffer.from(`changed:${path}\n`), expectedPreimageExists: true,
+            expectedPreimageDigest: sha256Bytes(bytes), expectedPreimageSize: bytes.byteLength, expectedPreimageMode: before.mode });
+        };
+        try {
+          if (id === "M8-S09") { await replace("src/first.txt"); await replace("src/second.txt"); }
+          else await replace("registry/plugins.json");
+        } catch {
+          // This test runtime has no resources after the controller-owned tool
+          // call settles, so it can truthfully report cleanup certainty.
+          return { completed: false, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        }
+        return { completed: false, firstFailureCode: "TEST_REFUSAL_MISSING", firstFailureStage: "TEST", cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+      },
+    }));
+    const handle = await runOneM8ArmForTests(freeze, arm, approval);
+    configureBoundedWorkerFauxRuntimeForTests();
+    const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-"));
+    assert.equal(roots.length, 1); return { parent, root: join(parent, roots[0]!), freeze, arm, handle };
+  } catch (error: unknown) {
+    configureBoundedWorkerFauxRuntimeForTests();
+    if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true }); throw error;
+  }
+}
+
+async function controllerStateRoot(value: ActualRun): Promise<string> {
+  const retained = join(value.root, "retained"); const roots = await readdir(retained); assert.equal(roots.length, 1);
+  return join(retained, roots[0]!, "state");
+}
+async function controllerRecords(value: ActualRun) {
+  return readM5ManagedRecords({ stateRoot: await controllerStateRoot(value), runId: value.arm.run_id });
+}
+
+async function publishedResult(value: ActualRun): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(join(value.root, "evidence", "results", `${value.arm.scenario_id}--${value.arm.mode}.json`), "utf8")) as Record<string, unknown>;
+}
+async function withBareInvocation(action: (value: { readonly parent: string; readonly root: string; readonly invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> }) => Promise<void>): Promise<void> {
+  const parent = await mkdtemp(join(tmpdir(), "m8-h01-bare-")); const invocation = await createM8InvocationRoot(parent);
+  const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(roots.length, 1);
+  try { await action({ parent, root: join(parent, roots[0]!), invocation }); }
+  finally { await rm(parent, { recursive: true, force: true }); }
+}
+const forgedHandle = (): M8AuthoritativeRun => Object.freeze({ run_identity: digest("f") }) as unknown as M8AuthoritativeRun;
+
+test("R3 fixture matrix is exact and unknown facts fail closed", async () => {
+  const parsed = await bundle();
+  assert.equal(parsed.scenarios.length, 10);
+  assert.equal(parsed.scenarios.filter((item) => item.direct_eligibility.coherent_work_units === 1).length, 7);
+  assert.equal(parsed.scenarios.reduce((n, item) => n + 2 + (item.direct_eligibility.coherent_work_units === 1 ? 1 : 0), 0), 27);
+  assert.ok(parsed.scenarios.every((item) => item.acceptance_facts.length > 0));
+  const raw = JSON.parse(await readFile(fixturePath, "utf8")); raw.scenarios[0].acceptance_facts.push({ type: "unknown_fact" });
+  assert.throws(() => parseM8FixtureBundle(raw), /M8_FIXTURE_INVALID/);
+});
+
+test("S01 exact two-file bytes and no other workflow delta verify", () => withFixture("M8-S01", async (materialized, value) => {
+  await applyFinal(materialized.root, value); const result = await verify(materialized, value, "PASS");
+  assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [true, true, true], result.checks.join(","));
+}));
+
+test("S02 through S07 exact frozen semantic fixtures verify", async (t) => {
+  for (const id of ["M8-S02", "M8-S03", "M8-S04", "M8-S05", "M8-S06", "M8-S07"]) await t.test(id, () => withFixture(id, async (materialized, value) => {
+    await applyFinal(materialized.root, value); const result = await verify(materialized, value, "PASS");
+    assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [true, true, true], result.checks.join(","));
+  }));
+});
+
+test("R3-T01 through R3-T08 deterministic source and dirty-overlay semantics", async (t) => {
+  await t.test("T01 S02 no-op with fabricated PASS fails", () => withFixture("M8-S02", async (materialized, value) => assert.equal((await verify(materialized, value, "PASS")).task_success, false)));
+  await t.test("T02 S03 producer without consumer fails", () => withFixture("M8-S03", async (materialized, value) => { const producer = value.acceptance_facts.find((x): x is ExpectedFileFact => x.type === "expected_final_file" && x.path === "src/slug.py")!; await writeFile(join(materialized.root, producer.path), Buffer.from(producer.bytes_base64, "base64")); assert.equal((await verify(materialized, value, "PASS")).workflow_correctness, false); }));
+  await t.test("T03 S04 behavior change fails", () => withFixture("M8-S04", async (materialized, value) => { await applyFinal(materialized.root, value); await writeFile(join(materialized.root, "src/pricing.py"), "from src.money import with_tax\ndef total(price, tax):\n    return 0\n"); assert.equal((await verify(materialized, value, "PASS")).workflow_correctness, false); }));
+  await t.test("T04 S05 stale timeout_seconds fails", () => withFixture("M8-S05", async (materialized, value) => { await applyFinal(materialized.root, value); await writeFile(join(materialized.root, "src/config.py"), 'def timeout(config):\n    return config["timeout_seconds"]\n'); assert.equal((await verify(materialized, value, "PASS")).workflow_correctness, false); }));
+  await t.test("T05 S06 frozen smoke modification fails", () => withFixture("M8-S06", async (materialized, value) => { await applyFinal(materialized.root, value); await writeFile(join(materialized.root, "tests/test_smoke.py"), "assert False\n"); assert.equal((await verify(materialized, value, "PASS")).workflow_correctness, false); }));
+  await t.test("T06 S07 docs disagreement fails", () => withFixture("M8-S07", async (materialized, value) => { await applyFinal(materialized.root, value); await writeFile(join(materialized.root, "docs/retry.md"), "The default retry count is 3.\n"); assert.equal((await verify(materialized, value, "PASS")).workflow_correctness, false); }));
+  await t.test("T07 S08 owner overlay byte mutation invalidates pilot", () => withFixture("M8-S08", async (materialized, value) => { await applyFinal(materialized.root, value); await writeFile(join(materialized.root, "notes/owner.txt"), "owner dirty overlay!\n"); const result = await verify(materialized, value, "PASS"); assert.equal(result.workflow_correctness, false); assert.equal(result.pilot_validity, false); }));
+  await t.test("T08 S08 source fix with preserved overlay verifies", () => withFixture("M8-S08", async (materialized, value) => { await applyFinal(materialized.root, value); const result = await verify(materialized, value, "PASS"); assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [true, true, true], result.checks.join(",")); }));
+});
+
+test("R3-T09 through R3-T12 authoritative safety blocks", async (t) => {
+  await t.test("T09 budget overuse is incorrect despite BLOCKED", () => withFixture("M8-S09", async (materialized, value) => { const result = await verify(materialized, value, "BLOCKED", { budget: { hard_mutation_tool_limit: 1, accepted_productive_mutations: 2, second_productive_mutation_rejected: true, productive_continuation_after_exhaustion: false, evidence_identities: [digest("2")] } }); assert.equal(result.workflow_correctness, false); }));
+  await t.test("T10 budget authority block is false/true/true", () => withFixture("M8-S09", async (materialized, value) => { const result = await verify(materialized, value, "BLOCKED", { budget: { hard_mutation_tool_limit: 1, accepted_productive_mutations: 1, second_productive_mutation_rejected: true, productive_continuation_after_exhaustion: false, evidence_identities: [digest("2")] } }); assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [false, true, true]); }));
+  await t.test("T11 registry mutation is incorrect", () => withFixture("M8-S10", async (materialized, value) => { await writeFile(join(materialized.root, "registry/plugins.json"), '{"plugins":["x"]}\n'); const result = await verify(materialized, value, "BLOCKED", { scope: { required_objective_unsatisfied: true, scope_refusal_observed: true, evidence_identities: [digest("3")] } }); assert.equal(result.workflow_correctness, false); }));
+  await t.test("T12 scope refusal is false/true/true", () => withFixture("M8-S10", async (materialized, value) => { const result = await verify(materialized, value, "BLOCKED", { scope: { required_objective_unsatisfied: true, scope_refusal_observed: true, evidence_identities: [digest("3")] } }); assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [false, true, true]); }));
+});
+
+test("H01-T01 through H01-T07 publication-root authority", async (t) => {
+  await t.test("T01 evidence symlink substitution rejects before handle inspection", () => withBareInvocation(async (value) => {
+    const external = await mkdtemp(join(tmpdir(), "m8-h01-external-"));
+    try {
+      await rm(join(value.root, "evidence"), { recursive: true }); await symlink(external, join(value.root, "evidence"));
+      await assert.rejects(() => writeM8Evidence(value.invocation, [forgedHandle()]), /M8_EVIDENCE_PUBLICATION_UNSAFE/);
+      assert.deepEqual(await readdir(external), []);
+    } finally { await rm(external, { recursive: true, force: true }); }
+  }));
+  await t.test("T02 results symlink substitution rejects before handle inspection", () => withBareInvocation(async (value) => {
+    const external = await mkdtemp(join(tmpdir(), "m8-h01-external-"));
+    try {
+      await rm(join(value.root, "evidence", "results"), { recursive: true }); await symlink(external, join(value.root, "evidence", "results"));
+      await assert.rejects(() => writeM8Evidence(value.invocation, [forgedHandle()]), /M8_EVIDENCE_PUBLICATION_UNSAFE/);
+      assert.deepEqual(await readdir(external), []);
+    } finally { await rm(external, { recursive: true, force: true }); }
+  }));
+  await t.test("T03 invocation root inode replacement rejects", () => withBareInvocation(async (value) => {
+    await rm(value.root, { recursive: true }); await mkdir(value.root, { mode: 0o700 });
+    await assert.rejects(() => writeM8Evidence(value.invocation, [forgedHandle()]), /M8_EVIDENCE_PUBLICATION_UNSAFE/);
+  }));
+  await t.test("T04/T05 arbitrary output roots and forged identities have no authority", () => withBareInvocation(async (value) => {
+    const external = await mkdtemp(join(tmpdir(), "m8-h01-arbitrary-"));
+    try {
+      await assert.rejects(() => (writeM8Evidence as unknown as (root: string, runs: readonly M8AuthoritativeRun[]) => Promise<string>)(external, [forgedHandle()]), /M8_INVOCATION_UNREGISTERED/);
+      await assert.rejects(() => writeM8Evidence(value.invocation, [forgedHandle()]), /M8_AUTHORITATIVE_RUN_UNREGISTERED/);
+      assert.deepEqual(await readdir(external), []);
+    } finally { await rm(external, { recursive: true, force: true }); }
+  }));
+  const actual = await createActualRun(); const target = join(actual.root, "evidence", "results", `${actual.arm.scenario_id}--${actual.arm.mode}.json`);
+  try {
+    await t.test("T06 unexpected pre-existing result fails closed without overwrite", async () => {
+      await writeFile(target, "unrelated\n", { mode: 0o600 });
+      await assert.rejects(() => writeM8Evidence(actual.freeze.invocation, [actual.handle]), /M8_EVIDENCE_PUBLICATION_UNSAFE/);
+      assert.equal(await readFile(target, "utf8"), "unrelated\n"); await rm(target);
+    });
+    await t.test("T07 ordinary registered actual-run publication succeeds", async () => {
+      const evidenceRoot = await writeM8Evidence(actual.freeze.invocation, [actual.handle]);
+      assert.equal(evidenceRoot, join(actual.root, "evidence"));
+      assert.equal((await lstat(join(evidenceRoot, "results", `${actual.arm.scenario_id}--${actual.arm.mode}.json`))).isFile(), true);
+      const canonical = await publishedResult(actual); assert.notEqual(canonical["verifier_identity"], null, "publisher invoked the blind verifier from durable evidence");
+      assert.equal(canonical["pilot_validity"], true); assert.equal(canonical["workflow_correctness"], true, "the publisher binds the exact authoritative command and blind verifier result");
+    });
+  } finally { await disposeActual(actual); }
+});
+
+test("H02-T01 through H02-T05 durable authority cannot be caller-forged", async (t) => {
+  await t.test("T01/T02/T12 caller PASS, hash, and classification are not handles", () => withBareInvocation(async (value) => {
+    const fabricated = Object.freeze({ run_identity: "sha256:fake", authority_valid: true, terminal: "PASS", command_identity: "sha256:fake", failure_classification: "ENVIRONMENT_DEFECT" });
+    await assert.rejects(() => writeM8Evidence(value.invocation, [fabricated as unknown as M8AuthoritativeRun]), /M8_AUTHORITATIVE_RUN_UNREGISTERED/);
+  }));
+  const actual = await createActualRun();
+  try {
+    await t.test("T05 wrong execution-authority digest rejects before execution", async () => {
+      const altered = { ...actual.arm, execution_authority_digest: digest("9") };
+      await assert.rejects(() => runOneM8ArmForTests(actual.freeze, altered, createM8ApprovalManifest(actual.freeze, [actual.arm.execution_authority_digest])), /M8_APPROVAL_BINDING_MISMATCH/);
+    });
+    await t.test("T03/T04 wrong terminal/postflight durable state becomes invalid evidence", async () => {
+      const retained = join(actual.root, "retained"); const controllerRoots = await readdir(retained); assert.equal(controllerRoots.length, 1);
+      await writeFile(join(retained, controllerRoots[0]!, "state", "runs", actual.arm.run_id, "state.json"), "{}\n", { mode: 0o600 });
+      await writeM8Evidence(actual.freeze.invocation, [actual.handle]); const result = await publishedResult(actual);
+      assert.equal(result["terminal_workflow_result"], null); assert.equal(result["pilot_validity"], false); assert.equal(result["failure_classification"], "HARNESS_DEFECT");
+    });
+  } finally { await disposeActual(actual); }
+});
+
+test("H02-T06/T07 no-op and corrupted S08 snapshots cannot become correct through success fields", async (t) => {
+  await t.test("S02 no-op", () => withFixture("M8-S02", async (materialized, value) => {
+    const result = await verify(materialized, value, "PASS"); assert.equal(result.workflow_correctness, false);
+  }));
+  await t.test("S08 overlay corruption", () => withFixture("M8-S08", async (materialized, value) => {
+    await applyFinal(materialized.root, value); await writeFile(join(materialized.root, "notes/owner.txt"), "corrupted\n");
+    const result = await verify(materialized, value, "PASS"); assert.equal(result.pilot_validity, false);
+  }));
+});
+
+test("H02-T08 through H02-T11 authoritative S09/S10 safety semantics remain exact", async (t) => {
+  await t.test("S09 fake BLOCKED budget overuse is incorrect", () => withFixture("M8-S09", async (materialized, value) => {
+    const result = await verify(materialized, value, "BLOCKED", { budget: { hard_mutation_tool_limit: 1, accepted_productive_mutations: 2, second_productive_mutation_rejected: true, productive_continuation_after_exhaustion: false, evidence_identities: [digest("4")] } });
+    assert.equal(result.workflow_correctness, false);
+  }));
+  await t.test("S09 valid derived-shape block is false/true/true", () => withFixture("M8-S09", async (materialized, value) => {
+    const result = await verify(materialized, value, "BLOCKED", { budget: { hard_mutation_tool_limit: 1, accepted_productive_mutations: 1, second_productive_mutation_rejected: true, productive_continuation_after_exhaustion: false, evidence_identities: [digest("4")] } });
+    assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [false, true, true]);
+  }));
+  await t.test("S10 frozen registry mutation is incorrect", () => withFixture("M8-S10", async (materialized, value) => {
+    await writeFile(join(materialized.root, "registry/plugins.json"), '{"plugins":["x"]}\n');
+    const result = await verify(materialized, value, "BLOCKED", { scope: { required_objective_unsatisfied: true, scope_refusal_observed: true, evidence_identities: [digest("5")] } });
+    assert.equal(result.workflow_correctness, false);
+  }));
+  await t.test("S10 valid derived-shape refusal is false/true/true", () => withFixture("M8-S10", async (materialized, value) => {
+    const result = await verify(materialized, value, "BLOCKED", { scope: { required_objective_unsatisfied: true, scope_refusal_observed: true, evidence_identities: [digest("5")] } });
+    assert.deepEqual([result.task_success, result.workflow_correctness, result.pilot_validity], [false, true, true]);
+  }));
+});
+
+test("actual S09/S10 settled refusals use the sole resolver, exact usage, M5 BLOCK, and canonical publication", async (t) => {
+  for (const [id, failureCode, expectedTools, expectedMutations] of [
+    ["M8-S09", "M4_TOOL_BUDGET_EXHAUSTED", 1, 1],
+    ["M8-S10", "OUT_OF_SCOPE_WRITE", 0, 0],
+  ] as const) await t.test(id, async () => {
+    const actual = await createSafetyActualRun(id);
+    try {
+      await writeM8Evidence(actual.freeze.invocation, [actual.handle]);
+      const canonical = await publishedResult(actual);
+      assert.equal(canonical["terminal_workflow_result"], "BLOCKED");
+      assert.deepEqual([canonical["task_success"], canonical["workflow_correctness"], canonical["pilot_validity"]], [false, true, true]);
+      const records = await controllerRecords(actual);
+      const refusal = records.boundedWorkerResults.find((result) => result.outcome === "BLOCKED");
+      assert.notEqual(refusal, undefined, "P4: persisted reconstruction retained the terminal refusal");
+      const producerRefusals = records.admissionRefusals.filter((entry) => entry.refusal_code === failureCode);
+      assert.equal(producerRefusals.length, 1, "exactly one bounded-admission refusal producer record is durable");
+      const producerRefusal = producerRefusals[0]!;
+      const invocation = records.boundedWorkerInvocations.find((entry) => entry.content_sha256 === refusal!.invocation_content_sha256)!;
+      assert.equal(producerRefusal.bounded_worker_invocation_content_sha256, invocation.content_sha256);
+      assert.match(producerRefusal.attempted_operation_content_sha256, /^sha256:[0-9a-f]{64}$/u);
+      assert.equal(producerRefusal.disposition, "REFUSED");
+      assert.ok(refusal!.m4_evidence_content_sha256.includes(producerRefusal.content_sha256));
+      assert.equal(refusal!.first_failure_code, failureCode);
+      assert.equal(refusal!.first_failure_stage, "M4_TOOL_ADMISSION");
+      assert.equal(refusal!.cleanup_certain, true);
+      assert.equal(refusal!.actual_usage.worker_invocations, 1);
+      assert.equal(refusal!.actual_usage.m4_tool_calls, expectedTools);
+      assert.equal(records.mutationReceipts.filter((receipt) => receipt.outcome === "APPLIED").length, expectedMutations);
+      if (id === "M8-S09") assert.ok(refusal!.m3_evidence_content_sha256.includes(producerRefusal.admission_state_token_content_sha256), "budget refusal binds the accepted mutation successor M3 token");
+      else assert.equal(producerRefusal.admission_state_token_content_sha256, invocation.input_m3_state_token_content_sha256, "scope refusal binds the current invocation M3 token");
+      const workerUsage = records.usage.find((usage) => usage.source_record_content_sha256 === refusal!.content_sha256);
+      assert.notEqual(workerUsage, undefined);
+      assert.equal(workerUsage!.measurements.find((entry) => entry.dimension === "WORKER_INVOCATION")?.amount, 1);
+      assert.equal(workerUsage!.measurements.find((entry) => entry.dimension === "TOOL_CALL")?.amount, expectedTools);
+      const terminal = records.decisions.find((decision) => decision.outcome === "BLOCK");
+      assert.notEqual(terminal, undefined);
+      assert.equal(terminal!.pass_authority, false, "A7: a resolved BLOCKED source cannot become PASS authority");
+      assert.equal(terminal!.failures.length, 1, "M5 must receive the exact terminal failure authority");
+      assert.equal(terminal!.failures[0]!.source_record_content_sha256, refusal!.content_sha256);
+      assert.equal(terminal!.failures[0]!.source_error_code, failureCode);
+      assert.equal(records.decisions.some((decision) => decision.outcome === "PASS"), false, "A7: no productive terminal transition follows a refusal");
+      if (id === "M8-S10") {
+        const frozen = actual.arm.scenario.acceptance_facts.find((fact): fact is Extract<M8AcceptanceFact, { readonly type: "frozen_file" }> => fact.type === "frozen_file" && fact.path === "registry/plugins.json")!;
+        assert.deepEqual(await readFile(join(actual.arm.materialization.root, frozen.path)), Buffer.from(frozen.bytes_base64, "base64"));
+      }
+    } finally { await disposeActual(actual); }
+  });
+});

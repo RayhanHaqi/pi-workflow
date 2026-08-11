@@ -2,23 +2,27 @@ import { canonicalize } from "../canonical-json/index.js";
 import { sha256Bytes, sha256Canonical } from "../identity/index.js";
 import { m3ScopeIdentity } from "../identity/m3-scope.js";
 import { currentM4CapabilityProducerAuthority, probeM4Capabilities } from "../secure-fs/capabilities.js";
+import { assertM4CanonicalPath } from "../secure-fs/path.js";
 import { validateCommandCatalog, commandSpecProjection, type ValidatedCommandCatalog } from "../scoped-tools/commands.js";
 import { assertMutationPermitted, validateToolPolicy, type ValidatedToolPolicy } from "../scoped-tools/policy.js";
-import type {
-  M3BaselineRuntimeDocument,
-  M3LockAcquisitionDocument,
-  M3PostflightDocument,
-  M3RepositoryStateTokenDocument,
-  M4CommandCatalogDocument,
-  M4CommandResultDocument,
-  M4MutationJournal,
-  M4MutationReceiptDocument,
-  M4PatchRequestDocument,
-  M4SandboxCapabilityDocument,
-  M4ScopedToolPolicyDocument,
-  M4SecureFilesystemCapabilityDocument,
-  M4ToolRequestDocument,
-  M4ToolResultDocument,
+import {
+  assertDocumentValid,
+  type BoundedWorkerInvocationDocument,
+  type M3BaselineRuntimeDocument,
+  type M3LockAcquisitionDocument,
+  type M3PostflightDocument,
+  type M3RepositoryStateTokenDocument,
+  type M4AdmissionRefusalDocument,
+  type M4CommandCatalogDocument,
+  type M4CommandResultDocument,
+  type M4MutationJournal,
+  type M4MutationReceiptDocument,
+  type M4PatchRequestDocument,
+  type M4SandboxCapabilityDocument,
+  type M4ScopedToolPolicyDocument,
+  type M4SecureFilesystemCapabilityDocument,
+  type M4ToolRequestDocument,
+  type M4ToolResultDocument,
 } from "../schemas/index.js";
 import type { InspectedObject, ManagedRecordClassification, StoredObjectKind } from "./types.js";
 
@@ -39,6 +43,8 @@ export interface M4AuthorityInput {
   readonly toolResults: ReadonlyMap<string, M4ToolResultDocument>;
   readonly mutationReceipts: ReadonlyMap<string, M4MutationReceiptDocument>;
   readonly commandResults: ReadonlyMap<string, M4CommandResultDocument>;
+  readonly admissionRefusals: ReadonlyMap<string, M4AdmissionRefusalDocument>;
+  readonly boundedInvocations: ReadonlyMap<string, BoundedWorkerInvocationDocument>;
 }
 
 type M4Kind = Extract<StoredObjectKind, `M4_${string}`>;
@@ -244,6 +250,69 @@ export async function classifyM4Authority(input: M4AuthorityInput): Promise<read
     if (catalog !== undefined) validateOutput(node, value, catalog);
     if (value.state_token_after === null ? value.postflight_content_sha256 !== null : value.postflight_content_sha256 === null) fail(node, "Command result successor/postflight relationship is incomplete");
   }
+  for (const [digest, value] of input.admissionRefusals) {
+    const node = nodes.get(key("M4_ADMISSION_REFUSAL", digest))!;
+    add(node, "M3_REPOSITORY_STATE_TOKEN", value.admission_state_token_content_sha256);
+    try { assertDocumentValid("pi_gacw_m4_admission_refusal_v0", value); }
+    catch { fail(node, "Admission refusal failed schema or identity validation"); }
+    if (value.content_sha256 !== digest || value.run_id !== input.runId || value.disposition !== "REFUSED" ||
+        !["M4_TOOL_BUDGET_EXHAUSTED", "OUT_OF_SCOPE_WRITE"].includes(value.refusal_code)) {
+      fail(node, "Admission refusal local identity, disposition, or code is invalid");
+    }
+    const attempt = value.attempted_operation;
+    if (value.attempted_operation_content_sha256 !== sha256Canonical(attempt)) fail(node, "Admission refusal attempted-operation identity is false");
+    try { assertM4CanonicalPath(attempt.target_path); }
+    catch { fail(node, "Admission refusal attempted-operation path is noncanonical"); }
+    const missingPreimage = attempt.expected_preimage.content_sha256 === null && attempt.expected_preimage.byte_length === null && attempt.expected_preimage.mode === null;
+    const presentPreimage = attempt.expected_preimage.content_sha256 !== null && attempt.expected_preimage.byte_length !== null && attempt.expected_preimage.mode !== null;
+    if ((attempt.operation === "CREATE" && (attempt.expected_preimage.exists || !missingPreimage)) ||
+        (attempt.operation !== "CREATE" && (!attempt.expected_preimage.exists || !presentPreimage)) ||
+        (attempt.operation === "DELETE" && (attempt.replacement.content_sha256 !== null || attempt.replacement.byte_length !== 0 || attempt.requested_final_mode !== null)) ||
+        (attempt.operation !== "DELETE" && (attempt.replacement.content_sha256 === null || attempt.requested_final_mode === null))) {
+      fail(node, "Admission refusal attempted-operation facts are impossible");
+    }
+    const invocation = input.boundedInvocations.get(value.bounded_worker_invocation_content_sha256);
+    if (invocation === undefined) {
+      const aliases = input.objects.filter((object) => object.contentSha256 === value.bounded_worker_invocation_content_sha256);
+      if (aliases.length > 0) fail(node, "Admission refusal invocation identity has the wrong managed kind");
+      else missing(node, "Admission refusal bounded invocation is absent");
+    } else {
+      try { assertDocumentValid("pi_gacw_bounded_worker_invocation_v0", invocation); }
+      catch { fail(node, "Admission refusal invocation failed schema or identity validation"); }
+      if (invocation.content_sha256 !== value.bounded_worker_invocation_content_sha256 || invocation.run_id !== value.run_id) {
+        fail(node, "Admission refusal invocation binding is invalid");
+      }
+      add(node, "M3_REPOSITORY_STATE_TOKEN", invocation.input_m3_state_token_content_sha256);
+      const invocationToken = input.tokens.get(invocation.input_m3_state_token_content_sha256);
+      const admissionToken = input.tokens.get(value.admission_state_token_content_sha256);
+      if (invocationToken !== undefined && admissionToken !== undefined &&
+          (invocationToken.run_id !== admissionToken.run_id || invocationToken.repository_identity_content_sha256 !== admissionToken.repository_identity_content_sha256 ||
+            invocationToken.worktree_key !== admissionToken.worktree_key || invocationToken.task_scope_identity !== admissionToken.task_scope_identity)) {
+        fail(node, "Admission refusal token repository, worktree, or scope authority differs from its invocation");
+      }
+    }
+    const admissionToken = input.tokens.get(value.admission_state_token_content_sha256);
+    if (admissionToken !== undefined && (admissionToken.run_id !== value.run_id || admissionToken.task_scope_identity.length === 0 ||
+        admissionToken.repository_identity_content_sha256.length === 0 || admissionToken.worktree_key.length === 0)) {
+      fail(node, "Admission refusal admission-state authority is invalid");
+    }
+    if (admissionToken !== undefined) {
+      const policy = [...input.policies.values()].find((candidate) => candidate.run_id === value.run_id &&
+        candidate.repository_identity_content_sha256 === admissionToken.repository_identity_content_sha256 && candidate.worktree_key === admissionToken.worktree_key &&
+        candidate.task_scope_identity === admissionToken.task_scope_identity);
+      if (policy === undefined) missing(node, "Admission refusal matching M4 scope authority is absent");
+      else {
+        add(node, "M4_TOOL_POLICY", policy.content_sha256);
+        const editable = policy.editable_paths.some((rule) => rule.kind === "EXACT" ? rule.path === attempt.target_path : attempt.target_path === rule.path || attempt.target_path.startsWith(`${rule.path}/`));
+        // The M4 policy is the global mutation envelope. A task-local worker
+        // may refuse a path that is globally editable but outside its active
+        // task; the sole bounded resolver validates that task binding.
+        if (value.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED" && !editable) {
+          fail(node, "Admission refusal budget code contradicts exact M4 scope authority");
+        }
+      }
+    }
+  }
 
   const allKinds = new Map<string, StoredObjectKind[]>();
   for (const object of [...input.objects, ...input.m3Classifications.map((entry) => entry.object)]) allKinds.set(object.contentSha256, [...(allKinds.get(object.contentSha256) ?? []), object.kind]);
@@ -276,7 +345,7 @@ export async function classifyM4Authority(input: M4AuthorityInput): Promise<read
     if (authoritative.has(nodeKey) || state.get(nodeKey) !== "VALID") return; authoritative.add(nodeKey);
     for (const ref of nodes.get(nodeKey)?.refs ?? []) if (nodes.has(key(ref.kind, ref.digest))) mark(key(ref.kind, ref.digest));
   };
-  for (const [nodeKey, node] of nodes) if (state.get(nodeKey) === "VALID" && ["M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT"].includes(node.object.kind)) mark(nodeKey);
+  for (const [nodeKey, node] of nodes) if (state.get(nodeKey) === "VALID" && ["M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT", "M4_ADMISSION_REFUSAL"].includes(node.object.kind)) mark(nodeKey);
   return [...nodes.entries()].map(([nodeKey, node]) => {
     const decision = state.get(nodeKey)!;
     return { object: node.object,

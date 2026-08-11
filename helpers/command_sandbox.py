@@ -258,6 +258,12 @@ def checkpoint(request: dict[str, Any], stage: str) -> None:
 
 
 def execute(request: dict[str, Any]) -> None:
+    # Keep a dedicated ordinary-timeout process group without creating a new
+    # session: the productive invocation session remains the hard-stop boundary.
+    try:
+        os.setpgid(0, 0)
+    except OSError as error:
+        raise SandboxError("COMMAND_SANDBOX_UNAVAILABLE", "Sandbox process group setup failed") from error
     required = {"protocol","operation","executable_invocation_path","executable_realpath","executable_identity","executable_sha256","execution_inputs","argv","cwd","cwd_identity","environment","read_paths","write_rules","path_identities","network_policy"}
     optional = {"_checkpoint_socket","_checkpoint_stage"}
     if not required.issubset(request) or set(request)-required-optional: raise SandboxError("COMMAND_SPEC_MISMATCH", "Sandbox request has unexpected or missing fields")

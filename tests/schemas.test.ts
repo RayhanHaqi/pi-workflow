@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { type DomainProjectionId } from "../src/identity/index.js";
+import { sha256Canonical, type DomainProjectionId } from "../src/identity/index.js";
 import {
   CONCRETE_EXECUTION_MODES as internalConcreteExecutionModes,
   ENFORCEMENT_CLASSES as internalEnforcementClasses,
@@ -134,6 +134,7 @@ test("safe schema inventory contains every required versioned contract through M
     "pi_gacw_mutation_receipt_v0",
     "pi_gacw_tool_result_v0",
     "pi_gacw_command_result_v0",
+    "pi_gacw_m4_admission_refusal_v0",
     "pi_gacw_m5_control_policy_v0",
     "pi_gacw_m5_usage_evidence_v0",
     "pi_gacw_m5_control_decision_v0",
@@ -184,6 +185,34 @@ test("representative objective, route map, budget, graph, plan, state, policy, a
   const state = createInitialState(policy, stateIdentities(policy));
   assertWorkflowState(state);
   assertTransitionEvent(transitionEvent("CAPTURE_BASELINE", { approval_required: false }));
+});
+
+test("M4 admission refusal schema fixes producer evidence identity and refusal semantics", () => {
+  const value = identifyContractDocument("pi_gacw_m4_admission_refusal_v0", {
+    schema_id: "pi_gacw_m4_admission_refusal_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+    run_id: "m4-refusal", bounded_worker_invocation_content_sha256: digest(70), admission_state_token_content_sha256: digest(71),
+    attempted_operation: { projection_id: "m4-admission-attempt-v0", tool_class: "APPLY_PATCH_SCOPED", operation: "REPLACE", target_path: "src/file.ts",
+      expected_preimage: { exists: true, content_sha256: digest(73), byte_length: 1, mode: 0o644 }, replacement: { content_sha256: digest(74), byte_length: 2 },
+      requested_final_mode: 0o644, ownership_class: "OWNER_ACCEPTED_MUTABLE", data_class: "PUBLIC_SOURCE" },
+    attempted_operation_content_sha256: sha256Canonical({ projection_id: "m4-admission-attempt-v0", tool_class: "APPLY_PATCH_SCOPED", operation: "REPLACE", target_path: "src/file.ts",
+      expected_preimage: { exists: true, content_sha256: digest(73), byte_length: 1, mode: 0o644 }, replacement: { content_sha256: digest(74), byte_length: 2 },
+      requested_final_mode: 0o644, ownership_class: "OWNER_ACCEPTED_MUTABLE", data_class: "PUBLIC_SOURCE" }), disposition: "REFUSED", refusal_code: "M4_TOOL_BUDGET_EXHAUSTED",
+  }) as MutableJson;
+  assertDocumentValid("pi_gacw_m4_admission_refusal_v0", value);
+  const schemaWrong = structuredClone(value) as MutableJson; schemaWrong.schema_id = "pi_gacw_bounded_worker_result_v0";
+  expectCode(() => assertSchema("pi_gacw_m4_admission_refusal_v0", schemaWrong), "SCHEMA_INVALID");
+  const versionWrong = structuredClone(value) as MutableJson; versionWrong.schema_version = "9.9.9";
+  expectCode(() => assertSchema("pi_gacw_m4_admission_refusal_v0", versionWrong), "SCHEMA_INVALID");
+  const dispositionWrong = structuredClone(value) as MutableJson; dispositionWrong.disposition = "ADMITTED";
+  expectCode(() => assertSchema("pi_gacw_m4_admission_refusal_v0", dispositionWrong), "SCHEMA_INVALID");
+  const codeWrong = structuredClone(value) as MutableJson; codeWrong.refusal_code = "UNKNOWN_REFUSAL";
+  expectCode(() => assertSchema("pi_gacw_m4_admission_refusal_v0", codeWrong), "SCHEMA_INVALID");
+  for (const field of ["bounded_worker_invocation_content_sha256", "admission_state_token_content_sha256", "attempted_operation_content_sha256"] as const) {
+    const malformed = structuredClone(value) as MutableJson; malformed[field] = "sha256:broken";
+    expectCode(() => assertSchema("pi_gacw_m4_admission_refusal_v0", malformed), "SCHEMA_INVALID");
+  }
+  const identityWrong = structuredClone(value) as MutableJson; identityWrong.refusal_code = "OUT_OF_SCOPE_WRITE";
+  expectCode(() => assertDocumentValid("pi_gacw_m4_admission_refusal_v0", identityWrong), "IDENTITY_MISMATCH");
 });
 
 test("schemas reject unknown properties at top-level and nested object boundaries", () => {

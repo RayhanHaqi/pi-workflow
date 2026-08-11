@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { canonicalize } from "../src/canonical-json/index.js";
 import type { Sha256Digest } from "../src/identity/index.js";
 import { inspectRunStorage } from "../src/persistence/index.js";
+import { publishBoundedWorkerRecord, readM5ManagedRecords } from "../src/persistence/store.js";
+import { m4AttemptedMutationIdentity, publishBoundedWorkerM4AdmissionRefusal } from "../src/scoped-tools/tool-records.js";
+import { publishM4Record } from "../src/scoped-tools/records.js";
 import { identifyContractDocument, type M4CommandResultDocument, type M4MutationReceiptDocument, type M4SecureFilesystemCapabilityDocument, type M4ToolResultDocument, type SchemaId } from "../src/schemas/index.js";
 import { commandSpecification, createM4Fixture } from "./m4-helpers.js";
 import { releaseAdmission } from "./repository-matrix-helpers.js";
@@ -35,6 +38,63 @@ test("M4-managed-semantic-authority: producer roots and complete chains become a
     const command = await value.gateway.run_inspection_command({ commandId: "pass", stateTokenContentSha256: token(value) });
     assert.equal(await classification(value, command.record.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     assert.equal(command.record.stdout_stream_complete, true); assert.equal(command.record.stdout_observed_digest, command.record.stdout_digest);
+  } finally { await releaseAdmission(value.admission); await removeRepositoryFixture(value.fixture); }
+});
+
+test("M4 admission refusal is producer-only M4 authority with a normalized mutation identity", async () => {
+  const value = await createM4Fixture();
+  try {
+    const invocation = identifyContractDocument("pi_gacw_bounded_worker_invocation_v0", {
+      schema_id: "pi_gacw_bounded_worker_invocation_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+      invocation_key: `sha256:${"a".repeat(64)}`, run_id: value.fixture.runId, operation_id: "admission-refusal-operation",
+      m5_reservation_decision_content_sha256: `sha256:${"b".repeat(64)}`, m5_reservation_decision_key: `sha256:${"c".repeat(64)}`,
+      task_content_sha256: null, task_graph_sha256: null, plan_approval_sha256: null, input_m3_state_token_content_sha256: token(value),
+      system_prompt_sha256: `sha256:${"d".repeat(64)}`, user_prompt_sha256: `sha256:${"e".repeat(64)}`, created_at: "2026-01-01T00:00:00.000Z",
+    });
+    await publishBoundedWorkerRecord({ stateRoot: value.fixture.stateRoot, runId: value.fixture.runId, kind: "BOUNDED_WORKER_INVOCATION", document: invocation as any });
+    const attempt = {
+      path: "AGENTS.md", operation: "CREATE" as const, replacementBytes: Buffer.from("one\n"), expectedPreimageExists: false,
+      expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null,
+    };
+    const replacementChanged = { ...attempt, replacementBytes: Buffer.from("two\n") };
+    const operationChanged = { ...attempt, operation: "REPLACE" as const, expectedPreimageExists: true, expectedPreimageDigest: `sha256:${"f".repeat(64)}` as Sha256Digest, expectedPreimageSize: 1, expectedPreimageMode: 0o644 };
+    const identity = m4AttemptedMutationIdentity(attempt);
+    for (const changed of [
+      replacementChanged, operationChanged, { ...attempt, path: "created.txt" },
+      { ...attempt, expectedPreimageDigest: `sha256:${"0".repeat(64)}` as Sha256Digest },
+      { ...attempt, expectedPreimageSize: 99 }, { ...attempt, expectedPreimageMode: 0o600 },
+    ]) assert.notEqual(identity, m4AttemptedMutationIdentity(changed));
+    const refusal = await publishBoundedWorkerM4AdmissionRefusal({ stateRoot: value.fixture.stateRoot, runId: value.fixture.runId }, {
+      boundedWorkerInvocationContentSha256: invocation.content_sha256 as Sha256Digest, admissionStateTokenContentSha256: token(value),
+      attemptedMutation: attempt, refusalCode: "OUT_OF_SCOPE_WRITE",
+    });
+    assert.equal(await classification(value, refusal.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
+    assert.equal(canonicalize(refusal.attempted_operation).includes("one\\n"), false, "replacement bytes are never durable refusal evidence");
+    const refusalDirectory = join(value.fixture.stateRoot, "runs", value.fixture.runId, "records", "m4-admission-refusals");
+    const beforeUnknownInvocation = await readdir(refusalDirectory);
+    await assert.rejects(() => publishBoundedWorkerM4AdmissionRefusal({ stateRoot: value.fixture.stateRoot, runId: value.fixture.runId }, {
+      boundedWorkerInvocationContentSha256: `sha256:${"0".repeat(64)}` as Sha256Digest, admissionStateTokenContentSha256: token(value), attemptedMutation: attempt, refusalCode: "OUT_OF_SCOPE_WRITE",
+    }), /prior authoritative bounded invocation/);
+    assert.deepEqual(await readdir(refusalDirectory), beforeUnknownInvocation, "unknown invocation cannot leave an orphan refusal record");
+    await assert.rejects(() => (publishM4Record as unknown as (location: unknown, kind: string, document: unknown) => Promise<unknown>)({ stateRoot: value.fixture.stateRoot, runId: value.fixture.runId }, "ADMISSION_REFUSAL", refusal), /bounded-worker producer path/);
+    const wrongInvocation = reidentify("pi_gacw_m4_admission_refusal_v0", refusal, (draft) => { draft["bounded_worker_invocation_content_sha256"] = `sha256:${"0".repeat(64)}`; });
+    await persist(value, "m4-admission-refusals", wrongInvocation);
+    assert.notEqual(await classification(value, wrongInvocation.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
+  } finally { await releaseAdmission(value.admission); await removeRepositoryFixture(value.fixture); }
+});
+
+test("legacy run layouts without the refusal collection remain readable without migration", async () => {
+  const value = await createM4Fixture();
+  try {
+    const directory = join(value.fixture.stateRoot, "runs", value.fixture.runId, "records", "m4-admission-refusals");
+    await rm(directory, { recursive: true, force: true });
+    const [inspection, records] = await Promise.all([
+      inspectRunStorage({ stateRoot: value.fixture.stateRoot, runId: value.fixture.runId }),
+      readM5ManagedRecords({ stateRoot: value.fixture.stateRoot, runId: value.fixture.runId }),
+    ]);
+    assert.equal(inspection.status, "HEALTHY");
+    assert.deepEqual(records.admissionRefusals, []);
+    await assert.rejects(() => lstat(directory), { code: "ENOENT" });
   } finally { await releaseAdmission(value.admission); await removeRepositoryFixture(value.fixture); }
 });
 

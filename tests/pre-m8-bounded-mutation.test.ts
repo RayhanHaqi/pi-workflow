@@ -7,7 +7,10 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { createControlDecisionKernel } from "../src/control/index.js";
+import { evaluateAuthority } from "../src/control/evaluate.js";
 import { ControlDecisionError } from "../src/control/errors.js";
+import type { M5FailureInput } from "../src/control/types.js";
+import { sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
 import { inspectRunStorage } from "../src/persistence/index.js";
 import { resolveAuthoritativeBoundedExecution } from "../src/persistence/bounded-worker-authority.js";
 import { publishBoundedWorkerRecord, readM5ManagedRecords } from "../src/persistence/store.js";
@@ -21,7 +24,7 @@ import {
 import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
 import { configureM6FauxRuntimeForTests, runBoundedPiAgent, runBoundedPiAgentForTests } from "../src/pi-adapter/worker.js";
 import { assertDocumentValid, identifyContractDocument } from "../src/schemas/index.js";
-import { createM5R3Fixture, removeM5R3Fixture, r3ProcessMetadata } from "./m5-r3-fixtures.js";
+import { createM5R3Fixture, directFastPreflightFixture, removeM5R3Fixture, r3ProcessMetadata } from "./m5-r3-fixtures.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,7 +41,12 @@ function method(value: JsonRecord, name: string): (...args: readonly unknown[]) 
   return (...args) => Reflect.apply(candidate as (...values: readonly unknown[]) => unknown, value, args);
 }
 
-function installBoundedPiFauxRuntime(toolNames: readonly string[]): () => number {
+interface BoundedPiFauxCall {
+  readonly name: string;
+  readonly args: JsonRecord;
+}
+
+function installBoundedPiFauxRuntimeCalls(calls: readonly BoundedPiFauxCall[]): () => number {
   let providerCalls = 0;
   configureM6FauxRuntimeForTests({ providerId: "bounded-faux", modelId: "bounded-faux-model" }, ({ aiModule, providerId, modelId }) => {
     const ai = record(aiModule, "Pi AI module");
@@ -50,7 +58,7 @@ function installBoundedPiFauxRuntime(toolNames: readonly string[]): () => number
     const model = method(models, "getModel")(providerId, modelId);
     const assistant = method(ai, "fauxAssistantMessage");
     const toolCall = method(ai, "fauxToolCall");
-    method(faux, "setResponses")(toolNames.map((name) => assistant(toolCall(name, {}), { stopReason: "toolUse" })));
+    method(faux, "setResponses")(calls.map((call) => assistant(toolCall(call.name, call.args), { stopReason: "toolUse" })));
     return {
       models,
       model,
@@ -65,6 +73,65 @@ function installBoundedPiFauxRuntime(toolNames: readonly string[]): () => number
   return () => providerCalls;
 }
 
+function installBoundedPiFauxRuntime(toolNames: readonly string[]): () => number {
+  return installBoundedPiFauxRuntimeCalls(toolNames.map((name) => ({ name, args: {} })));
+}
+
+interface BoundedPiFauxHooks {
+  readonly onPreparation?: () => void;
+  readonly onProviderStart?: (input: { readonly ai: JsonRecord; readonly models: JsonRecord; readonly calls: number; readonly streamModel: unknown; readonly context: unknown; readonly options: unknown }) => unknown | undefined;
+}
+
+function installControllableBoundedPiFauxRuntime(toolNames: readonly string[], hooks: BoundedPiFauxHooks = {}): () => number {
+  let providerCalls = 0;
+  configureM6FauxRuntimeForTests({ providerId: "bounded-faux", modelId: "bounded-faux-model" }, ({ aiModule, providerId, modelId }) => {
+    const ai = record(aiModule, "Pi AI module");
+    const faux = record(method(ai, "fauxProvider")({
+      api: "bounded-faux-api", provider: providerId, models: [{ id: modelId, name: modelId, reasoning: true, input: ["text"] }], tokensPerSecond: 0,
+    }), "faux provider");
+    const models = record(method(ai, "createModels")(), "faux models");
+    method(models, "setProvider")(faux["provider"]);
+    const model = method(models, "getModel")(providerId, modelId);
+    const assistant = method(ai, "fauxAssistantMessage");
+    const toolCall = method(ai, "fauxToolCall");
+    method(faux, "setResponses")(toolNames.map((name) => assistant(toolCall(name, {}), { stopReason: "toolUse" })));
+    hooks.onPreparation?.();
+    return {
+      models,
+      model,
+      streamFn: (streamModel: unknown, context: unknown, options?: unknown): unknown => {
+        providerCalls += 1;
+        return hooks.onProviderStart?.({ ai, models, calls: providerCalls, streamModel, context, options }) ?? method(models, "streamSimple")(streamModel, context, options);
+      },
+      clearProviderState: (): void => { method(faux, "setResponses")([]); },
+      pendingResponseCount: (): unknown => method(faux, "getPendingResponseCount")(),
+    };
+  });
+  return () => providerCalls;
+}
+
+function uncooperativeToolStream(ai: JsonRecord, toolName: string, delivered?: () => void): unknown {
+  const stream = record(method(ai, "createAssistantMessageEventStream")(), "uncooperative faux stream");
+  const message = method(ai, "fauxAssistantMessage")(method(ai, "fauxToolCall")(toolName, {}), { stopReason: "toolUse" });
+  queueMicrotask(() => {
+    delivered?.();
+    method(stream, "push")({ type: "done", reason: "toolUse", message });
+    method(stream, "end")(message);
+  });
+  return stream;
+}
+
+function uncooperativeFailureStream(ai: JsonRecord, delivered?: () => void): unknown {
+  const stream = record(method(ai, "createAssistantMessageEventStream")(), "uncooperative faux stream");
+  const message = method(ai, "fauxAssistantMessage")("", { stopReason: "error", errorMessage: "synthetic provider failure after cancellation" });
+  queueMicrotask(() => {
+    delivered?.();
+    method(stream, "push")({ type: "error", reason: "error", error: message });
+    method(stream, "end")(message);
+  });
+  return stream;
+}
+
 function boundedPiAgentInput(maxModelTurns: number): Parameters<typeof runBoundedPiAgent>[0] {
   return {
     providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt: "bounded", userPrompt: "bounded",
@@ -72,7 +139,7 @@ function boundedPiAgentInput(maxModelTurns: number): Parameters<typeof runBounde
       { name: "observe", label: "observe", description: "observe", parameters: { type: "object", additionalProperties: false }, async execute() { return { content: [], details: {} }; } },
       { name: "submit_report", label: "submit", description: "submit", parameters: { type: "object", additionalProperties: false }, async execute() { return { content: [], details: {} }; } },
     ],
-    maxM4ToolCalls: 4, maxModelTurns, deadlineMs: 5_000,
+    maxModelTurns, deadlineMs: 5_000,
   };
 }
 
@@ -155,6 +222,67 @@ function writer(paths: readonly string[], options: { readonly cleanupCertain?: b
   };
 }
 
+interface PiMutationRuntimeCounters {
+  readToolExecutions: number;
+  patchToolExecutions: number;
+}
+
+/** Exercises the shared Pi loop with the real bounded-worker tool closures. */
+function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRuntime {
+  return {
+    async execute({ profile, systemPrompt, userPrompt, tools, maxModelTurns, deadlineMs, signal }) {
+      if (profile !== "MUTATION_EXECUTOR") throw new Error("test Pi mutation runtime only supports mutation execution");
+      return runBoundedPiAgentForTests({
+        providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt, userPrompt,
+        tools: [
+          {
+            name: "read_scoped", label: "Scoped read", description: "Read one allowed repository path through M4.",
+            parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" } } },
+            async execute(_id, params) {
+              const value = record(params, "Pi read parameters"); const path = value["path"];
+              if (typeof path !== "string" || path.length === 0) throw new Error("Pi read path is invalid");
+              counters.readToolExecutions += 1;
+              await tools.readPath(path);
+              return { content: [], details: {} };
+            },
+          },
+          {
+            name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4.",
+            parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
+              path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
+            } },
+            async execute(_id, params) {
+              const value = record(params, "Pi patch parameters"); const path = value["path"]; const operation = value["operation"];
+              const replacement = value["replacement_base64"]; const exists = value["expected_preimage_exists"];
+              const digest = value["expected_preimage_digest"]; const size = value["expected_preimage_size"]; const mode = value["expected_preimage_mode"];
+              if (typeof path !== "string" || path.length === 0 || (operation !== "CREATE" && operation !== "REPLACE" && operation !== "DELETE") ||
+                  (replacement !== null && typeof replacement !== "string") || typeof exists !== "boolean" ||
+                  (digest !== null && typeof digest !== "string") || (size !== null && (typeof size !== "number" || !Number.isSafeInteger(size))) ||
+                  (mode !== null && (typeof mode !== "number" || !Number.isSafeInteger(mode)))) throw new Error("Pi patch parameters are invalid");
+              counters.patchToolExecutions += 1;
+              await tools.writePath({ path, operation, replacementBytes: replacement === null ? null : Buffer.from(replacement, "base64"), expectedPreimageExists: exists,
+                expectedPreimageDigest: digest as Sha256Digest | null, expectedPreimageSize: size as number | null, expectedPreimageMode: mode as number | null });
+              return { content: [], details: {} };
+            },
+          },
+          {
+            name: "submit_worker_report", label: "Bounded report", description: "Submit one bounded advisory report and end this worker.",
+            parameters: { type: "object", additionalProperties: false, required: ["report"], properties: { report: { type: "string", maxLength: 8192 } } },
+            async execute(_id, params) {
+              const value = record(params, "Pi report parameters"); const report = value["report"];
+              if (typeof report !== "string" || report.length === 0) throw new Error("Pi report is invalid");
+              tools.submitReport(report);
+              return { content: [], details: {}, terminate: true };
+            },
+          },
+        ],
+        maxModelTurns, deadlineMs,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    },
+  };
+}
+
 async function run(root: string, input: BoundedMutationGoal, runtime: BoundedWorkerRuntime, extra: Parameters<typeof runBoundedMutationWorkflowForTests>[1] = {}) {
   configureBoundedWorkerFauxRuntimeForTests(() => runtime);
   try {
@@ -196,6 +324,16 @@ test("out-of-scope, wrong-output, missing/failed verification, and late drift bl
       const result = await run(root, goal("DIRECT_LUNA_HIGH"), writer(["outside.txt"]));
       assert.equal(result.outcome, "BLOCKED");
       assert.match(result.reason, /WORKER_AUTHORITY|OUT_OF_SCOPE_WRITE/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  await t.test("forged runtime refusal provenance", async () => {
+    const root = await fixture();
+    try {
+      const result = await run(root, goal("DIRECT_LUNA_HIGH"), { async execute() {
+        return { completed: false, firstFailureCode: "M4_TOOL_BUDGET_EXHAUSTED", firstFailureStage: "M4_TOOL_ADMISSION", cleanupCertain: true };
+      } });
+      assert.equal(result.outcome, "BLOCKED");
+      assert.match(result.reason, /WORKER_AUTHORITY/);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   await t.test("unexpected in-scope output", async () => {
@@ -383,7 +521,7 @@ test("zero remaining model turns reject before Pi runtime or provider admission"
   const result = await runBoundedPiAgent({
     providerId: "must-not-be-loaded", modelId: "must-not-be-loaded", effort: "high", systemPrompt: "bounded", userPrompt: "bounded",
     tools: [{ name: "report", label: "report", description: "report", parameters: {}, async execute() { return { content: [], details: {} }; } }],
-    maxM4ToolCalls: 1, maxModelTurns: 0, deadlineMs: 1,
+    maxModelTurns: 0, deadlineMs: 1,
   });
   assert.equal(result.completed, false);
   assert.equal(result.firstFailureCode, "MODEL_TURN_BUDGET_EXHAUSTED");
@@ -447,6 +585,237 @@ test("bounded Pi telemetry counts only genuinely started generations", async (t)
   });
 });
 
+test("actual Pi ordering delegates M4 admission to the bounded worker", async (t) => {
+  const patch = (path: string, text: string): BoundedPiFauxCall => ({
+    name: "apply_patch_scoped",
+    args: {
+      path, operation: "CREATE", replacement_base64: Buffer.from(text, "utf8").toString("base64"), expected_preimage_exists: false,
+      expected_preimage_digest: null, expected_preimage_size: null, expected_preimage_mode: null,
+    },
+  });
+
+  await t.test("S09: a read does not consume the mutation cap, and the second mutation reaches bounded refusal", async () => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-retained-"));
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0 };
+    const providerCalls = installBoundedPiFauxRuntimeCalls([
+      { name: "read_scoped", args: { path: "verify/input.txt" } },
+      patch("first.txt", "first\n"),
+      patch("second.txt", "second\n"),
+    ]);
+    try {
+      const result = await run(root, goal("DIRECT_LUNA_HIGH", ["first.txt", "second.txt"]), piMutationRuntime(counters), {
+        authority: { ...authority(), hard_mutation_tool_limit: 1 }, retainedArtifactRoot: retained,
+      });
+      assert.equal(result.outcome, "BLOCKED", result.reason);
+      assert.equal(result.finalState?.phase, "BLOCKED");
+      assert.match(result.reason, /WORKER_PRODUCTIVE_REFUSAL:M4_TOOL_BUDGET_EXHAUSTED/);
+      assert.equal(counters.readToolExecutions, 1);
+      assert.equal(counters.patchToolExecutions, 2, "the second tool request passed Pi beforeToolCall and reached bounded admission");
+      assert.equal(providerCalls(), 3, "only genuinely started Pi generations contribute telemetry");
+      assert.ok(result.evidenceRoot !== undefined);
+
+      const stateRoot = join(result.evidenceRoot, "state");
+      const [records, inspection] = await Promise.all([
+        readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" }),
+        inspectRunStorage({ stateRoot, runId: "pre-m8-bounded" }),
+      ]);
+      const refusal = records.admissionRefusals.filter((entry) => entry.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED");
+      const receipts = records.mutationReceipts.filter((entry) => entry.outcome === "APPLIED");
+      assert.ok(records.routeMaps[0]!.routes.every((route) => route.tool_policy.maximum_tool_calls === 32), "the hard mutation cap does not shrink the total route tool envelope");
+      assert.equal(records.budgets[0]!.limits.max_tool_calls, 32, "M5 total TOOL_CALL accounting remains distinct from the mutation cap");
+      const worker = records.boundedWorkerResults.find((entry) => entry.outcome === "BLOCKED");
+      assert.equal(refusal.length, 1);
+      assert.equal(receipts.length, 1, "the denied second mutation never reached the M4 mutation gateway");
+      assert.equal(receipts[0]!.path, "first.txt");
+      assert.notEqual(worker, undefined);
+      assert.equal(worker!.first_failure_code, "M4_TOOL_BUDGET_EXHAUSTED");
+      assert.equal(worker!.first_failure_stage, "M4_TOOL_ADMISSION");
+      assert.equal(worker!.actual_usage.m4_tool_calls, 2, "accepted read plus accepted mutation are the sole total M4 usage");
+      assert.equal(worker!.actual_usage.model_turns, 3);
+      assert.equal(worker!.actual_usage.provider_requests, 3);
+      assert.ok(worker!.m4_evidence_content_sha256.includes(refusal[0]!.content_sha256));
+      assert.ok(worker!.m3_evidence_content_sha256.includes(refusal[0]!.admission_state_token_content_sha256));
+      assert.ok(inspection.managedRecordClassifications.some((entry) => entry.object.kind === "BOUNDED_WORKER_RESULT" && entry.object.contentSha256 === worker!.content_sha256 && entry.classification === "AUTHORITATIVE_MANAGED_RECORD"));
+      const usage = records.usage.find((entry) => entry.source_record_content_sha256 === worker!.content_sha256);
+      const terminal = records.decisions.find((entry) => entry.outcome === "BLOCK");
+      assert.notEqual(usage, undefined);
+      assert.equal(usage!.measurements.find((entry) => entry.dimension === "TOOL_CALL")?.amount, 2);
+      assert.notEqual(terminal, undefined);
+      assert.equal(terminal!.pass_authority, false);
+      assert.equal(terminal!.failures.length, 1);
+      assert.equal(terminal!.failures[0]!.source_record_content_sha256, worker!.content_sha256);
+      assert.equal(terminal!.failures[0]!.source_error_code, "M4_TOOL_BUDGET_EXHAUSTED");
+      const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: root });
+      assert.match(status.stdout, /first\.txt/);
+      assert.doesNotMatch(status.stdout, /second\.txt/);
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("S10: a task-external mutation reaches bounded scope refusal before the globally permitting gateway", async () => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-retained-"));
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0 };
+    const providerCalls = installBoundedPiFauxRuntimeCalls([patch("outside.txt", "outside\n")]);
+    const broadGoal = goal("DIRECT_LUNA_HIGH", ["in-scope.txt"], ["in-scope.txt", "outside.txt"]);
+    const taskScopedGoal: BoundedMutationGoal = {
+      ...broadGoal,
+      tasks: [{ task_id: "task-owned-path", objective: "Own only the in-scope path.", editable_paths: ["in-scope.txt"], required_outputs: ["in-scope.txt"], dependencies: [] }],
+    };
+    try {
+      const result = await run(root, taskScopedGoal, piMutationRuntime(counters), { retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "BLOCKED", result.reason);
+      assert.equal(result.finalState?.phase, "BLOCKED");
+      assert.match(result.reason, /WORKER_PRODUCTIVE_REFUSAL:OUT_OF_SCOPE_WRITE/);
+      assert.equal(counters.readToolExecutions, 0);
+      assert.equal(counters.patchToolExecutions, 1, "the request passed Pi sequencing and reached bounded scope admission");
+      assert.equal(providerCalls(), 1);
+      assert.ok(result.evidenceRoot !== undefined);
+
+      const stateRoot = join(result.evidenceRoot, "state");
+      const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
+      const refusal = records.admissionRefusals.filter((entry) => entry.refusal_code === "OUT_OF_SCOPE_WRITE");
+      const worker = records.boundedWorkerResults.find((entry) => entry.outcome === "BLOCKED");
+      assert.ok(records.toolPolicies[0]!.editable_paths.some((rule) => rule.path === "outside.txt"), "the target is globally M4-editable and must be stopped by task scope before gateway execution");
+      assert.equal(refusal.length, 1);
+      assert.equal(records.mutationReceipts.length, 0, "the globally permitting M4 gateway was never invoked");
+      assert.notEqual(worker, undefined);
+      assert.equal(worker!.first_failure_code, "OUT_OF_SCOPE_WRITE");
+      assert.equal(worker!.first_failure_stage, "M4_TOOL_ADMISSION");
+      assert.equal(worker!.actual_usage.m4_tool_calls, 0);
+      assert.equal(worker!.actual_usage.model_turns, 1);
+      assert.equal(worker!.actual_usage.provider_requests, 1);
+      assert.ok(worker!.m4_evidence_content_sha256.includes(refusal[0]!.content_sha256));
+      const invocation = records.boundedWorkerInvocations.find((entry) => entry.content_sha256 === worker!.invocation_content_sha256);
+      assert.notEqual(invocation, undefined);
+      assert.equal(refusal[0]!.admission_state_token_content_sha256, invocation!.input_m3_state_token_content_sha256);
+      const usage = records.usage.find((entry) => entry.source_record_content_sha256 === worker!.content_sha256);
+      const terminal = records.decisions.find((entry) => entry.outcome === "BLOCK");
+      assert.notEqual(usage, undefined);
+      assert.equal(usage!.measurements.find((entry) => entry.dimension === "TOOL_CALL")?.amount, 0);
+      assert.notEqual(terminal, undefined);
+      assert.equal(terminal!.pass_authority, false);
+      assert.equal(terminal!.failures.length, 1);
+      assert.equal(terminal!.failures[0]!.source_record_content_sha256, worker!.content_sha256);
+      assert.equal(terminal!.failures[0]!.source_error_code, "OUT_OF_SCOPE_WRITE");
+      const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: root });
+      assert.equal(status.stdout, "", "the repository remains unchanged when bounded scope refuses before gateway execution");
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("R2 controller cancellation reaches every generic Pi generation and tool admission seam", async (t) => {
+  await t.test("R2-T01: pre-aborted signal prevents runtime preparation and provider generation", async () => {
+    const controller = new AbortController(); controller.abort();
+    let preparations = 0;
+    configureM6FauxRuntimeForTests({ providerId: "bounded-faux", modelId: "bounded-faux-model" }, () => { preparations += 1; throw new Error("runtime preparation must not begin"); });
+    try {
+      const result = await runBoundedPiAgentForTests({ ...boundedPiAgentInput(2), signal: controller.signal });
+      assert.equal(preparations, 0);
+      assert.equal(result.firstFailureCode, "WORKER_ABORTED");
+      assert.equal(result.modelTurns, 0);
+      assert.equal(result.providerRequests, 0);
+    } finally { configureM6FauxRuntimeForTests(undefined); }
+  });
+
+  await t.test("R2-T02: cancellation after generation one rejects generation two without a phantom turn", async () => {
+    const controller = new AbortController();
+    const providerCalls = installControllableBoundedPiFauxRuntime(["observe", "submit_report"]);
+    try {
+      const input = boundedPiAgentInput(2);
+      const result = await runBoundedPiAgentForTests({
+        ...input,
+        signal: controller.signal,
+        tools: input.tools.map((tool) => tool.name !== "observe" ? tool : {
+          ...tool,
+          async execute() { controller.abort(); return { content: [], details: {} }; },
+        }),
+      });
+      assert.equal(providerCalls(), 1);
+      assert.equal(result.modelTurns, 1);
+      assert.equal(result.providerRequests, 1);
+    } finally { configureM6FauxRuntimeForTests(undefined); }
+  });
+
+  await t.test("R2-T03: cancellation during runtime preparation prevents provider generation after preparation returns", async () => {
+    const controller = new AbortController();
+    const providerCalls = installControllableBoundedPiFauxRuntime(["submit_report"], { onPreparation: () => controller.abort() });
+    try {
+      const result = await runBoundedPiAgentForTests({ ...boundedPiAgentInput(1), signal: controller.signal });
+      assert.equal(providerCalls(), 0);
+      assert.equal(result.firstFailureCode, "WORKER_ABORTED");
+      assert.equal(result.modelTurns, 0);
+      assert.equal(result.providerRequests, 0);
+    } finally { configureM6FauxRuntimeForTests(undefined); }
+  });
+
+  await t.test("R2-T04: cancellation before productive tool admission rejects the tool", async () => {
+    const controller = new AbortController();
+    let toolExecutions = 0;
+    const providerCalls = installControllableBoundedPiFauxRuntime([], {
+      onProviderStart: ({ ai }) => { controller.abort(); return uncooperativeToolStream(ai, "observe"); },
+    });
+    try {
+      const input = boundedPiAgentInput(2);
+      const result = await runBoundedPiAgentForTests({
+        ...input,
+        signal: controller.signal,
+        tools: input.tools.map((tool) => tool.name !== "observe" ? tool : {
+          ...tool,
+          async execute() { toolExecutions += 1; return { content: [], details: {} }; },
+        }),
+      });
+      assert.equal(providerCalls(), 1);
+      assert.equal(toolExecutions, 0);
+      assert.equal(result.modelTurns, 1);
+    } finally { configureM6FauxRuntimeForTests(undefined); }
+  });
+
+  await t.test("R2-T05: a non-cooperative admitted generation cannot admit a later generation", async () => {
+    const controller = new AbortController();
+    let deliveredAfterAbort = false;
+    const providerCalls = installControllableBoundedPiFauxRuntime([], {
+      onProviderStart: ({ ai }) => {
+        controller.abort();
+        return uncooperativeToolStream(ai, "observe", () => { deliveredAfterAbort = controller.signal.aborted; });
+      },
+    });
+    try {
+      const result = await runBoundedPiAgentForTests({ ...boundedPiAgentInput(2), signal: controller.signal });
+      assert.equal(deliveredAfterAbort, true, "the faux generation deliberately ignored local abort after admission");
+      assert.equal(providerCalls(), 1);
+      assert.equal(result.modelTurns, 1);
+      assert.equal(result.providerRequests, 1);
+    } finally { configureM6FauxRuntimeForTests(undefined); }
+  });
+
+  await t.test("R2-T06: post-cancellation synthetic failure/turn-end activity cannot create a phantom generation", async () => {
+    const controller = new AbortController();
+    let deliveredAfterAbort = false;
+    const providerCalls = installControllableBoundedPiFauxRuntime([], {
+      onProviderStart: ({ ai }) => {
+        controller.abort();
+        return uncooperativeFailureStream(ai, () => { deliveredAfterAbort = controller.signal.aborted; });
+      },
+    });
+    try {
+      const result = await runBoundedPiAgentForTests({ ...boundedPiAgentInput(2), signal: controller.signal });
+      assert.equal(deliveredAfterAbort, true);
+      assert.equal(providerCalls(), 1);
+      assert.equal(result.modelTurns, 1);
+      assert.equal(result.providerRequests, 1);
+    } finally { configureM6FauxRuntimeForTests(undefined); }
+  });
+});
+
 test("observed soft model-turn exhaustion blocks later productive work and terminal PASS", async () => {
   const root = await fixture();
   let calls = 0;
@@ -497,16 +866,16 @@ test("bounded execution resolver admits only the exact M3/M4/M5/Task/Graph/Plan 
   const reservationState = { content_sha256: digest("c"), phase: "LEAF_FAST_PREFLIGHT", active_task_id: "task-a" };
   const reservation = { content_sha256: digest("d"), current_state_content_sha256: reservationState.content_sha256, policy_content_sha256: policy.content_sha256, outcome: "AUTHORIZE", operation_id: "operation", reservation: { reservation_decision_key: digest("e"), reserved_state_content_sha256: reservationState.content_sha256, logical_role: "LUNA_EXECUTOR" } };
   const token = { content_sha256: digest("f"), baseline_runtime_content_sha256: baseline.content_sha256, run_id: policy.run_id, repository_identity_content_sha256: policy.repository_identity_content_sha256, worktree_key: policy.worktree_key, task_scope_identity: policy.scope_sha256 };
-  const task = { content_sha256: digest("0"), task_id: "task-a", task_sha256: digest("1") };
+  const task = { content_sha256: digest("0"), task_id: "task-a", task_sha256: digest("1"), scope: { editable_paths: ["task-a.txt"] } };
   const alternateTask = { content_sha256: digest("2"), task_id: "task-b", task_sha256: digest("3") };
   const graph = { content_sha256: digest("4"), task_graph_sha256: policy.task_graph_sha256, tasks: [{ task_id: task.task_id, task_sha256: task.task_sha256 }, { task_id: alternateTask.task_id, task_sha256: alternateTask.task_sha256 }], edges: [] };
   const plan = { content_sha256: digest("5"), plan_approval_sha256: policy.plan_approval_sha256, bindings: { contract_sha256: policy.contract_sha256, baseline_approval_sha256: policy.baseline_approval_sha256, dag: { task_graph_sha256: graph.task_graph_sha256, edges: graph.edges, ordered_task_packet_identities: [task.task_sha256, alternateTask.task_sha256] } } };
-  const invocation = { content_sha256: digest("6"), operation_id: reservation.operation_id, m5_reservation_decision_content_sha256: reservation.content_sha256, m5_reservation_decision_key: reservation.reservation.reservation_decision_key, input_m3_state_token_content_sha256: token.content_sha256, task_content_sha256: task.content_sha256, task_graph_sha256: graph.content_sha256, plan_approval_sha256: plan.content_sha256 };
+  const invocation = { content_sha256: digest("6"), run_id: "run", operation_id: reservation.operation_id, m5_reservation_decision_content_sha256: reservation.content_sha256, m5_reservation_decision_key: reservation.reservation.reservation_decision_key, input_m3_state_token_content_sha256: token.content_sha256, task_content_sha256: task.content_sha256, task_graph_sha256: graph.content_sha256, plan_approval_sha256: plan.content_sha256 };
   const result = { content_sha256: digest("7"), invocation_content_sha256: invocation.content_sha256, outcome: "COMPLETED", cleanup_certain: true, actual_usage: { worker_invocations: 1, m4_tool_calls: 0 }, m3_evidence_content_sha256: [], m4_evidence_content_sha256: [] };
   const classifications = [
     ["M3_BASELINE", baseline.content_sha256], ["M5_CONTROL_POLICY", policy.content_sha256], ["M5_CONTROL_DECISION", reservation.content_sha256], ["M3_REPOSITORY_STATE_TOKEN", token.content_sha256], ["BOUNDED_WORKER_INVOCATION", invocation.content_sha256], ["BOUNDED_WORKER_RESULT", result.content_sha256],
   ].map(([kind, contentSha256]) => ({ object: { kind, contentSha256, relativePath: `${kind}.json` }, classification: "AUTHORITATIVE_MANAGED_RECORD" as const, detail: "test" }));
-  const resolve = (overrides: Record<string, unknown> = {}) => resolveAuthoritativeBoundedExecution({ invocation, result, reservation, reservationState, policy, baseline, approval: null, stateToken: token, task, taskGraph: graph, plan, classifications, ...overrides } as any);
+  const resolve = (overrides: Record<string, unknown> = {}) => resolveAuthoritativeBoundedExecution({ invocation, result, reservation, reservationState, policy, baseline, approval: null, stateToken: token, task, taskGraph: graph, plan, admissionRefusals: new Map(), classifications, ...overrides } as any);
   assert.equal(resolve().accepted, true, "the exact active routed leaf is accepted");
   const managedButUnresolved = resolve({ classifications: classifications.filter((entry) => entry.object.kind !== "M5_CONTROL_DECISION") });
   assert.equal(managedButUnresolved.accepted, false, "managed bounded records alone cannot resolve into M5 authority");
@@ -579,6 +948,96 @@ test("bounded execution resolver admits only the exact M3/M4/M5/Task/Graph/Plan 
     assert.equal(rejected.acceptedWorkerInvocations, 0, label);
     assert.equal(rejected.acceptedM4ToolCalls, 0, label);
   }
+
+  const acceptedReceiptEvidence = digest("8");
+  const successorToken = digest("9");
+  const refusalRecord = (code: "M4_TOOL_BUDGET_EXHAUSTED" | "OUT_OF_SCOPE_WRITE", state: string, path: string) => {
+    const attemptedOperation = { projection_id: "m4-admission-attempt-v0", tool_class: "APPLY_PATCH_SCOPED", operation: "REPLACE", target_path: path,
+      expected_preimage: { exists: true, content_sha256: digest("a"), byte_length: 1, mode: 0o644 }, replacement: { content_sha256: digest("b"), byte_length: 2 },
+      requested_final_mode: 0o644, ownership_class: "OWNER_ACCEPTED_MUTABLE", data_class: "PUBLIC_SOURCE" };
+    return identifyContractDocument("pi_gacw_m4_admission_refusal_v0", { schema_id: "pi_gacw_m4_admission_refusal_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+      run_id: "run", bounded_worker_invocation_content_sha256: invocation.content_sha256, admission_state_token_content_sha256: state,
+      attempted_operation: attemptedOperation, attempted_operation_content_sha256: sha256Canonical(attemptedOperation), disposition: "REFUSED", refusal_code: code });
+  };
+  const budgetRecord = refusalRecord("M4_TOOL_BUDGET_EXHAUSTED", successorToken, "task-a.txt");
+  const refusalClassifications = (blocked: { readonly content_sha256: string }, record: { readonly content_sha256: string }, includeReceipt = true) => [
+    ...classifications.filter((entry) => entry.object.kind !== "BOUNDED_WORKER_RESULT"),
+    { object: { kind: "BOUNDED_WORKER_RESULT", contentSha256: blocked.content_sha256, relativePath: "terminal-refusal.json" }, classification: "AUTHORITATIVE_MANAGED_RECORD" as const, detail: "test" },
+    { object: { kind: "M4_ADMISSION_REFUSAL", contentSha256: record.content_sha256, relativePath: "m4-admission-refusal.json" }, classification: "AUTHORITATIVE_MANAGED_RECORD" as const, detail: "test" },
+    { object: { kind: "M3_REPOSITORY_STATE_TOKEN", contentSha256: successorToken, relativePath: "successor-token.json" }, classification: "AUTHORITATIVE_MANAGED_RECORD" as const, detail: "test" },
+    ...(includeReceipt ? [{ object: { kind: "M4_MUTATION_RECEIPT", contentSha256: acceptedReceiptEvidence, relativePath: "accepted-mutation.json" }, classification: "AUTHORITATIVE_MANAGED_RECORD" as const, detail: "test" }] : []),
+  ];
+  const budgetRefusal = { ...result, content_sha256: digest("c"), outcome: "BLOCKED" as const, first_failure_code: "M4_TOOL_BUDGET_EXHAUSTED", first_failure_stage: "M4_TOOL_ADMISSION",
+    actual_usage: { worker_invocations: 1, m4_tool_calls: 1 }, m3_evidence_content_sha256: [successorToken], m4_evidence_content_sha256: [acceptedReceiptEvidence, budgetRecord.content_sha256] };
+  const resolvedBudgetRefusal = resolve({ result: budgetRefusal, admissionRefusals: new Map([[budgetRecord.content_sha256, budgetRecord]]), classifications: refusalClassifications(budgetRefusal, budgetRecord) });
+  assert.equal(resolvedBudgetRefusal.accepted, true, resolvedBudgetRefusal.reason ?? "a settled budget refusal resolves only with producer evidence");
+  assert.equal(resolvedBudgetRefusal.acceptedWorkerInvocations, 1);
+  assert.equal(resolvedBudgetRefusal.acceptedM4ToolCalls, 1, "the refusal contributes zero accepted M4 usage");
+
+  const scopeRecord = refusalRecord("OUT_OF_SCOPE_WRITE", token.content_sha256, "frozen.txt");
+  const scopeRefusal = { ...budgetRefusal, content_sha256: digest("d"), first_failure_code: "OUT_OF_SCOPE_WRITE", actual_usage: { worker_invocations: 1, m4_tool_calls: 0 }, m3_evidence_content_sha256: [], m4_evidence_content_sha256: [scopeRecord.content_sha256] };
+  const resolvedScopeRefusal = resolve({ result: scopeRefusal, admissionRefusals: new Map([[scopeRecord.content_sha256, scopeRecord]]), classifications: refusalClassifications(scopeRefusal, scopeRecord, false) });
+  assert.equal(resolvedScopeRefusal.accepted, true, "a settled scope refusal resolves only with producer evidence");
+  assert.equal(resolvedScopeRefusal.acceptedM4ToolCalls, 0);
+
+  const editedCode = refusalRecord("OUT_OF_SCOPE_WRITE", successorToken, "task-a.txt");
+  const wrongStateRecord = refusalRecord("M4_TOOL_BUDGET_EXHAUSTED", digest("e"), "task-a.txt");
+  const wrongStateResult = { ...budgetRefusal, m4_evidence_content_sha256: [acceptedReceiptEvidence, wrongStateRecord.content_sha256] };
+  const refusalAttacks: readonly [string, Record<string, unknown>][] = [
+    ["caller-authored BLOCKED without refusal record", { result: budgetRefusal, classifications: classifications }],
+    ["wrong invocation", { result: budgetRefusal, admissionRefusals: new Map([[budgetRecord.content_sha256, { ...budgetRecord, bounded_worker_invocation_content_sha256: digest("e") }]]), classifications: refusalClassifications(budgetRefusal, budgetRecord) }],
+    ["wrong reservation", { result: budgetRefusal, admissionRefusals: new Map([[budgetRecord.content_sha256, budgetRecord]]), classifications: refusalClassifications(budgetRefusal, budgetRecord), reservation: { ...reservation, content_sha256: digest("f") } }],
+    ["edited refusal code", { result: budgetRefusal, admissionRefusals: new Map([[budgetRecord.content_sha256, editedCode]]), classifications: refusalClassifications(budgetRefusal, budgetRecord) }],
+    ["edited refusal stage", { result: { ...budgetRefusal, first_failure_stage: "BOUNDED_WORKER" }, admissionRefusals: new Map([[budgetRecord.content_sha256, budgetRecord]]), classifications: refusalClassifications(budgetRefusal, budgetRecord) }],
+    ["wrong current M3 state", { result: wrongStateResult, admissionRefusals: new Map([[wrongStateRecord.content_sha256, wrongStateRecord]]), classifications: refusalClassifications(wrongStateResult, wrongStateRecord) }],
+    ["accepted evidence substituted for refusal", { result: { ...budgetRefusal, m4_evidence_content_sha256: [acceptedReceiptEvidence] }, admissionRefusals: new Map([[budgetRecord.content_sha256, budgetRecord]]), classifications: refusalClassifications(budgetRefusal, budgetRecord) }],
+    ["refusal counted as accepted usage", { result: { ...scopeRefusal, actual_usage: { worker_invocations: 1, m4_tool_calls: 1 } }, admissionRefusals: new Map([[scopeRecord.content_sha256, scopeRecord]]), classifications: refusalClassifications(scopeRefusal, scopeRecord, false) }],
+    ["cleanup uncertainty", { result: { ...budgetRefusal, cleanup_certain: false }, admissionRefusals: new Map([[budgetRecord.content_sha256, budgetRecord]]), classifications: refusalClassifications(budgetRefusal, budgetRecord) }],
+  ];
+  for (const [label, overrides] of refusalAttacks) {
+    const rejected = resolve(overrides);
+    assert.equal(rejected.accepted, false, label);
+    assert.equal(rejected.acceptedWorkerInvocations, 0, label);
+    assert.equal(rejected.acceptedM4ToolCalls, 0, label);
+  }
+});
+
+test("caller-authored M5 terminal refusal claims cannot bypass persisted sole-resolver authority", async () => {
+  const fixtureState = await createM5R3Fixture();
+  try {
+    const committed = await directFastPreflightFixture(fixtureState); const state = committed.workflowState;
+    const operationId = "terminal-refusal-operation";
+    const admission = evaluateAuthority({ policy: fixtureState.policy, state, reducerPolicy: fixtureState.reducer, persistedUsage: [], priorDecisions: [], request: {
+      intent: "AUTHORIZE_WORK", expectedRevision: committed.statePointer.revision, expectedStatePointerContentSha256: committed.statePointer.content_sha256 as Sha256Digest,
+      expectedWorkflowStateContentSha256: state.content_sha256 as Sha256Digest, operationId, availableLogicalRoles: ["LUNA_EXECUTOR"],
+    } });
+    assert.equal(admission.outcome, "AUTHORIZE"); assert.notEqual(admission.reservation, null);
+    const result = identifyContractDocument("pi_gacw_bounded_worker_result_v0", {
+      schema_id: "pi_gacw_bounded_worker_result_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+      invocation_content_sha256: "sha256:1111111111111111111111111111111111111111111111111111111111111111", outcome: "BLOCKED",
+      first_failure_code: "M4_TOOL_BUDGET_EXHAUSTED", first_failure_stage: "M4_TOOL_ADMISSION", m3_evidence_content_sha256: [], m4_evidence_content_sha256: [],
+      actual_usage: { worker_invocations: 1, m4_tool_calls: 0, model_turns: null, provider_requests: null, input_tokens: null, output_tokens: null, cost_microusd: null, wall_time_ms: 0 },
+      cleanup_certain: true, advisory_report: null, completed_at: "2026-01-01T00:00:00.000Z",
+    }) as any;
+    const failure: M5FailureInput = {
+      sourceLayer: "CONTROLLER", sourceErrorCode: result.first_failure_code, sourceRecordContentSha256: result.content_sha256,
+      normalizedSignature: sha256Canonical({ protocol: "bounded-worker-terminal-refusal-v1", bounded_worker_result_content_sha256: result.content_sha256,
+        first_failure_code: result.first_failure_code, first_failure_stage: result.first_failure_stage, operation_id: operationId,
+        reservation_decision_content_sha256: admission.content_sha256 }),
+      operationId, scopeIdentity: fixtureState.policy.scope_sha256 as Sha256Digest, repositoryIdentity: fixtureState.policy.repository_identity_content_sha256 as Sha256Digest, worktreeKey: fixtureState.policy.worktree_key as Sha256Digest,
+    };
+    const base = { policy: fixtureState.policy, state, reducerPolicy: fixtureState.reducer, persistedUsage: [], priorDecisions: [admission],
+      authoritativeSources: { boundedWorkerResults: [result] }, request: { expectedRevision: committed.statePointer.revision, expectedStatePointerContentSha256: committed.statePointer.content_sha256 as Sha256Digest,
+        expectedWorkflowStateContentSha256: state.content_sha256 as Sha256Digest, availableLogicalRoles: ["LUNA_EXECUTOR"], operationId } } as const;
+    const rejects = (request: Record<string, unknown>): void => assert.throws(() => evaluateAuthority({ ...base, request: { ...base.request, ...request } as any }),
+      (error: unknown) => error instanceof ControlDecisionError && error.code === "FAILURE_CLASSIFICATION_INVALID");
+    rejects({ intent: "BLOCK", blockReason: "BLOCKED_TERMINAL_REFUSAL", failures: [failure] });
+    rejects({ intent: "EVALUATE_TERMINAL", failures: [] });
+    rejects({ intent: "AUTHORIZE_CONTINUATION", failures: [] });
+    rejects({ intent: "BLOCK", blockReason: "BLOCKED_TERMINAL_REFUSAL", failures: [] });
+    rejects({ intent: "BLOCK", blockReason: "BLOCKED_TERMINAL_REFUSAL", failures: [{ ...failure, sourceErrorCode: "OUT_OF_SCOPE_WRITE" }] });
+    rejects({ intent: "BLOCK", blockReason: "BLOCKED_TERMINAL_REFUSAL", failures: [{ ...failure, normalizedSignature: "sha256:2222222222222222222222222222222222222222222222222222222222222222" }] });
+  } finally { await removeM5R3Fixture(fixtureState); }
 });
 
 test("managed-only bounded records cannot bypass resolver-exclusive live or persisted M5 sources", async () => {
