@@ -2,18 +2,18 @@ import assert from "node:assert/strict";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
-import { sha256Bytes, type Sha256Digest } from "../src/identity/index.js";
+import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
 import { inspectRunStorage } from "../src/persistence/index.js";
 import { readM5ManagedRecords } from "../src/persistence/store.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 import { resolveRepositoryIdentity } from "../src/repository/index.js";
 import { captureGitState } from "../src/repository/fingerprint.js";
 import {
-  M8_CANONICAL_SOURCE_BASELINE,
   canonicalSlotCount,
   createM8ApprovalManifest,
+  deriveM8CanonicalSourceBaseline,
   createM8InvocationRoot,
   disposeM8Freeze,
   disposeM8Invocation,
@@ -21,26 +21,69 @@ import {
   freezeM8Bundle,
   freezeM8Scenario,
   loadM8FixtureBundle,
+  m8RuntimeStaticSlotProjection,
   m8StaticSlotIdentity,
   m8StaticSlotProjection,
   m8StaticSlotSpecification,
   materializeM8Fixture,
+  semanticFixtureIdentity,
   parseM8FixtureBundle,
   runOneM8ArmForTests,
   writeM8Evidence,
   type M8AcceptanceFact,
   type M8AuthoritativeRun,
+  type M8CanonicalSourceBaseline,
+  type M8FreezeOptions,
   type M8Mode,
   type M8RunOptions,
   type M8Scenario,
+  type MaterializedM8Fixture,
 } from "../src/m8/pilot-harness.js";
 import { verifyM8PilotBlindly, type M8AuthoritativeWorkflowEvidence } from "../src/m8/pilot-verifier.js";
+import type { ReducerPolicy } from "../src/schemas/index.js";
+import type { BoundedExecutionAuthority } from "../src/workflow-controller.js";
 
 const fixturePath = join(process.cwd(), "fixtures", "m8", "scenarios.json");
 type ExpectedFileFact = Extract<M8AcceptanceFact, { readonly type: "expected_final_file" }>;
 const digest = (character: string): Sha256Digest => `sha256:${character.repeat(64)}`;
 async function bundle() { return loadM8FixtureBundle(fixturePath); }
 function scenario(all: Awaited<ReturnType<typeof bundle>>, id: string): M8Scenario { return all.scenarios.find((item) => item.scenario_id === id)!; }
+function alternateGitObjectId(value: string): string { return `${value[0] === "0" ? "1" : "0"}${value.slice(1)}`; }
+
+interface StaticPlanBaselineFixture {
+  readonly parent: string;
+  readonly invocation: Awaited<ReturnType<typeof createM8InvocationRoot>>;
+  readonly materialization: MaterializedM8Fixture;
+  readonly baseline: M8CanonicalSourceBaseline;
+  readonly options: M8FreezeOptions;
+}
+let staticPlanBaselineFixturePromise: Promise<StaticPlanBaselineFixture> | undefined;
+async function staticPlanBaselineFixture(): Promise<StaticPlanBaselineFixture> {
+  if (staticPlanBaselineFixturePromise !== undefined) return staticPlanBaselineFixturePromise;
+  staticPlanBaselineFixturePromise = (async () => {
+    const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-static-baseline-"));
+    let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined; let materialization: MaterializedM8Fixture | undefined;
+    try {
+      invocation = await createM8InvocationRoot(parent); materialization = await materializeM8Fixture(scenario(all, "M8-S01"), invocation);
+      const baseline = await deriveM8CanonicalSourceBaseline(materialization.root);
+      return Object.freeze({ parent, invocation, materialization, baseline, options: Object.freeze({ repository_root: materialization.root, canonical_source_baseline: baseline }) });
+    } catch (error: unknown) {
+      if (materialization !== undefined) await disposeMaterializedM8Fixture(materialization).catch(() => undefined);
+      if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
+      await rm(parent, { recursive: true, force: true }); throw error;
+    }
+  })();
+  return staticPlanBaselineFixturePromise;
+}
+after(async () => {
+  if (staticPlanBaselineFixturePromise === undefined) return;
+  let fixture: StaticPlanBaselineFixture;
+  try { fixture = await staticPlanBaselineFixturePromise; }
+  catch { return; }
+  await disposeMaterializedM8Fixture(fixture.materialization).catch(() => undefined);
+  await disposeM8Invocation(fixture.invocation).catch(() => undefined);
+  await rm(fixture.parent, { recursive: true, force: true });
+});
 
 async function applyFinal(root: string, value: M8Scenario): Promise<void> {
   for (const fact of value.acceptance_facts) if (fact.type === "expected_final_file") {
@@ -90,7 +133,7 @@ async function createActualRun(id = "M8-S01", mode: M8Mode = "DIRECT_LUNA_HIGH",
   const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-h01-h02-"));
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
-    freeze = await freezeM8Scenario(all, scenario(all, id), [mode]); invocation = await createM8InvocationRoot(parent);
+    freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); invocation = await createM8InvocationRoot(parent);
     const arm = freeze.arms[0]!; const approval = approvalFor(freeze);
     configureBoundedWorkerFauxRuntimeForTests(() => ({
       async execute(input) {
@@ -123,11 +166,11 @@ async function disposeActual(value: ActualRun): Promise<void> {
   await rm(value.parent, { recursive: true, force: true });
 }
 
-async function createSafetyActualRun(id: "M8-S09" | "M8-S10"): Promise<ActualRun> {
+async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DIRECT_LUNA_HIGH", options: M8RunOptions = {}): Promise<ActualRun> {
   const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-refusal-authority-"));
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
-    freeze = await freezeM8Scenario(all, scenario(all, id), ["DIRECT_LUNA_HIGH"]); invocation = await createM8InvocationRoot(parent);
+    freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); invocation = await createM8InvocationRoot(parent);
     const arm = freeze.arms[0]!; const approval = approvalFor(freeze);
     configureBoundedWorkerFauxRuntimeForTests(() => ({
       async execute(input) {
@@ -146,7 +189,7 @@ async function createSafetyActualRun(id: "M8-S09" | "M8-S10"): Promise<ActualRun
         return { completed: false, firstFailureCode: "TEST_REFUSAL_MISSING", firstFailureStage: "TEST", cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
       },
     }));
-    const handle = await runOneM8ArmForTests(invocation, freeze, arm, approval);
+    const handle = await runOneM8ArmForTests(invocation, freeze, arm, approval, options);
     configureBoundedWorkerFauxRuntimeForTests();
     const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-"));
     assert.equal(roots.length, 1); return { parent, root: join(parent, roots[0]!), invocation, freeze, arm, handle };
@@ -171,6 +214,29 @@ async function controllerRecords(value: ActualRun) {
 async function workspaceRoot(value: ActualRun): Promise<string> {
   const roots = await readdir(join(value.root, "workspaces")); assert.equal(roots.length, 1); return join(value.root, "workspaces", roots[0]!);
 }
+function one<T>(values: readonly T[], label: string): T { assert.equal(values.length, 1, label); return values[0]!; }
+/** Reconstructs the native authority already persisted by the faux run to test the public runtime projection. */
+async function runtimeProjection(value: ActualRun) {
+  const stateRoot = await controllerStateRoot(value); const runId = await controllerRunId(value); const records = await readM5ManagedRecords({ stateRoot, runId });
+  const baseline = one(records.baselines, "one baseline"); assert.equal(records.approvals.length, 0, "S01 clean baseline has no approval");
+  const reducerNames = (await readdir(join(stateRoot, "runs", runId, "records", "reducer-policies"))).filter((name) => name.endsWith(".json"));
+  const reducer = JSON.parse(await readFile(join(stateRoot, "runs", runId, "records", "reducer-policies", one(reducerNames, "one reducer policy")), "utf8")) as ReducerPolicy;
+  const semantic = semanticFixtureIdentity(value.arm.scenario); const initialGitTree = baseline.repository.head_tree;
+  const initialStatusIdentity = sha256Canonical({ protocol: "m8-initial-status-v1", porcelain_base64: "" });
+  const materialization: MaterializedM8Fixture = Object.freeze({
+    root: await workspaceRoot(value), workspace_identity: "runtime-projection-reconstruction", scenarioId: value.arm.scenario_id,
+    semanticFixtureIdentity: semantic, initialGitTree, initialStatusIdentity, dirtyOverlayIdentity: null,
+    initialStateIdentity: sha256Canonical({ protocol: "m8-initial-state-v1", semantic_fixture_identity: semantic, initial_git_tree: initialGitTree, initial_status_identity: initialStatusIdentity, dirty_overlay_identity: null }),
+  });
+  const authority: BoundedExecutionAuthority = Object.freeze({
+    run_id: runId, mode: value.arm.mode, repository: baseline.repository, baseline, baseline_approval: null,
+    baseline_authority_identity: baseline.content_sha256 as Sha256Digest, route_map: one(records.routeMaps, "one route map"),
+    route_map_approval: one(records.routeMapApprovals, "one route map approval"), budget: one(records.budgets, "one budget"),
+    contract: one(records.contracts, "one contract"), tasks: records.tasks, task_graph: null, plan: null, reducer_policy: reducer,
+    controller_limits: Object.freeze({ hard_m4_mutation_tool_limit: value.arm.scenario.controller_limits.hard_m4_mutation_tool_limit, max_replans: 0 }),
+  });
+  return m8RuntimeStaticSlotProjection({ arm: value.arm, materialization, controller_authority: authority });
+}
 
 async function publishedResult(value: ActualRun): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(join(value.root, "evidence", "results", `${value.arm.scenario_id}--${value.arm.mode}.json`), "utf8")) as Record<string, unknown>;
@@ -193,40 +259,83 @@ test("R3 fixture matrix is exact and unknown facts fail closed", async () => {
   assert.throws(() => parseM8FixtureBundle(raw), /M8_FIXTURE_INVALID/);
 });
 
-test("static slot projections bind canonical prospective facts and preserve the exact 27-slot order", async () => {
-  const parsed = await bundle(); const s01 = scenario(parsed, "M8-S01");
-  const first = m8StaticSlotProjection(parsed, s01, "DIRECT_LUNA_HIGH");
-  const same = m8StaticSlotProjection(parsed, s01, "DIRECT_LUNA_HIGH");
-  assert.equal(m8StaticSlotIdentity(first), m8StaticSlotIdentity(same), "same static facts have one deterministic identity");
-  assert.deepEqual(first.canonical_source_baseline, M8_CANONICAL_SOURCE_BASELINE);
-  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(m8StaticSlotProjection(parsed, s01, "SINGLE_OWNER_SOL")), "mode changes static identity");
+test("static slots bind the authoritative current baseline and preserve the exact 27-slot order", async () => {
+  const parsed = await bundle(); const s01 = scenario(parsed, "M8-S01"); const { baseline, options } = await staticPlanBaselineFixture();
+  const first = m8StaticSlotProjection(parsed, s01, "DIRECT_LUNA_HIGH", baseline);
+  const same = m8StaticSlotProjection(parsed, s01, "DIRECT_LUNA_HIGH", baseline);
+  assert.equal(m8StaticSlotIdentity(first), m8StaticSlotIdentity(same), "same static facts and canonical baseline have one deterministic identity");
+  assert.deepEqual(first.canonical_source_baseline, baseline, "B-01: the authoritative freeze baseline is bound exactly");
+  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(m8StaticSlotProjection(parsed, s01, "SINGLE_OWNER_SOL", baseline)), "mode changes static identity");
   const modelChanged = { ...first, logical_route: first.logical_route.map((route, index) => index === 0 ? { ...route, model_id: "gpt-5.6-other" } : route) };
   const budgetChanged = { ...first, static_budgets: { ...first.static_budgets, max_tool_calls: first.static_budgets.max_tool_calls + 1 } };
-  const baselineChanged = { ...first, canonical_source_baseline: { ...first.canonical_source_baseline, tree: "0000000000000000000000000000000000000000" } };
+  const commitChanged = { ...first, canonical_source_baseline: { ...baseline, commit: alternateGitObjectId(baseline.commit) } };
+  const treeChanged = { ...first, canonical_source_baseline: { ...baseline, tree: alternateGitObjectId(baseline.tree) } };
   assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(modelChanged), "route/model changes static identity");
   assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(budgetChanged), "budget changes static identity");
-  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(baselineChanged as typeof first), "canonical commit/tree baseline changes static identity");
-  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(m8StaticSlotProjection(parsed, scenario(parsed, "M8-S02"), "DIRECT_LUNA_HIGH")), "fixture changes static identity");
+  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(commitChanged), "B-02: canonical commit changes static identity");
+  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(treeChanged), "B-02: canonical tree changes static identity");
+  const uncoupled = { ...baseline, commit: "a".repeat(40), tree: "b".repeat(40) };
+  assert.deepEqual(m8StaticSlotProjection(parsed, s01, "DIRECT_LUNA_HIGH", uncoupled).canonical_source_baseline, uncoupled, "B-03: projection consumes its explicit baseline instead of a source commit constant");
+  assert.notEqual(m8StaticSlotIdentity(first), m8StaticSlotIdentity(m8StaticSlotProjection(parsed, scenario(parsed, "M8-S02"), "DIRECT_LUNA_HIGH", baseline)), "fixture changes static identity");
   assert.doesNotMatch(JSON.stringify(first), /workspace_identity|run_id|execution_authority_digest|reservation|postflight/);
 
-  const staticPlan = await freezeM8Bundle(parsed); const count = canonicalSlotCount(parsed);
+  const staticPlan = await freezeM8Bundle(parsed, options); const count = canonicalSlotCount(parsed);
   assert.deepEqual(count, { singleOwner: 10, routed: 10, direct: 7, total: 27 }); assert.equal(staticPlan.arms.length, 27);
+  assert.ok(staticPlan.arms.every((arm) => JSON.stringify(arm.static_slot.static_slot_projection.canonical_source_baseline) === JSON.stringify(baseline)), "all 27 slots bind the supplied current baseline");
   assert.deepEqual(staticPlan.arms.filter((arm) => arm.mode === "DIRECT_LUNA_HIGH").map((arm) => arm.scenario_id), ["M8-S01", "M8-S02", "M8-S04", "M8-S06", "M8-S08", "M8-S09", "M8-S10"]);
   assert.deepEqual(staticPlan.arms.map((arm) => arm.slot_execution_order), Array.from({ length: 27 }, (_, index) => index));
   assert.ok(staticPlan.arms.every((arm) => !("materialization" in arm) && !("execution_authority_digest" in arm)));
+  const single = (id: string) => staticPlan.arms.find((arm) => arm.scenario_id === id && arm.mode === "SINGLE_OWNER_SOL")!.static_slot.static_slot_projection;
+  assert.equal(single("M8-S01").single_owner_acceptance.requires_genuine_final_owner_decision, true);
+  assert.equal(single("M8-S09").expected_terminal_semantics.terminal, "BLOCKED");
+  assert.equal(single("M8-S09").single_owner_acceptance.requires_genuine_final_owner_decision, false);
+  assert.equal(single("M8-S10").expected_terminal_semantics.terminal, "BLOCKED");
+  assert.equal(single("M8-S10").single_owner_acceptance.requires_genuine_final_owner_decision, false);
 });
 
-test("runtime static mismatch blocks before worker reservation or faux provider entry", async () => {
+test("baseline validation rejects a stale supplied baseline before static-plan construction", async () => {
+  const parsed = await bundle(); const { baseline, options } = await staticPlanBaselineFixture();
+  await assert.rejects(() => freezeM8Bundle(parsed, { ...options, canonical_source_baseline: { ...baseline, commit: alternateGitObjectId(baseline.commit) } }), /M8_STATIC_PLAN_BASELINE_MISMATCH/);
+});
+
+test("a later clean repository baseline is derived without a harness source edit", async () => {
+  const parsed = await bundle(); const first = await staticPlanBaselineFixture(); const parent = await mkdtemp(join(tmpdir(), "m8-static-next-head-"));
+  let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined; let materialization: MaterializedM8Fixture | undefined;
+  try {
+    invocation = await createM8InvocationRoot(parent); materialization = await materializeM8Fixture(scenario(parsed, "M8-S02"), invocation);
+    const later = await deriveM8CanonicalSourceBaseline(materialization.root);
+    const initialPlan = await freezeM8Scenario(parsed, scenario(parsed, "M8-S01"), ["DIRECT_LUNA_HIGH"], first.options);
+    const laterPlan = await freezeM8Scenario(parsed, scenario(parsed, "M8-S01"), ["DIRECT_LUNA_HIGH"], { repository_root: materialization.root });
+    assert.notDeepEqual([later.commit, later.tree], [first.baseline.commit, first.baseline.tree]);
+    assert.deepEqual(laterPlan.arms[0]!.static_slot.static_slot_projection.canonical_source_baseline, later);
+    assert.notEqual(initialPlan.arms[0]!.static_slot.static_slot_spec_identity, laterPlan.arms[0]!.static_slot.static_slot_spec_identity, "a changed clean HEAD/tree rebinding needs no source edit");
+  } finally {
+    if (materialization !== undefined) await disposeMaterializedM8Fixture(materialization).catch(() => undefined);
+    if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("freeze and runtime projections use the same canonical baseline semantics", async () => {
+  const actual = await createActualRun();
+  try {
+    const runtime = await runtimeProjection(actual);
+    assert.deepEqual(runtime.canonical_source_baseline, actual.arm.static_slot.static_slot_projection.canonical_source_baseline);
+    assert.equal(m8StaticSlotIdentity(runtime), actual.arm.static_slot.static_slot_spec_identity, "B-04: identical native static facts and baseline produce the approved identity");
+  } finally { await disposeActual(actual); }
+});
+
+test("runtime canonical-baseline mismatch blocks before worker reservation or faux provider entry", async () => {
   const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-static-mismatch-"));
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
-    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"]); invocation = await createM8InvocationRoot(parent);
+    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"], (await staticPlanBaselineFixture()).options); invocation = await createM8InvocationRoot(parent);
     const arm = freeze.arms[0]!; const changed = m8StaticSlotSpecification({ ...arm.static_slot.static_slot_projection,
-      static_budgets: { ...arm.static_slot.static_slot_projection.static_budgets, max_tool_calls: arm.static_slot.static_slot_projection.static_budgets.max_tool_calls - 1 } });
+      canonical_source_baseline: { ...arm.static_slot.static_slot_projection.canonical_source_baseline, tree: alternateGitObjectId(arm.static_slot.static_slot_projection.canonical_source_baseline.tree) } });
     const approval = createM8ApprovalManifest(freeze, [changed]); let fauxProviderEntries = 0;
     configureBoundedWorkerFauxRuntimeForTests(() => ({ async execute() { fauxProviderEntries += 1; return { completed: false, cleanupCertain: true, modelTurns: 0, providerRequests: 0 }; } }));
     await runOneM8ArmForTests(invocation, freeze, arm, approval); configureBoundedWorkerFauxRuntimeForTests();
-    assert.equal(fauxProviderEntries, 0, "static mismatch returned null from native approveTasks before worker/provider admission");
+    assert.equal(fauxProviderEntries, 0, "B-05: baseline mismatch returned null from native approveTasks before worker/provider admission");
     const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(roots.length, 1);
     const stateRoot = join(parent, roots[0]!, "retained", (await readdir(join(parent, roots[0]!, "retained")))[0]!, "state");
     const runId = (await readdir(join(stateRoot, "runs")))[0]!; const [inspection, records] = await Promise.all([inspectRunStorage({ stateRoot, runId }), readM5ManagedRecords({ stateRoot, runId })]);
@@ -401,6 +510,21 @@ test("Single owner acceptance remains a genuine post-verification owner decision
       assert.equal(inspection.workflowState?.phase, "BLOCKED");
       assert.equal(records.workflowStates.some((state) => state.phase === "AWAITING_DECLARED_OWNER_ACCEPTANCE"), true);
       assert.equal(records.decisions.some((decision) => decision.outcome === "PASS"), false);
+    } finally { await disposeActual(actual); }
+  });
+});
+
+test("negative Single safety arms do not request a final owner acceptance", async (t) => {
+  for (const [id, failureCode] of [["M8-S09", "M4_TOOL_BUDGET_EXHAUSTED"], ["M8-S10", "OUT_OF_SCOPE_WRITE"]] as const) await t.test(id, async () => {
+    let calls = 0;
+    const actual = await createSafetyActualRun(id, "SINGLE_OWNER_SOL", { approveOwnerAcceptance: async () => { calls += 1; return true; } });
+    try {
+      const [inspection, records] = await Promise.all([inspectRunStorage({ stateRoot: await controllerStateRoot(actual), runId: await controllerRunId(actual) }), controllerRecords(actual)]);
+      assert.equal(calls, 0, "the authoritative safety block never solicits a final owner callback");
+      assert.equal(inspection.workflowState?.phase, "BLOCKED");
+      assert.equal(records.workflowStates.some((state) => state.phase === "AWAITING_DECLARED_OWNER_ACCEPTANCE"), false);
+      assert.equal(records.decisions.some((decision) => decision.outcome === "PASS"), false);
+      assert.equal(records.boundedWorkerResults.some((result) => result.first_failure_code === failureCode), true, "the safety refusal reached its native authoritative block");
     } finally { await disposeActual(actual); }
   });
 });

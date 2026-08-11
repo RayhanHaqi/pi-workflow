@@ -11,6 +11,8 @@ import { assertSha256Digest, sha256Canonical, type Sha256Digest } from "../ident
 import { inspectRunStorage } from "../persistence/index.js";
 import { resolveAuthoritativeBoundedExecution } from "../persistence/bounded-worker-authority.js";
 import { readM5ManagedRecords } from "../persistence/store.js";
+import { captureGitState } from "../repository/fingerprint.js";
+import { resolveRepositoryIdentity } from "../repository/index.js";
 import {
   assertDocumentValid,
   type BoundedWorkerInvocationDocument,
@@ -51,13 +53,9 @@ const M8_FIXTURE_APPROVED_AT = "2000-01-01T00:00:00.000Z";
 const TOTAL_M4_TOOL_LIMIT = 32;
 const MAX_WALL_TIME_MS = 120_000;
 
-/** Frozen source documents that owner static approval binds, never a workspace or run record. */
-export const M8_CANONICAL_SOURCE_BASELINE = Object.freeze({
-  commit: "4c265cf4541d2498fe48b90ccb173c4080148585",
-  tree: "ab1aac813da8d06fa85e3d9f5cee357d3dcecee3",
-  architecture_identity: "b20e4a5a349f2bc0389bd2f70369481ebffd7c635922bb064b8c83b3af7dc3ea" as Sha256Digest,
-  v0_identity: "3ee98de02c95aeea99345fd02389b2ab0b43a749c98aea380d194c6ab232ada6" as Sha256Digest,
-});
+/** Immutable architecture/version identities; commit/tree are derived at static-plan freeze time. */
+const M8_ARCHITECTURE_IDENTITY = "b20e4a5a349f2bc0389bd2f70369481ebffd7c635922bb064b8c83b3af7dc3ea" as Sha256Digest;
+const M8_V0_IDENTITY = "3ee98de02c95aeea99345fd02389b2ab0b43a749c98aea380d194c6ab232ada6" as Sha256Digest;
 const MODES = ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const;
 const SCENARIO_IDS = ["M8-S01", "M8-S02", "M8-S03", "M8-S04", "M8-S05", "M8-S06", "M8-S07", "M8-S08", "M8-S09", "M8-S10"] as const;
 const DIRECT_IDS = new Set(["M8-S01", "M8-S02", "M8-S04", "M8-S06", "M8-S08", "M8-S09", "M8-S10"]);
@@ -65,6 +63,20 @@ const SCENARIO_CLASSES = new Map<string, string>([["M8-S01", "mechanical edit"],
 
 export type M8Mode = typeof MODES[number];
 export type M8Terminal = "PASS" | "BLOCKED";
+
+/** Freeze-time canonical repository facts bound into every static slot. */
+export interface M8CanonicalSourceBaseline {
+  readonly commit: string;
+  readonly tree: string;
+  readonly architecture_identity: Sha256Digest;
+  readonly v0_identity: Sha256Digest;
+}
+
+/** Optional explicit baseline must exactly match the clean repository being frozen. */
+export interface M8FreezeOptions {
+  readonly repository_root?: string;
+  readonly canonical_source_baseline?: M8CanonicalSourceBaseline;
+}
 
 export interface M8FileManifest {
   readonly path: string;
@@ -152,7 +164,7 @@ export interface M8StaticLogicalRoute {
 /** Harness-native owner-controlled facts only; it deliberately excludes all run identities and digests. */
 export interface M8StaticSlotProjection {
   readonly protocol: typeof STATIC_SLOT_PROTOCOL;
-  readonly canonical_source_baseline: typeof M8_CANONICAL_SOURCE_BASELINE;
+  readonly canonical_source_baseline: M8CanonicalSourceBaseline;
   readonly fixture_bundle_identity: Sha256Digest;
   readonly fixture_identity: Sha256Digest;
   readonly scenario: Readonly<{ readonly scenario_id: string; readonly scenario_class: string }>;
@@ -344,7 +356,66 @@ const authoritativeRunRecords = new Map<M8AuthoritativeRun, AuthoritativeRunReco
 
 function invalid(detail: string): never { throw new Error(`M8_FIXTURE_INVALID: ${detail}`); }
 function binding(detail: string): never { throw new Error(`M8_APPROVAL_BINDING_MISMATCH: ${detail}`); }
+function staticPlanBaselineMismatch(detail: string): never { throw new Error(`M8_STATIC_PLAN_BASELINE_MISMATCH: ${detail}`); }
 function authorityInvalid(detail: string): never { throw new Error(`M8_EXECUTION_AUTHORITY_INVALID: ${detail}`); }
+function gitObjectIdentity(value: unknown, label: string, reject: (detail: string) => never): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value)) reject(`${label} is not a Git object identity`);
+  return value;
+}
+function canonicalSourceBaseline(value: unknown, reject: (detail: string) => never): M8CanonicalSourceBaseline {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) reject("canonical source baseline is not an object");
+  const record = value as Record<string, unknown>; const actual = Object.keys(record).sort(); const expected = ["architecture_identity", "commit", "tree", "v0_identity"];
+  if (actual.length !== expected.length || actual.some((entry, index) => entry !== expected[index])) reject("canonical source baseline has unknown or missing fields");
+  const commit = gitObjectIdentity(record["commit"], "canonical source commit", reject);
+  const tree = gitObjectIdentity(record["tree"], "canonical source tree", reject);
+  if (record["architecture_identity"] !== M8_ARCHITECTURE_IDENTITY || record["v0_identity"] !== M8_V0_IDENTITY) reject("canonical source Architecture or V0 identity differs");
+  return Object.freeze({ commit, tree, architecture_identity: M8_ARCHITECTURE_IDENTITY, v0_identity: M8_V0_IDENTITY });
+}
+function staticProjectionBaseline(value: unknown): M8CanonicalSourceBaseline { return canonicalSourceBaseline(value, binding); }
+function freezeOptions(value: M8FreezeOptions | undefined): M8FreezeOptions {
+  if (value === undefined) return Object.freeze({});
+  if (value === null || typeof value !== "object" || Array.isArray(value)) staticPlanBaselineMismatch("freeze options are not an object");
+  const record = value as Record<string, unknown>; const actual = Object.keys(record).sort(); const expected = ["canonical_source_baseline", "repository_root"];
+  if ((actual.length !== expected.length && !(actual.length === 0 || actual.length === 1)) || actual.some((entry) => !expected.includes(entry))) staticPlanBaselineMismatch("freeze options have unknown fields");
+  const root = record["repository_root"];
+  if (root !== undefined && (typeof root !== "string" || root.length === 0 || root.includes("\0") || !isAbsolute(root) || resolve(root) !== root)) staticPlanBaselineMismatch("freeze repository root is not an absolute normalized path");
+  const supplied = record["canonical_source_baseline"];
+  const baseline = supplied === undefined ? undefined : canonicalSourceBaseline(supplied, staticPlanBaselineMismatch);
+  return Object.freeze({ ...(root === undefined ? {} : { repository_root: root }), ...(baseline === undefined ? {} : { canonical_source_baseline: baseline }) });
+}
+function canonicalRepositoryIsClean(state: Awaited<ReturnType<typeof captureGitState>>): boolean {
+  // A clean stable capture has no staged/conflict entries, so the real index is
+  // exactly HEAD's tree; captureGitState snapshots both status and index twice.
+  return !state.dirty && state.staged.length === 0 && state.unstaged.length === 0 && state.untracked.length === 0 &&
+    state.conflicts.length === 0 && state.active_operations.length === 0 && !state.index_lock;
+}
+/** Derives the live clean repository baseline; no source commit/tree is retained in the harness. */
+export async function deriveM8CanonicalSourceBaseline(repositoryRoot = process.cwd()): Promise<M8CanonicalSourceBaseline> {
+  if (typeof repositoryRoot !== "string" || repositoryRoot.length === 0 || repositoryRoot.includes("\0") || !isAbsolute(repositoryRoot) || resolve(repositoryRoot) !== repositoryRoot) {
+    staticPlanBaselineMismatch("canonical repository root is not an absolute normalized path");
+  }
+  const initial = await resolveRepositoryIdentity({ requestedPath: repositoryRoot, requireHead: true });
+  const initialState = await captureGitState(initial);
+  if (!canonicalRepositoryIsClean(initialState) || initialState.head !== initial.head || initialState.head_tree !== initial.head_tree) {
+    staticPlanBaselineMismatch("canonical repository is not clean at baseline capture");
+  }
+  const current = await resolveRepositoryIdentity({ requestedPath: repositoryRoot, requireHead: true });
+  if (current.worktree_root !== initial.worktree_root || current.head !== initial.head || current.head_tree !== initial.head_tree) {
+    staticPlanBaselineMismatch("canonical repository HEAD or tree changed during baseline capture");
+  }
+  const currentState = await captureGitState(current);
+  if (!canonicalRepositoryIsClean(currentState) || currentState.head !== current.head || currentState.head_tree !== current.head_tree) {
+    staticPlanBaselineMismatch("canonical repository is not clean at baseline validation");
+  }
+  return Object.freeze({ commit: current.head, tree: current.head_tree, architecture_identity: M8_ARCHITECTURE_IDENTITY, v0_identity: M8_V0_IDENTITY });
+}
+async function freezeCanonicalSourceBaseline(options: M8FreezeOptions | undefined): Promise<M8CanonicalSourceBaseline> {
+  const input = freezeOptions(options); const derived = await deriveM8CanonicalSourceBaseline(input.repository_root ?? process.cwd());
+  if (input.canonical_source_baseline === undefined) return derived;
+  const supplied = canonicalSourceBaseline(input.canonical_source_baseline, staticPlanBaselineMismatch);
+  if (canonicalize(supplied) !== canonicalize(derived)) staticPlanBaselineMismatch("supplied canonical source baseline differs from current HEAD/tree or immutable identities");
+  return derived;
+}
 function exact(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) invalid(`${label} must be an object`);
   const record = value as Record<string, unknown>; const actual = Object.keys(record).sort(); const expected = [...keys].sort();
@@ -838,11 +909,15 @@ function staticS10Semantics(scenarioValue: M8Scenario): M8StaticSlotProjection["
   const fact = scenarioValue.acceptance_facts.find((entry): entry is Extract<M8AcceptanceFact, { readonly type: "required_scope_refusal" }> => entry.type === "required_scope_refusal");
   return fact === undefined ? null : Object.freeze({ required_objective_unsatisfied: fact.required_objective_unsatisfied, scope_refusal_observed: fact.scope_refusal_observed });
 }
-function staticSlotProjectionFor(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode, order: number): M8StaticSlotProjection {
+/** A final owner decision belongs only to a Single slot whose successful terminal is PASS. */
+function requiresGenuineFinalOwnerDecision(scenarioValue: M8Scenario, mode: M8Mode): boolean {
+  return mode === "SINGLE_OWNER_SOL" && scenarioValue.expected_terminal_policy === "PASS";
+}
+function staticSlotProjectionFor(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode, order: number, canonicalSourceBaseline: M8CanonicalSourceBaseline): M8StaticSlotProjection {
   const command = fixtureCommand(scenarioValue);
   const projection: M8StaticSlotProjection = Object.freeze({
     protocol: STATIC_SLOT_PROTOCOL,
-    canonical_source_baseline: M8_CANONICAL_SOURCE_BASELINE,
+    canonical_source_baseline: canonicalSourceBaseline,
     fixture_bundle_identity: fixtureBundleIdentity(bundle),
     fixture_identity: semanticFixtureIdentity(scenarioValue),
     scenario: Object.freeze({ scenario_id: scenarioValue.scenario_id, scenario_class: scenarioValue.scenario_class }),
@@ -861,7 +936,7 @@ function staticSlotProjectionFor(bundle: M8FixtureBundle, scenarioValue: M8Scena
       workflow_correctness: scenarioValue.expected_behavior.workflow_correctness, pilot_validity: scenarioValue.expected_behavior.pilot_validity }),
     s09_mutation_limit_semantics: staticS09Semantics(scenarioValue),
     s10_scope_refusal_semantics: staticS10Semantics(scenarioValue),
-    single_owner_acceptance: Object.freeze({ requires_genuine_final_owner_decision: mode === "SINGLE_OWNER_SOL", static_plan_is_not_final_owner_acceptance: true }),
+    single_owner_acceptance: Object.freeze({ requires_genuine_final_owner_decision: requiresGenuineFinalOwnerDecision(scenarioValue, mode), static_plan_is_not_final_owner_acceptance: true }),
     slot_execution_order: order,
   });
   assertStaticSlotProjection(projection);
@@ -869,19 +944,21 @@ function staticSlotProjectionFor(bundle: M8FixtureBundle, scenarioValue: M8Scena
 }
 
 /** Deterministic prospective projection for one slot; it contains no workspace path or native run record. */
-export function m8StaticSlotProjection(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode): M8StaticSlotProjection {
+export function m8StaticSlotProjection(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode, canonicalSourceBaseline: M8CanonicalSourceBaseline): M8StaticSlotProjection {
   const bundle = canonicalBundle(bundleValue); const selected = scenarioFromBundle(bundle, scenarioValue);
   if (!MODES.includes(mode) || (mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(selected))) throw new Error("M8_STATIC_SLOT_MODE_INVALID");
-  return staticSlotProjectionFor(bundle, selected, mode, slotExecutionOrder(bundle, selected, mode));
+  return staticSlotProjectionFor(bundle, selected, mode, slotExecutionOrder(bundle, selected, mode), staticProjectionBaseline(canonicalSourceBaseline));
 }
 export function m8StaticSlotIdentity(projection: M8StaticSlotProjection): Sha256Digest { return sha256Canonical(projection); }
 function assertStaticSlotProjection(projection: M8StaticSlotProjection): void {
   if (projection === null || typeof projection !== "object" || Array.isArray(projection) || projection.protocol !== STATIC_SLOT_PROTOCOL) binding("static slot projection is invalid");
-  if (projection.canonical_source_baseline.commit !== M8_CANONICAL_SOURCE_BASELINE.commit || projection.canonical_source_baseline.tree !== M8_CANONICAL_SOURCE_BASELINE.tree ||
-      projection.canonical_source_baseline.architecture_identity !== M8_CANONICAL_SOURCE_BASELINE.architecture_identity || projection.canonical_source_baseline.v0_identity !== M8_CANONICAL_SOURCE_BASELINE.v0_identity) binding("static slot canonical source baseline differs");
+  staticProjectionBaseline(projection.canonical_source_baseline);
   digest(projection.fixture_bundle_identity, "static slot fixture bundle identity"); digest(projection.fixture_identity, "static slot fixture identity");
+  const requiresOwnerDecision = projection.mode === "SINGLE_OWNER_SOL" && projection.expected_terminal_semantics.terminal === "PASS";
   if (!MODES.includes(projection.mode) || !Number.isSafeInteger(projection.slot_execution_order) || projection.slot_execution_order < 0 || projection.slot_execution_order >= 27 ||
       projection.static_budgets.max_replans !== 0 || projection.static_budgets.hard_m4_mutation_tool_limit !== null && projection.static_budgets.hard_m4_mutation_tool_limit !== 1 ||
+      (projection.expected_terminal_semantics.terminal !== "PASS" && projection.expected_terminal_semantics.terminal !== "BLOCKED") ||
+      projection.single_owner_acceptance.requires_genuine_final_owner_decision !== requiresOwnerDecision ||
       projection.single_owner_acceptance.static_plan_is_not_final_owner_acceptance !== true) binding("static slot projection fields are invalid");
   const encoded = canonicalize(projection);
   for (const field of ["workspace_identity", "initial_state_identity", "m3_state_token", "run_id", "contract_content_sha256", "task_content_sha256", "task_graph_content_sha256", "plan_content_sha256", "execution_authority_digest", "reservation", "bounded_invocation", "bounded_worker_invocation", "m4_evidence", "terminal_evidence_identity", "terminal_workflow_result", "postflight_identity", "final_postflight_identity"]) {
@@ -919,6 +996,7 @@ export function m8RuntimeStaticSlotProjection(input: {
   readonly controller_authority: BoundedExecutionAuthority;
 }): M8StaticSlotProjection {
   const { arm, materialization, controller_authority: authority } = input;
+  assertStaticSlotSpecification(arm.static_slot); const canonicalSourceBaseline = staticProjectionBaseline(arm.static_slot.static_slot_projection.canonical_source_baseline);
   assertMaterialization(arm.scenario, materialization); assertControllerAuthority(authority);
   if (authority.mode !== arm.mode) binding("native controller mode differs from static slot");
   const commands = authority.contract.verification_commands.map((command) => {
@@ -928,7 +1006,7 @@ export function m8RuntimeStaticSlotProjection(input: {
   });
   const runtime: M8StaticSlotProjection = Object.freeze({
     protocol: STATIC_SLOT_PROTOCOL,
-    canonical_source_baseline: M8_CANONICAL_SOURCE_BASELINE,
+    canonical_source_baseline: canonicalSourceBaseline,
     fixture_bundle_identity: arm.fixture_bundle_identity,
     fixture_identity: materialization.semanticFixtureIdentity,
     scenario: Object.freeze({ scenario_id: materialization.scenarioId, scenario_class: arm.scenario.scenario_class }),
@@ -951,7 +1029,7 @@ export function m8RuntimeStaticSlotProjection(input: {
       workflow_correctness: arm.scenario.expected_behavior.workflow_correctness, pilot_validity: arm.scenario.expected_behavior.pilot_validity }),
     s09_mutation_limit_semantics: staticS09Semantics(arm.scenario),
     s10_scope_refusal_semantics: staticS10Semantics(arm.scenario),
-    single_owner_acceptance: Object.freeze({ requires_genuine_final_owner_decision: authority.contract.owner_acceptance_criteria.length === 1 && authority.contract.owner_acceptance_criteria[0]?.owner_acceptance === true,
+    single_owner_acceptance: Object.freeze({ requires_genuine_final_owner_decision: requiresGenuineFinalOwnerDecision(arm.scenario, authority.mode),
       static_plan_is_not_final_owner_acceptance: true }),
     slot_execution_order: arm.slot_execution_order,
   });
@@ -959,8 +1037,8 @@ export function m8RuntimeStaticSlotProjection(input: {
   return runtime;
 }
 
-function freezeArm(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode): FrozenM8Arm {
-  const projection = m8StaticSlotProjection(bundle, scenarioValue, mode);
+function freezeArm(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode, canonicalSourceBaseline: M8CanonicalSourceBaseline): FrozenM8Arm {
+  const projection = m8StaticSlotProjection(bundle, scenarioValue, mode, canonicalSourceBaseline);
   return Object.freeze({ fixture_bundle_identity: fixtureBundleIdentity(bundle), matrix_identity: m8MatrixIdentity(bundle), scenario: scenarioValue,
     scenario_id: scenarioValue.scenario_id, mode, slot_execution_order: projection.slot_execution_order, static_slot: m8StaticSlotSpecification(projection) });
 }
@@ -972,15 +1050,16 @@ function assertModeSet(scenarioValue: M8Scenario, modes: readonly M8Mode[]): voi
   if (modes.some((mode) => mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(scenarioValue))) throw new Error("M8_DIRECT_INELIGIBLE");
 }
 /** Static-plan construction does not materialize a fixture or construct native execution authority. */
-export async function freezeM8Scenario(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, modes: readonly M8Mode[] = MODES): Promise<M8FreezeResult> {
+export async function freezeM8Scenario(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, modes: readonly M8Mode[] = MODES, options: M8FreezeOptions = {}): Promise<M8FreezeResult> {
+  const canonicalSourceBaseline = await freezeCanonicalSourceBaseline(options);
   const bundle = canonicalBundle(bundleValue); const selected = scenarioFromBundle(bundle, scenarioValue); assertModeSet(selected, modes);
-  const arms = modes.map((mode) => freezeArm(bundle, selected, mode)).sort((left, right) => left.slot_execution_order - right.slot_execution_order);
+  const arms = modes.map((mode) => freezeArm(bundle, selected, mode, canonicalSourceBaseline)).sort((left, right) => left.slot_execution_order - right.slot_execution_order);
   return freezeResult(bundle, arms);
 }
 /** The complete static matrix is deterministic: one planned owner decision per canonical slot, no future run records. */
-export async function freezeM8Bundle(bundleValue: M8FixtureBundle): Promise<M8FreezeResult> {
-  const bundle = canonicalBundle(bundleValue);
-  return freezeResult(bundle, canonicalSlotDescriptors(bundle).map((slot) => freezeArm(bundle, slot.scenario, slot.mode)));
+export async function freezeM8Bundle(bundleValue: M8FixtureBundle, options: M8FreezeOptions = {}): Promise<M8FreezeResult> {
+  const canonicalSourceBaseline = await freezeCanonicalSourceBaseline(options); const bundle = canonicalBundle(bundleValue);
+  return freezeResult(bundle, canonicalSlotDescriptors(bundle).map((slot) => freezeArm(bundle, slot.scenario, slot.mode, canonicalSourceBaseline)));
 }
 /** Static plans own no workspace. It only retires actual materializations created later for this exact plan. */
 export async function disposeM8Freeze(value: M8FreezeResult): Promise<void> {
@@ -992,12 +1071,12 @@ export async function disposeM8Freeze(value: M8FreezeResult): Promise<void> {
   }
 }
 
-function assertFrozenArm(arm: FrozenM8Arm, bundle: M8FixtureBundle, fixtureIdentity: Sha256Digest, matrixIdentity: Sha256Digest): void {
+function assertFrozenArm(arm: FrozenM8Arm, bundle: M8FixtureBundle, fixtureIdentity: Sha256Digest, matrixIdentity: Sha256Digest, canonicalSourceBaseline: M8CanonicalSourceBaseline): void {
   try {
     const canonicalScenario = scenarioFromBundle(bundle, arm.scenario);
     if (arm.scenario_id !== canonicalScenario.scenario_id || !MODES.includes(arm.mode) || (arm.mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(canonicalScenario))) binding("scenario or mode is not an eligible canonical arm");
     if (arm.fixture_bundle_identity !== fixtureIdentity || arm.matrix_identity !== matrixIdentity) binding("fixture bundle or matrix identity differs");
-    const expected = m8StaticSlotSpecification(m8StaticSlotProjection(bundle, canonicalScenario, arm.mode));
+    const expected = m8StaticSlotSpecification(m8StaticSlotProjection(bundle, canonicalScenario, arm.mode, canonicalSourceBaseline));
     if (arm.slot_execution_order !== expected.static_slot_projection.slot_execution_order || canonicalize(arm.static_slot) !== canonicalize(expected)) binding("static arm differs from canonical slot specification");
   } catch (error: unknown) {
     if (error instanceof Error && error.message.startsWith("M8_APPROVAL_BINDING_MISMATCH:")) throw error;
@@ -1009,9 +1088,12 @@ function assertFreeze(value: M8FreezeResult): void {
     if (value.protocol !== FREEZE_PROTOCOL || !Array.isArray(value.arms)) binding("freeze protocol or arms are invalid");
     const bundle = canonicalBundle(value.bundle); const fixtureIdentity = fixtureBundleIdentity(bundle); const matrixIdentity = m8MatrixIdentity(bundle);
     if (value.fixture_bundle_identity !== fixtureIdentity || value.matrix_identity !== matrixIdentity) binding("freeze fixture bundle or matrix identity is invalid");
-    let priorOrder = -1; const slots = new Set<string>();
+    let priorOrder = -1; let canonicalSourceBaseline: M8CanonicalSourceBaseline | undefined; const slots = new Set<string>();
     for (const arm of value.arms) {
-      assertFrozenArm(arm, bundle, fixtureIdentity, matrixIdentity);
+      const armBaseline = staticProjectionBaseline(arm.static_slot.static_slot_projection.canonical_source_baseline);
+      if (canonicalSourceBaseline === undefined) canonicalSourceBaseline = armBaseline;
+      else if (canonicalize(canonicalSourceBaseline) !== canonicalize(armBaseline)) binding("freeze contains multiple canonical source baselines");
+      assertFrozenArm(arm, bundle, fixtureIdentity, matrixIdentity, canonicalSourceBaseline);
       const slot = `${arm.scenario_id}--${arm.mode}`;
       if (slots.has(slot) || arm.slot_execution_order <= priorOrder) binding("freeze contains duplicate or unordered static slots");
       slots.add(slot); priorOrder = arm.slot_execution_order;
