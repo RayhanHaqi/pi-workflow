@@ -124,17 +124,58 @@ test("R1-T02/R1-T04 CANCELLED atomically wins over internal PASS before outward 
   } finally { await dispose(value); }
 });
 
-test("R1-T03 COMPLETED wins only after settlement and later force-stop is ALREADY_TERMINAL", async () => {
+test("D-01/R1-T03 COMPLETE remains a recognized successful lifecycle result", async () => {
   const value = await startFixture("COMPLETE", false);
   try {
     const result = await value.pending;
     assert.equal(result.outcome, "PASS", result.reason);
+    assert.equal(result.lifecycleDiagnostic, undefined, "a recognized RESULT must retain existing successful lifecycle semantics");
     assert.equal(result.evidenceRoot, dirname(value.capability), "the external parent preserves its caller-retained evidence root");
     const forced = await forceStopBoundedMutationWorkflow(value.capability, 0);
     assert.equal(forced.disposition, "ALREADY_TERMINAL", forced.detail);
     const claim = JSON.parse(await readFile(join(dirname(value.capability), "completion.claim.json"), "utf8")) as Record<string, unknown>;
     assert.equal(claim["winner"], "COMPLETED");
   } finally { await dispose(value); }
+});
+
+test("D-02/D-05 early provider-free exit retains process evidence and admits no productive authority", async () => {
+  const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-r1-retained-")); let baselineApprovals = 0; let taskApprovals = 0;
+  try {
+    const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+      cwd: root, authority: authority(), retainedArtifactRoot: retained,
+      approveBaseline: async () => { baselineApprovals += 1; return null; },
+      approveTasks: async () => { taskApprovals += 1; return null; },
+    }, "EARLY_EXIT");
+    assert.equal(result.outcome, "BLOCKED"); assert.notEqual(result.outcome, "PASS"); assert.equal(result.finalState, null);
+    assert.match(result.reason, /^BLOCKED_PROCESS_CRASH_RECONCILIATION_UNCERTAIN:/, "early child death remains fail-closed");
+    assert.equal(baselineApprovals, 0); assert.equal(taskApprovals, 0, "child death precedes M5 reservation and provider admission");
+    const evidenceRoot = result.evidenceRoot; assert.ok(evidenceRoot !== undefined);
+    await assert.rejects(lstat(join(evidenceRoot, "state", "runs")), { code: "ENOENT" }, "no M2/M5 run exists before the fixture exits");
+    const diagnostic = result.lifecycleDiagnostic; assert.ok(diagnostic !== undefined);
+    assert.ok(diagnostic.childPid !== null && diagnostic.childPid > 1); assert.equal(diagnostic.childExecPath, process.execPath); assert.equal(diagnostic.childCwd, root);
+    assert.equal(diagnostic.spawnObserved, true); assert.equal(diagnostic.spawnError, null); assert.equal(diagnostic.processError, null);
+    assert.equal(diagnostic.startSendAttempted, true); assert.equal(diagnostic.startSendCallback, "SUCCEEDED"); assert.equal(diagnostic.startSendError, null);
+    assert.equal(diagnostic.ipcMessageReceived, false); assert.equal(diagnostic.firstIpcMessageKind, null); assert.equal(diagnostic.recognizedResultReceived, false); assert.equal(diagnostic.malformedResultReceived, false); assert.equal(diagnostic.ipcDisconnected, true);
+    assert.equal(diagnostic.exitObserved, true); assert.equal(diagnostic.exitCode, 23); assert.equal(diagnostic.exitSignal, null);
+    assert.equal(diagnostic.closeObserved, true); assert.equal(diagnostic.closeCode, 23); assert.equal(diagnostic.closeSignal, null);
+    assert.equal(diagnostic.childExitPhase, "AFTER_START_ACKNOWLEDGEMENT"); assert.match(diagnostic.stderrTail ?? "", /fixture early exit/); assert.equal(diagnostic.stderrTailTruncated, false);
+  } finally { await dispose({ root, retained }); }
+});
+
+test("D-04 malformed RESULT remains distinct from no RESULT", async () => {
+  const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-r1-retained-"));
+  try {
+    const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+      cwd: root, authority: authority(), retainedArtifactRoot: retained,
+      approveTasks: async ({ contract }) => contract.content_sha256 as `sha256:${string}`,
+    }, "MALFORMED_RESULT");
+    assert.equal(result.outcome, "BLOCKED"); assert.match(result.reason, /BLOCKED_CHILD_RESULT_INVALID/);
+    const diagnostic = result.lifecycleDiagnostic; assert.ok(diagnostic !== undefined);
+    assert.equal(diagnostic.recognizedResultReceived, false); assert.equal(diagnostic.malformedResultReceived, true);
+    assert.equal(diagnostic.ipcMessageReceived, true); assert.equal(diagnostic.firstIpcMessageKind, "RESULT");
+    assert.equal(diagnostic.exitCode, 24); assert.equal(diagnostic.exitSignal, null); assert.equal(diagnostic.closeCode, 24); assert.equal(diagnostic.closeSignal, null);
+    assert.equal(diagnostic.childExitPhase, "AFTER_IPC_MESSAGE");
+  } finally { await dispose({ root, retained }); }
 });
 
 test("R1-T05/R1-T06/R1-T07 invocation session containment leaves unrelated sessions untouched", async () => {

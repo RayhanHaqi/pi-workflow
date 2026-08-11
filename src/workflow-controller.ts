@@ -153,12 +153,46 @@ export interface BoundedMutationOptions {
   readonly onControlCapability?: (capability: ForceStopCapabilityPresentation) => Promise<void> | void;
 }
 
+export interface ExternalLifecycleErrorEvidence {
+  readonly errorClass: string;
+  readonly message: string;
+}
+
+/** Parent-observed, bounded diagnostics for a child that never supplied a recognized RESULT. */
+export interface ExternalLifecycleDiagnosticEvidence {
+  readonly childPid: number | null;
+  readonly childExecPath: string;
+  readonly childCwd: string;
+  readonly spawnObserved: boolean;
+  readonly spawnError: ExternalLifecycleErrorEvidence | null;
+  readonly processError: ExternalLifecycleErrorEvidence | null;
+  readonly startSendAttempted: boolean;
+  readonly startSendCallback: "NOT_ATTEMPTED" | "PENDING" | "SUCCEEDED" | "FAILED";
+  readonly startSendError: ExternalLifecycleErrorEvidence | null;
+  readonly ipcMessageReceived: boolean;
+  readonly firstIpcMessageKind: "RESULT" | "FIXTURE_STAGE" | "CALLBACK" | "UNKNOWN" | null;
+  readonly recognizedResultReceived: boolean;
+  readonly malformedResultReceived: boolean;
+  readonly ipcDisconnected: boolean;
+  readonly exitObserved: boolean;
+  readonly exitCode: number | null;
+  readonly exitSignal: NodeJS.Signals | null;
+  readonly closeObserved: boolean;
+  readonly closeCode: number | null;
+  readonly closeSignal: NodeJS.Signals | null;
+  readonly childExitPhase: "NOT_OBSERVED" | "BEFORE_START_ACKNOWLEDGEMENT" | "AFTER_START_ACKNOWLEDGEMENT" | "AFTER_IPC_MESSAGE";
+  readonly stderrTail: string | null;
+  readonly stderrTailTruncated: boolean;
+}
+
 export interface BoundedMutationRunResult {
   readonly outcome: "PASS" | "BLOCKED";
   readonly reason: string;
   readonly finalState: WorkflowState | null;
   readonly evidenceRoot?: string;
   readonly hygieneWarning?: string;
+  /** Never grants completion authority; absent after a recognized child RESULT. */
+  readonly lifecycleDiagnostic?: ExternalLifecycleDiagnosticEvidence;
 }
 
 const FORCE_STOP_PROTOCOL = "pi-workflow-invocation-control-v1";
@@ -166,6 +200,8 @@ const FORCE_STOP_VERSION = 1;
 const FORCE_STOP_GRACE_MS = 1_000;
 const FORCE_STOP_EXIT_WAIT_MS = 2_000;
 const FORCE_STOP_REQUEST_TIMEOUT_MS = 15_000;
+const EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES = 4_096;
+const EXTERNAL_LIFECYCLE_ERROR_TEXT_BYTES = 1_024;
 
 interface ActiveControlCapability {
   readonly path: string;
@@ -1195,7 +1231,7 @@ interface InvocationWorkspace {
 }
 
 type ProductiveChildKind = "WORKFLOW" | "FIXTURE";
-export type ExternalLifecycleFixtureMode = "HANG" | "WRITE_AND_HANG" | "INTERNAL_PASS_WAIT" | "COMPLETE";
+export type ExternalLifecycleFixtureMode = "HANG" | "WRITE_AND_HANG" | "INTERNAL_PASS_WAIT" | "COMPLETE" | "EARLY_EXIT" | "MALFORMED_RESULT";
 
 interface ProductiveStartMessage {
   readonly type: "START";
@@ -1205,6 +1241,131 @@ interface ProductiveStartMessage {
   readonly cwd: string;
   readonly authority: BoundedMutationAuthority;
   readonly invocationRoot: string;
+}
+
+function boundedDiagnosticText(value: string, maximumBytes: number): string {
+  let result = ""; let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maximumBytes) break;
+    result += character; bytes += size;
+  }
+  return result;
+}
+
+function lifecycleErrorEvidence(error: unknown): ExternalLifecycleErrorEvidence {
+  const source = error instanceof Error ? error : new Error("external lifecycle error");
+  return {
+    errorClass: boundedDiagnosticText(source.name.length === 0 ? "Error" : source.name, 128),
+    message: boundedDiagnosticText(source.message.length === 0 ? "external lifecycle error" : source.message, EXTERNAL_LIFECYCLE_ERROR_TEXT_BYTES),
+  };
+}
+
+class ExternalLifecycleDiagnostics {
+  private childPid: number | null = null;
+  private spawnObserved = false;
+  private spawnError: ExternalLifecycleErrorEvidence | null = null;
+  private processError: ExternalLifecycleErrorEvidence | null = null;
+  private startSendAttempted = false;
+  private startSendCallback: ExternalLifecycleDiagnosticEvidence["startSendCallback"] = "NOT_ATTEMPTED";
+  private startSendError: ExternalLifecycleErrorEvidence | null = null;
+  private ipcMessageReceived = false;
+  private firstIpcMessageKind: ExternalLifecycleDiagnosticEvidence["firstIpcMessageKind"] = null;
+  private recognizedResultReceived = false;
+  private malformedResultReceived = false;
+  private ipcDisconnected = false;
+  private exitObserved = false;
+  private exitCode: number | null = null;
+  private exitSignal: NodeJS.Signals | null = null;
+  private closeObserved = false;
+  private closeCode: number | null = null;
+  private closeSignal: NodeJS.Signals | null = null;
+  private stderrTail = Buffer.alloc(0);
+  private stderrTailTruncated = false;
+
+  public constructor(private readonly childExecPath: string, private readonly childCwd: string) {}
+
+  public observe(child: ChildProcess): void {
+    this.childPid = child.pid ?? null;
+    child.once("spawn", () => { this.spawnObserved = true; this.childPid = child.pid ?? null; });
+    child.once("error", (error: Error) => {
+      const evidence = lifecycleErrorEvidence(error);
+      if (this.spawnObserved) { if (!this.exitObserved) this.processError ??= evidence; }
+      else this.spawnError ??= evidence;
+    });
+    child.once("exit", (code, signal) => { this.exitObserved = true; this.exitCode = code; this.exitSignal = signal; });
+    child.once("close", (code, signal) => { this.closeObserved = true; this.closeCode = code; this.closeSignal = signal; });
+    child.once("disconnect", () => { this.ipcDisconnected = true; });
+    child.on("message", (message: unknown) => { this.recordIpcMessage(message); });
+    child.stderr?.on("data", (chunk: Buffer) => { this.recordStderr(chunk); });
+    child.stderr?.once("error", (error: Error) => { if (!this.exitObserved) this.processError ??= lifecycleErrorEvidence(error); });
+  }
+
+  public recordSpawnFailure(error: unknown): void { this.spawnError ??= lifecycleErrorEvidence(error); }
+
+  public recordStartSendAttempt(): void {
+    this.startSendAttempted = true; this.startSendCallback = "PENDING"; this.startSendError = null;
+  }
+
+  public recordStartSendCallback(error: Error | null | undefined): void {
+    if (error === null || error === undefined) { this.startSendCallback = "SUCCEEDED"; return; }
+    this.startSendCallback = "FAILED"; this.startSendError ??= lifecycleErrorEvidence(error);
+  }
+
+  public recordStartSendFailure(error: unknown): void {
+    this.startSendCallback = "FAILED"; this.startSendError ??= lifecycleErrorEvidence(error);
+  }
+
+  public recordRecognizedResult(): void { this.recognizedResultReceived = true; }
+  public recordMalformedResult(): void { this.malformedResultReceived = true; }
+  public get hasRecognizedResult(): boolean { return this.recognizedResultReceived; }
+  public get hasObservedExit(): boolean { return this.exitObserved; }
+  public get hasObservedClose(): boolean { return this.closeObserved; }
+  public get hasObservedTerminalFailure(): boolean { return this.exitObserved || this.spawnError !== null || this.processError !== null; }
+  public get hasSpawnError(): boolean { return this.spawnError !== null; }
+
+  public snapshot(): ExternalLifecycleDiagnosticEvidence {
+    const decodedStderr = this.stderrTail.toString("utf8");
+    const stderrTail = decodedStderr.length === 0 ? null : boundedDiagnosticText(decodedStderr, EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES);
+    return {
+      childPid: this.childPid, childExecPath: this.childExecPath, childCwd: this.childCwd,
+      spawnObserved: this.spawnObserved, spawnError: this.spawnError, processError: this.processError,
+      startSendAttempted: this.startSendAttempted, startSendCallback: this.startSendCallback, startSendError: this.startSendError,
+      ipcMessageReceived: this.ipcMessageReceived, firstIpcMessageKind: this.firstIpcMessageKind,
+      recognizedResultReceived: this.recognizedResultReceived, malformedResultReceived: this.malformedResultReceived, ipcDisconnected: this.ipcDisconnected,
+      exitObserved: this.exitObserved, exitCode: this.exitCode, exitSignal: this.exitSignal,
+      closeObserved: this.closeObserved, closeCode: this.closeCode, closeSignal: this.closeSignal,
+      childExitPhase: !this.exitObserved ? "NOT_OBSERVED" : this.startSendCallback !== "SUCCEEDED" ? "BEFORE_START_ACKNOWLEDGEMENT" : this.ipcMessageReceived ? "AFTER_IPC_MESSAGE" : "AFTER_START_ACKNOWLEDGEMENT",
+      stderrTail, stderrTailTruncated: this.stderrTailTruncated || Buffer.byteLength(decodedStderr, "utf8") > EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES,
+    };
+  }
+
+  private recordIpcMessage(message: unknown): void {
+    this.ipcMessageReceived = true;
+    if (this.firstIpcMessageKind !== null) return;
+    if (message !== null && typeof message === "object" && !Array.isArray(message)) {
+      const type = (message as Record<string, unknown>)["type"];
+      if (type === "RESULT" || type === "FIXTURE_STAGE" || type === "CALLBACK") { this.firstIpcMessageKind = type; return; }
+    }
+    this.firstIpcMessageKind = "UNKNOWN";
+  }
+
+  private recordStderr(chunk: Buffer): void {
+    const prior = this.stderrTail;
+    if (chunk.byteLength >= EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES) {
+      this.stderrTail = Buffer.from(chunk.subarray(chunk.byteLength - EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES));
+      this.stderrTailTruncated ||= chunk.byteLength > EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES || prior.byteLength > 0;
+      return;
+    }
+    const retainedPriorBytes = EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES - chunk.byteLength;
+    if (prior.byteLength > retainedPriorBytes) this.stderrTailTruncated = true;
+    const prefix = prior.subarray(Math.max(0, prior.byteLength - retainedPriorBytes));
+    this.stderrTail = Buffer.concat([prefix, chunk], prefix.byteLength + chunk.byteLength);
+  }
+}
+
+function withExternalLifecycleDiagnostic(result: BoundedMutationRunResult, diagnostics: ExternalLifecycleDiagnostics | undefined): BoundedMutationRunResult {
+  return diagnostics === undefined || diagnostics.hasRecognizedResult ? result : { ...result, lifecycleDiagnostic: diagnostics.snapshot() };
 }
 
 type SessionTermination =
@@ -1416,8 +1577,10 @@ function checkedChildResult(value: unknown): BoundedMutationRunResult {
 class InvocationLifecycleOwner {
   private readonly completion = deferred<BoundedMutationRunResult>();
   private readonly childExitCompletion = deferred<void>();
+  private readonly childCloseCompletion = deferred<void>();
   private childResult: BoundedMutationRunResult | null = null;
   private childExited = false;
+  private childClosed = false;
   private server: Server | null = null;
   private finalResult: BoundedMutationRunResult | null = null;
   private cancellation: Promise<ForceStopResult> | null = null;
@@ -1427,14 +1590,21 @@ class InvocationLifecycleOwner {
     private readonly workspace: InvocationWorkspace,
     private readonly capability: ActiveControlCapability,
     private readonly child: ChildProcess,
+    private readonly diagnostics: ExternalLifecycleDiagnostics,
     private readonly options: BoundedMutationOptions,
     private readonly kind: ProductiveChildKind,
     private readonly fixtureMode: ExternalLifecycleFixtureMode | undefined,
     private readonly onFixtureEvent: ((stage: string) => void) | undefined,
   ) {
-    child.once("exit", () => { this.childExited = true; this.childExitCompletion.resolve(); void this.onChildExit(); });
+    child.once("exit", () => { this.noteChildExit(); });
+    child.once("close", () => { this.childClosed = true; this.childCloseCompletion.resolve(); });
     child.on("message", (message: unknown) => { void this.onChildMessage(message); });
-    child.once("error", () => { this.childExited = true; this.childExitCompletion.resolve(); void this.onChildExit(); });
+    child.once("error", () => { this.noteChildExit(); });
+    if (this.diagnostics.hasObservedClose) { this.childClosed = true; this.childCloseCompletion.resolve(); }
+    if (this.diagnostics.hasObservedTerminalFailure) {
+      this.childExited = true; this.childExitCompletion.resolve();
+      queueMicrotask(() => { void this.onChildExit(); });
+    }
   }
 
   public get result(): Promise<BoundedMutationRunResult> { return this.completion.promise; }
@@ -1450,7 +1620,14 @@ class InvocationLifecycleOwner {
   }
 
   public start(value: unknown, cwd: string, authority: BoundedMutationAuthority): void {
-    this.child.send?.({ type: "START", kind: this.kind, ...(this.fixtureMode === undefined ? {} : { fixtureMode: this.fixtureMode }), value, cwd, authority, invocationRoot: this.workspace.root } satisfies ProductiveStartMessage);
+    const message = { type: "START", kind: this.kind, ...(this.fixtureMode === undefined ? {} : { fixtureMode: this.fixtureMode }), value, cwd, authority, invocationRoot: this.workspace.root } satisfies ProductiveStartMessage;
+    this.diagnostics.recordStartSendAttempt();
+    if (this.child.send === undefined) {
+      const error = new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "productive child IPC channel is unavailable");
+      this.diagnostics.recordStartSendFailure(error); throw error;
+    }
+    try { this.child.send(message, (error) => { this.diagnostics.recordStartSendCallback(error); }); }
+    catch (error: unknown) { this.diagnostics.recordStartSendFailure(error); throw error; }
   }
 
   public async requestCancellation(detail: string, graceMs = FORCE_STOP_GRACE_MS): Promise<ForceStopResult> {
@@ -1483,8 +1660,8 @@ class InvocationLifecycleOwner {
     if (message === null || typeof message !== "object" || Array.isArray(message)) return;
     const record = message as Record<string, unknown>;
     if (record["type"] === "RESULT") {
-      try { this.childResult = checkedChildResult(record["result"]); }
-      catch { this.childResult = { outcome: "BLOCKED", reason: "BLOCKED_CHILD_RESULT_INVALID", finalState: null }; }
+      try { this.childResult = checkedChildResult(record["result"]); this.diagnostics.recordRecognizedResult(); }
+      catch { this.diagnostics.recordMalformedResult(); this.childResult = { outcome: "BLOCKED", reason: "BLOCKED_CHILD_RESULT_INVALID", finalState: null }; }
       return;
     }
     if (record["type"] === "FIXTURE_STAGE" && typeof record["stage"] === "string") { this.onFixtureEvent?.(record["stage"]); return; }
@@ -1502,17 +1679,29 @@ class InvocationLifecycleOwner {
     }
   }
 
+  private noteChildExit(): void {
+    this.childExited = true; this.childExitCompletion.resolve(); void this.onChildExit();
+  }
+
   private async onChildExit(): Promise<void> {
     if (this.finalResult !== null) return;
     await delay(0);
+    if (this.diagnostics.hasObservedExit) await this.waitForChildClose(FORCE_STOP_EXIT_WAIT_MS);
     if (this.cancellation !== null) { await this.cancellation; return; }
     if (this.normalCompletion === null) this.normalCompletion = this.completeNormally();
     await this.normalCompletion;
   }
 
+  private async waitForChildClose(timeoutMs: number): Promise<boolean> {
+    if (this.childClosed || this.diagnostics.hasObservedClose) return true;
+    return Promise.race([this.childCloseCompletion.promise.then(() => true), delay(timeoutMs).then(() => false)]);
+  }
+
   private async waitForChildExit(timeoutMs: number): Promise<boolean> {
-    if (this.childExited) return true;
-    return Promise.race([this.childExitCompletion.promise.then(() => true), delay(timeoutMs).then(() => false)]);
+    const started = Date.now();
+    const exited = this.childExited || await Promise.race([this.childExitCompletion.promise.then(() => true), delay(timeoutMs).then(() => false)]);
+    if (exited && this.diagnostics.hasObservedExit) await this.waitForChildClose(Math.max(0, timeoutMs - (Date.now() - started)));
+    return exited;
   }
 
   private async performCancellation(detail: string, graceMs: number): Promise<ForceStopResult> {
@@ -1584,7 +1773,7 @@ class InvocationLifecycleOwner {
     if (this.finalResult !== null) return;
     // The parent, not the productive child, is authoritative for the retained
     // evidence-root path that it created and validates.
-    this.finalResult = this.workspace.retained ? { ...result, evidenceRoot: this.workspace.root } : result;
+    this.finalResult = withExternalLifecycleDiagnostic(this.workspace.retained ? { ...result, evidenceRoot: this.workspace.root } : result, this.diagnostics);
     try { if (this.server?.listening) this.server.close(); }
     catch { this.finalResult = { ...this.finalResult, outcome: "BLOCKED", reason: "BLOCKED_CLEANUP_UNCERTAIN:CONTROL_SOCKET" }; }
     try { await unlink(this.capability.record.control_socket); }
@@ -1609,14 +1798,16 @@ async function createInvocationWorkspace(options: BoundedMutationOptions, reposi
   return { root, stateRoot, retained };
 }
 
-async function waitForChildIdentity(child: ChildProcess): Promise<ProcIdentity> {
-  if (child.pid === undefined) throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "productive child PID is unavailable");
+async function waitForChildIdentity(child: ChildProcess, diagnostics: ExternalLifecycleDiagnostics): Promise<ProcIdentity> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    const identity = await readProcIdentity(child.pid);
-    if (identity !== null) return identity;
+    if (child.pid !== undefined) {
+      const identity = await readProcIdentity(child.pid);
+      if (identity !== null) return identity;
+    }
+    if (diagnostics.hasSpawnError) throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "productive child PID is unavailable");
     await delay(10);
   }
-  throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "productive child /proc identity is unavailable");
+  throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", child.pid === undefined ? "productive child PID is unavailable" : "productive child /proc identity is unavailable");
 }
 
 async function runExternalLifecycleOwner(
@@ -1632,7 +1823,7 @@ async function runExternalLifecycleOwner(
   void normalized;
   if (options.authority === undefined) return { outcome: "BLOCKED", reason: "CONTROLLER_VERIFICATION_AUTHORITY_REQUIRED", finalState: null };
   if (options.signal?.aborted === true) return { outcome: "BLOCKED", reason: "BLOCKED_CANCELLED: cancellation observed before productive child creation", finalState: null };
-  let workspace: InvocationWorkspace | undefined; let child: ChildProcess | undefined; let owner: InvocationLifecycleOwner | undefined;
+  let workspace: InvocationWorkspace | undefined; let child: ChildProcess | undefined; let owner: InvocationLifecycleOwner | undefined; let diagnostics: ExternalLifecycleDiagnostics | undefined;
   try {
     const cwd = options.cwd ?? process.cwd(); const repository = await resolveRepositoryIdentity({ requestedPath: cwd, requireHead: true });
     workspace = await createInvocationWorkspace(options, repository);
@@ -1648,10 +1839,14 @@ async function runExternalLifecycleOwner(
       if (entry.startsWith("--eval=")) continue;
       childExecArgv.push(entry);
     }
-    child = spawn(process.execPath, [...childExecArgv, fileURLToPath(import.meta.url), "--pi-workflow-productive-child"], {
-      cwd, detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], env: { ...process.env },
-    });
-    const productive = await waitForChildIdentity(child);
+    diagnostics = new ExternalLifecycleDiagnostics(process.execPath, cwd);
+    try {
+      child = spawn(process.execPath, [...childExecArgv, fileURLToPath(import.meta.url), "--pi-workflow-productive-child"], {
+        cwd, detached: true, stdio: ["ignore", "ignore", "pipe", "ipc"], env: { ...process.env },
+      });
+    } catch (error: unknown) { diagnostics.recordSpawnFailure(error); throw error; }
+    diagnostics.observe(child);
+    const productive = await waitForChildIdentity(child, diagnostics);
     if (productive.sessionId !== productive.pid || productive.processGroup !== productive.pid) throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "productive child did not enter a dedicated invocation session");
     const record: ForceStopCapabilityRecord = {
       protocol: FORCE_STOP_PROTOCOL, version: FORCE_STOP_VERSION, nonce: randomBytes(32).toString("hex"),
@@ -1660,7 +1855,7 @@ async function runExternalLifecycleOwner(
       run_id: RUN_ID, repository_root: repository.worktree_root, worktree_key: repository.worktree_key, created_at: new Date().toISOString(),
     };
     const capability = await publishControlCapability(record);
-    owner = new InvocationLifecycleOwner(workspace, capability, child, options, kind, fixtureMode, onFixtureEvent);
+    owner = new InvocationLifecycleOwner(workspace, capability, child, diagnostics, options, kind, fixtureMode, onFixtureEvent);
     await owner.listen();
     const cancel = (): void => { void owner!.requestCancellation("caller cancellation", FORCE_STOP_GRACE_MS); };
     options.signal?.addEventListener("abort", cancel, { once: true });
@@ -1675,7 +1870,7 @@ async function runExternalLifecycleOwner(
   } catch (error: unknown) {
     try { child?.kill("SIGKILL"); } catch { /* child never became a valid invocation session */ }
     if (workspace !== undefined && !workspace.retained) await rm(workspace.root, { recursive: true, force: true }).catch(() => undefined);
-    return { outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "BLOCKED"}: ${error.message}` : "BLOCKED_EXTERNAL_LIFECYCLE_START", finalState: null };
+    return withExternalLifecycleDiagnostic({ outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "BLOCKED"}: ${error.message}` : "BLOCKED_EXTERNAL_LIFECYCLE_START", finalState: null }, diagnostics);
   }
 }
 
@@ -1747,7 +1942,18 @@ async function productiveChildMain(): Promise<void> {
   try {
     if (start.kind === "FIXTURE") {
       const mode = start.fixtureMode;
-      if (mode !== "HANG" && mode !== "WRITE_AND_HANG" && mode !== "INTERNAL_PASS_WAIT" && mode !== "COMPLETE") throw new Error("fixture mode is invalid");
+      if (mode !== "HANG" && mode !== "WRITE_AND_HANG" && mode !== "INTERNAL_PASS_WAIT" && mode !== "COMPLETE" && mode !== "EARLY_EXIT" && mode !== "MALFORMED_RESULT") throw new Error("fixture mode is invalid");
+      if (mode === "EARLY_EXIT") {
+        await new Promise<void>((resolveWrite) => { process.stderr.write("fixture early exit\n", () => resolveWrite()); });
+        await delay(25); process.exitCode = 23; return;
+      }
+      if (mode === "MALFORMED_RESULT") {
+        if (typeof process.send === "function") await new Promise<void>((resolveSend) => {
+          try { process.send!({ type: "RESULT", result: { outcome: "MALFORMED" } }, () => resolveSend()); }
+          catch { resolveSend(); }
+        });
+        await delay(25); process.exitCode = 24; return;
+      }
       configureBoundedWorkerFauxRuntimeForTests(() => ({
         async execute(input) {
           if (input.profile === "MUTATION_EXECUTOR") {
