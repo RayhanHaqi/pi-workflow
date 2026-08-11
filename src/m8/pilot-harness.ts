@@ -40,14 +40,24 @@ import type { M8AuthoritativeWorkflowEvidence } from "./pilot-verifier.js";
 
 const execFileAsync = promisify(execFile);
 const FIXTURE_PROTOCOL = "m8-scenario-fixtures-v1";
-const FREEZE_PROTOCOL = "m8-pilot-freeze-v1";
-const EVIDENCE_PROTOCOL = "m8-evidence-v1";
+const FREEZE_PROTOCOL = "m8-static-plan-v2";
+const STATIC_SLOT_PROTOCOL = "m8-static-slot-spec-v1";
+const EVIDENCE_PROTOCOL = "m8-evidence-v2";
 const MATRIX_PROTOCOL = "m8-canonical-matrix-v1";
-const EXECUTION_AUTHORITY_PROTOCOL = "m8-execution-authority-v1";
-const APPROVAL_REQUEST_PROTOCOL = "m8-approval-request-v2";
-const APPROVAL_MANIFEST_PROTOCOL = "m8-approval-manifest-v2";
+const EXECUTION_AUTHORITY_PROTOCOL = "m8-execution-authority-v2";
+const APPROVAL_MANIFEST_PROTOCOL = "m8-static-approval-manifest-v3";
 const M8_FIXTURE_APPROVER = "m8-fixture-freeze";
 const M8_FIXTURE_APPROVED_AT = "2000-01-01T00:00:00.000Z";
+const TOTAL_M4_TOOL_LIMIT = 32;
+const MAX_WALL_TIME_MS = 120_000;
+
+/** Frozen source documents that owner static approval binds, never a workspace or run record. */
+export const M8_CANONICAL_SOURCE_BASELINE = Object.freeze({
+  commit: "4c265cf4541d2498fe48b90ccb173c4080148585",
+  tree: "ab1aac813da8d06fa85e3d9f5cee357d3dcecee3",
+  architecture_identity: "b20e4a5a349f2bc0389bd2f70369481ebffd7c635922bb064b8c83b3af7dc3ea" as Sha256Digest,
+  v0_identity: "3ee98de02c95aeea99345fd02389b2ab0b43a749c98aea380d194c6ab232ada6" as Sha256Digest,
+});
 const MODES = ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const;
 const SCENARIO_IDS = ["M8-S01", "M8-S02", "M8-S03", "M8-S04", "M8-S05", "M8-S06", "M8-S07", "M8-S08", "M8-S09", "M8-S10"] as const;
 const DIRECT_IDS = new Set(["M8-S01", "M8-S02", "M8-S04", "M8-S06", "M8-S08", "M8-S09", "M8-S10"]);
@@ -126,42 +136,123 @@ export interface MaterializedM8Fixture {
   readonly initialStateIdentity: Sha256Digest;
 }
 
+export interface M8StaticLogicalRoute {
+  readonly logical_role: string;
+  readonly provider_id: string;
+  readonly model_id: string;
+  readonly effort: "high" | "max";
+  readonly tool_policy: Readonly<{
+    readonly built_in_tools_disabled: boolean;
+    readonly mutation_tool: string;
+    readonly command_gateway: string;
+    readonly maximum_tool_calls: number;
+  }>;
+}
+
+/** Harness-native owner-controlled facts only; it deliberately excludes all run identities and digests. */
+export interface M8StaticSlotProjection {
+  readonly protocol: typeof STATIC_SLOT_PROTOCOL;
+  readonly canonical_source_baseline: typeof M8_CANONICAL_SOURCE_BASELINE;
+  readonly fixture_bundle_identity: Sha256Digest;
+  readonly fixture_identity: Sha256Digest;
+  readonly scenario: Readonly<{ readonly scenario_id: string; readonly scenario_class: string }>;
+  readonly mode: M8Mode;
+  readonly direct_eligible: boolean;
+  readonly logical_route: readonly M8StaticLogicalRoute[];
+  readonly baseline_mode: "CLEAN_REQUIRED" | "APPROVED_BASELINE_DIRTY";
+  readonly static_scope: Readonly<{
+    readonly readable_paths: readonly string[];
+    readonly editable_paths: readonly string[];
+    readonly frozen_paths: readonly string[];
+    readonly required_outputs: readonly string[];
+    readonly stopping_conditions: readonly string[];
+  }>;
+  readonly static_tasks: readonly Readonly<{
+    readonly task_id: string;
+    readonly objective: string;
+    readonly editable_paths: readonly string[];
+    readonly required_outputs: readonly string[];
+    readonly dependencies: readonly string[];
+    readonly topological_rank: number;
+    readonly assigned_role: string;
+    readonly write_owner: string;
+  }>[];
+  readonly static_budgets: Readonly<{
+    readonly hard_m4_mutation_tool_limit: 1 | null;
+    readonly max_replans: 0;
+    readonly route_maximum_tool_calls: number;
+    readonly max_leaves: number;
+    readonly max_attempts_per_leaf: number;
+    readonly max_worker_invocations: number;
+    readonly max_model_turns: number;
+    readonly max_tool_calls: number;
+    readonly max_input_tokens: number;
+    readonly max_output_tokens: number;
+    readonly max_cost_microusd: number;
+    readonly max_wall_time_ms: number;
+  }>;
+  readonly verification_command_specification: readonly Readonly<{
+    readonly command_id: string;
+    readonly executable: string;
+    readonly args: readonly string[];
+    readonly cwd: string;
+    readonly timeout_ms: number;
+    readonly expected_exit: number;
+    readonly expected_result: M8Terminal;
+  }>[];
+  readonly expected_terminal_semantics: Readonly<{
+    readonly terminal: M8Terminal;
+    readonly task_success: boolean;
+    readonly workflow_correctness: boolean;
+    readonly pilot_validity: boolean;
+  }>;
+  readonly s09_mutation_limit_semantics: Readonly<{
+    readonly hard_mutation_tool_limit: 1;
+    readonly accepted_productive_mutations_at_most: 1;
+    readonly second_productive_mutation_rejected: true;
+    readonly no_productive_continuation_after_exhaustion: true;
+  }> | null;
+  readonly s10_scope_refusal_semantics: Readonly<{
+    readonly required_objective_unsatisfied: true;
+    readonly scope_refusal_observed: true;
+  }> | null;
+  readonly single_owner_acceptance: Readonly<{
+    readonly requires_genuine_final_owner_decision: boolean;
+    readonly static_plan_is_not_final_owner_acceptance: true;
+  }>;
+  readonly slot_execution_order: number;
+}
+
+export interface M8StaticSlotSpecification {
+  readonly static_slot_projection: M8StaticSlotProjection;
+  readonly static_slot_spec_identity: Sha256Digest;
+}
+
+/** Static plan arm: it has no workspace, M3, Contract, Task, Plan, or execution digest. */
 export interface FrozenM8Arm {
   readonly fixture_bundle_identity: Sha256Digest;
   readonly matrix_identity: Sha256Digest;
   readonly scenario: M8Scenario;
   readonly scenario_id: string;
   readonly mode: M8Mode;
-  readonly run_id: string;
-  readonly execution_authority_digest: Sha256Digest;
-  readonly approval_request: Readonly<{
-    readonly protocol: typeof APPROVAL_REQUEST_PROTOCOL;
-    readonly run_id: string;
-    readonly scenario_id: string;
-    readonly mode: M8Mode;
-    readonly execution_authority_digest: Sha256Digest;
-    readonly request_identity: Sha256Digest;
-  }>;
-  /** Captured by the actual bounded controller before any worker reservation. */
-  readonly controller_authority: BoundedExecutionAuthority;
-  readonly materialization: MaterializedM8Fixture;
+  readonly slot_execution_order: number;
+  readonly static_slot: M8StaticSlotSpecification;
 }
 
 export interface M8FreezeResult {
   readonly protocol: typeof FREEZE_PROTOCOL;
-  /** The one private root that owns all arm workspaces and evidence for this freeze. */
-  readonly invocation: M8Invocation;
   readonly bundle: M8FixtureBundle;
   readonly fixture_bundle_identity: Sha256Digest;
   readonly matrix_identity: Sha256Digest;
   readonly arms: readonly FrozenM8Arm[];
 }
 
+/** The sole harness owner-approval record; every entry is prospective static authority. */
 export interface M8ApprovalManifest {
   readonly protocol: typeof APPROVAL_MANIFEST_PROTOCOL;
   readonly fixture_bundle_identity: Sha256Digest;
   readonly matrix_identity: Sha256Digest;
-  readonly approved_execution_authority_digests: readonly Sha256Digest[];
+  readonly approved_static_slots: readonly M8StaticSlotSpecification[];
   readonly approval_manifest_identity: Sha256Digest;
 }
 
@@ -170,8 +261,9 @@ export type M8FailureClassification = "REPOSITORY_DEFECT" | "REQUIREMENT_OR_AUTH
 export interface M8EvidenceResult {
   readonly scenario_id: string;
   readonly mode: M8Mode;
-  readonly run_id: string;
-  readonly execution_authority_digest: Sha256Digest;
+  /** Null only when native authority never reached the approval callback. */
+  readonly run_id: string | null;
+  readonly execution_authority_digest: Sha256Digest | null;
   readonly terminal_workflow_result: M8Terminal | null;
   readonly task_success: boolean;
   readonly workflow_correctness: boolean;
@@ -215,11 +307,31 @@ interface WorkspaceRecord {
   readonly device: number;
   readonly inode: number;
 }
+interface ExecutedM8Arm {
+  readonly static_arm: FrozenM8Arm;
+  readonly fixture_bundle_identity: Sha256Digest;
+  readonly matrix_identity: Sha256Digest;
+  readonly scenario: M8Scenario;
+  readonly scenario_id: string;
+  readonly mode: M8Mode;
+  readonly slot_execution_order: number;
+  readonly static_slot: M8StaticSlotSpecification;
+  readonly approved_static_slot: M8StaticSlotSpecification;
+  readonly runtime_static_slot: M8StaticSlotSpecification;
+  readonly static_match: boolean;
+  readonly materialization: MaterializedM8Fixture;
+  readonly controller_authority: BoundedExecutionAuthority;
+  readonly run_id: string;
+  readonly execution_authority_digest: Sha256Digest;
+}
 interface AuthoritativeRunRecord {
   readonly invocation: M8Invocation;
   readonly freeze: M8FreezeResult;
   readonly approval: M8ApprovalManifest;
   readonly arm: FrozenM8Arm;
+  /** Registered only after this run materializes its isolated workspace. */
+  readonly materialization: MaterializedM8Fixture;
+  readonly runtime: ExecutedM8Arm | null;
   readonly controllerResult: BoundedMutationRunResult;
   readonly controllerRoot: DirectoryRegistration | null;
   readonly stateRoot: DirectoryRegistration | null;
@@ -616,7 +728,7 @@ function assertControllerAuthority(value: BoundedExecutionAuthority): void {
     if (value.controller_limits.max_replans !== 0 || value.reducer_policy.limits.max_replans !== 0 || value.budget.limits.max_replans !== 0) authorityInvalid("controller replan limit is not zero");
     // The route/M5 cap is total accepted M4 usage. A hard mutation cap is a
     // separate bounded-admission fact and never shrinks read/evidence capacity.
-    const totalM4ToolLimit = 32;
+    const totalM4ToolLimit = TOTAL_M4_TOOL_LIMIT;
     if (value.route_map.routes.some((entry) => entry.tool_policy.maximum_tool_calls !== totalM4ToolLimit)) authorityInvalid("controller route total M4 tool limit differs");
     const workerCount = value.mode === "ROUTED_DAG" ? value.tasks.length + 2 : 1;
     if (value.budget.limits.max_tool_calls !== workerCount * totalM4ToolLimit) authorityInvalid("controller budget total M4 tool limit differs");
@@ -637,7 +749,7 @@ function assertMaterialization(scenarioValue: M8Scenario, materialization: Mater
   if (materialization.initialStateIdentity !== expectedInitial) binding("materialized initial-state identity differs");
 }
 
-/** The sole M8 execution-authority digest; all controller facts are content-addressed first. */
+/** The run-specific digest is constructed only from the native authority created for this materialized workspace. */
 export function m8ExecutionAuthorityDigest(input: {
   readonly fixture_bundle_identity: Sha256Digest;
   readonly scenario: M8Scenario;
@@ -670,187 +782,310 @@ export function m8ExecutionAuthorityDigest(input: {
   });
 }
 
-function approvalRequest(arm: Omit<FrozenM8Arm, "approval_request">): FrozenM8Arm["approval_request"] {
-  const body = {
-    protocol: APPROVAL_REQUEST_PROTOCOL,
-    run_id: arm.run_id,
-    scenario_id: arm.scenario_id,
-    mode: arm.mode,
-    execution_authority_digest: arm.execution_authority_digest,
-  } as const;
-  return Object.freeze({ ...body, request_identity: sha256Canonical(body) });
-}
-
-async function freezeControllerAuthority(scenarioValue: M8Scenario, mode: M8Mode, materialization: MaterializedM8Fixture): Promise<BoundedExecutionAuthority> {
-  let captured: BoundedExecutionAuthority | undefined;
-  const result = await runBoundedMutationWorkflowForTests(controllerGoal(scenarioValue, mode), {
-    cwd: materialization.root,
-    authority: controllerAuthority(scenarioValue),
-    ...(frozenBaselineApproval(scenarioValue) === undefined ? {} : { approveBaseline: frozenBaselineApproval(scenarioValue)! }),
-    approveTasks: async ({ executionAuthority }) => { captured = executionAuthority; return null; },
-  });
-  if (captured === undefined || !result.reason.startsWith("EXECUTION_APPROVAL_MISMATCH")) {
-    throw new Error(`M8_FREEZE_AUTHORITY_CAPTURE_FAILED: ${result.reason}`);
-  }
-  assertControllerAuthority(captured);
-  return captured;
-}
-
 function canonicalBundle(bundle: M8FixtureBundle): M8FixtureBundle { return parseM8FixtureBundle(bundle); }
 function scenarioFromBundle(bundle: M8FixtureBundle, scenarioValue: M8Scenario): M8Scenario {
   const selected = bundle.scenarios.find((entry) => entry.scenario_id === scenarioValue.scenario_id);
-  if (selected === undefined || semanticFixtureIdentity(selected) !== semanticFixtureIdentity(scenarioValue)) throw new Error("M8_FREEZE_SCENARIO_NOT_IN_BUNDLE");
+  if (selected === undefined || semanticFixtureIdentity(selected) !== semanticFixtureIdentity(scenarioValue)) throw new Error("M8_STATIC_SLOT_SCENARIO_NOT_IN_BUNDLE");
   return selected;
 }
+function fixtureCommand(scenarioValue: M8Scenario): Extract<M8AcceptanceFact, { readonly type: "required_command_result" }> {
+  const command = scenarioValue.acceptance_facts.find((fact): fact is Extract<M8AcceptanceFact, { readonly type: "required_command_result" }> => fact.type === "required_command_result");
+  if (command === undefined) throw new Error("M8_STATIC_SLOT_VERIFICATION_COMMAND_ABSENT");
+  return command;
+}
+function canonicalSlotDescriptors(bundle: M8FixtureBundle): readonly Readonly<{ readonly scenario: M8Scenario; readonly mode: M8Mode; readonly slot_execution_order: number }>[] {
+  const slots: Readonly<{ readonly scenario: M8Scenario; readonly mode: M8Mode; readonly slot_execution_order: number }>[] = [];
+  for (const scenarioValue of bundle.scenarios) for (const mode of MODES) {
+    if (mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(scenarioValue)) continue;
+    slots.push(Object.freeze({ scenario: scenarioValue, mode, slot_execution_order: slots.length }));
+  }
+  return Object.freeze(slots);
+}
+function slotExecutionOrder(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode): number {
+  const slot = canonicalSlotDescriptors(bundle).find((entry) => entry.scenario.scenario_id === scenarioValue.scenario_id && entry.mode === mode);
+  if (slot === undefined) throw new Error("M8_STATIC_SLOT_NOT_CANONICAL");
+  return slot.slot_execution_order;
+}
+function logicalRoles(mode: M8Mode): readonly string[] {
+  return mode === "DIRECT_LUNA_HIGH" ? ["LUNA_EXECUTOR"] : mode === "SINGLE_OWNER_SOL" ? ["SOL_OWNER"] : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"];
+}
+function staticLogicalRoute(role: string): M8StaticLogicalRoute {
+  const luna = role === "LUNA_EXECUTOR"; const mutates = role === "LUNA_EXECUTOR" || role === "SOL_OWNER";
+  return Object.freeze({ logical_role: role, provider_id: "openai-codex", model_id: luna ? "gpt-5.6-luna" : "gpt-5.6-sol", effort: (luna ? "high" : "max") as "high" | "max",
+    tool_policy: Object.freeze({ built_in_tools_disabled: true, mutation_tool: mutates ? "APPLY_PATCH_SCOPED" : "NONE",
+      command_gateway: role === "SOL_CLOSEOUT" ? "VERIFICATION_ONLY" : role === "SOL_PLANNER" ? "INSPECTION_ONLY" : "TASK_AND_VERIFICATION", maximum_tool_calls: TOTAL_M4_TOOL_LIMIT }) });
+}
+function staticLogicalRoutes(mode: M8Mode): readonly M8StaticLogicalRoute[] { return Object.freeze(logicalRoles(mode).map(staticLogicalRoute)); }
+function staticTasks(scenarioValue: M8Scenario, mode: M8Mode): M8StaticSlotProjection["static_tasks"] {
+  const role = mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : "LUNA_EXECUTOR";
+  return Object.freeze(scenarioValue.routes[mode].tasks.map((task, index) => Object.freeze({ task_id: task.task_id, objective: task.objective,
+    editable_paths: Object.freeze([...task.editable_paths]), required_outputs: Object.freeze([...task.required_outputs]), dependencies: Object.freeze([...task.dependencies]),
+    topological_rank: index, assigned_role: role, write_owner: task.task_id })));
+}
+function staticBudget(scenarioValue: M8Scenario, mode: M8Mode): M8StaticSlotProjection["static_budgets"] {
+  const workers = mode === "ROUTED_DAG" ? scenarioValue.routes[mode].tasks.length + 2 : 1;
+  return Object.freeze({ hard_m4_mutation_tool_limit: scenarioValue.controller_limits.hard_m4_mutation_tool_limit, max_replans: 0 as const,
+    route_maximum_tool_calls: TOTAL_M4_TOOL_LIMIT, max_leaves: mode === "ROUTED_DAG" ? 8 : 1, max_attempts_per_leaf: 1,
+    max_worker_invocations: workers, max_model_turns: workers * TOTAL_M4_TOOL_LIMIT, max_tool_calls: workers * TOTAL_M4_TOOL_LIMIT,
+    max_input_tokens: 1_000_000, max_output_tokens: 100_000, max_cost_microusd: 5_000_000, max_wall_time_ms: workers * MAX_WALL_TIME_MS });
+}
+function staticS09Semantics(scenarioValue: M8Scenario): M8StaticSlotProjection["s09_mutation_limit_semantics"] {
+  const fact = scenarioValue.acceptance_facts.find((entry): entry is Extract<M8AcceptanceFact, { readonly type: "required_budget_fact" }> => entry.type === "required_budget_fact");
+  return fact === undefined ? null : Object.freeze({ hard_mutation_tool_limit: fact.hard_mutation_tool_limit, accepted_productive_mutations_at_most: fact.accepted_productive_mutations_at_most,
+    second_productive_mutation_rejected: fact.second_productive_mutation_rejected, no_productive_continuation_after_exhaustion: fact.no_productive_continuation_after_exhaustion });
+}
+function staticS10Semantics(scenarioValue: M8Scenario): M8StaticSlotProjection["s10_scope_refusal_semantics"] {
+  const fact = scenarioValue.acceptance_facts.find((entry): entry is Extract<M8AcceptanceFact, { readonly type: "required_scope_refusal" }> => entry.type === "required_scope_refusal");
+  return fact === undefined ? null : Object.freeze({ required_objective_unsatisfied: fact.required_objective_unsatisfied, scope_refusal_observed: fact.scope_refusal_observed });
+}
+function staticSlotProjectionFor(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode, order: number): M8StaticSlotProjection {
+  const command = fixtureCommand(scenarioValue);
+  const projection: M8StaticSlotProjection = Object.freeze({
+    protocol: STATIC_SLOT_PROTOCOL,
+    canonical_source_baseline: M8_CANONICAL_SOURCE_BASELINE,
+    fixture_bundle_identity: fixtureBundleIdentity(bundle),
+    fixture_identity: semanticFixtureIdentity(scenarioValue),
+    scenario: Object.freeze({ scenario_id: scenarioValue.scenario_id, scenario_class: scenarioValue.scenario_class }),
+    mode,
+    direct_eligible: directEligibleScenario(scenarioValue),
+    logical_route: staticLogicalRoutes(mode),
+    baseline_mode: scenarioValue.approved_dirty_overlay === null ? "CLEAN_REQUIRED" : "APPROVED_BASELINE_DIRTY",
+    static_scope: Object.freeze({ readable_paths: Object.freeze([...scenarioValue.readable_paths]), editable_paths: Object.freeze([...scenarioValue.editable_paths]),
+      frozen_paths: Object.freeze([...scenarioValue.frozen_paths]), required_outputs: Object.freeze([...scenarioValue.required_outputs]), stopping_conditions: Object.freeze([scenarioValue.stopping_conditions.join("\n")]) }),
+    static_tasks: staticTasks(scenarioValue, mode),
+    static_budgets: staticBudget(scenarioValue, mode),
+    verification_command_specification: Object.freeze([Object.freeze({ command_id: command.command_id, executable: command.executable,
+      args: Object.freeze([...command.args]), cwd: command.cwd, timeout_ms: scenarioValue.verification.timeout_ms,
+      expected_exit: command.expected_exit, expected_result: scenarioValue.verification.expected_result })]),
+    expected_terminal_semantics: Object.freeze({ terminal: scenarioValue.expected_terminal_policy, task_success: scenarioValue.expected_behavior.task_success,
+      workflow_correctness: scenarioValue.expected_behavior.workflow_correctness, pilot_validity: scenarioValue.expected_behavior.pilot_validity }),
+    s09_mutation_limit_semantics: staticS09Semantics(scenarioValue),
+    s10_scope_refusal_semantics: staticS10Semantics(scenarioValue),
+    single_owner_acceptance: Object.freeze({ requires_genuine_final_owner_decision: mode === "SINGLE_OWNER_SOL", static_plan_is_not_final_owner_acceptance: true }),
+    slot_execution_order: order,
+  });
+  assertStaticSlotProjection(projection);
+  return projection;
+}
 
-async function freezeSelectedScenario(bundle: M8FixtureBundle, scenarioValue: M8Scenario, modes: readonly M8Mode[], invocation: M8Invocation, options: { readonly temporaryParent?: string; readonly refuseExecution?: (request: FrozenM8Arm["approval_request"]) => Promise<false> | false }): Promise<readonly FrozenM8Arm[]> {
+/** Deterministic prospective projection for one slot; it contains no workspace path or native run record. */
+export function m8StaticSlotProjection(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode): M8StaticSlotProjection {
+  const bundle = canonicalBundle(bundleValue); const selected = scenarioFromBundle(bundle, scenarioValue);
+  if (!MODES.includes(mode) || (mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(selected))) throw new Error("M8_STATIC_SLOT_MODE_INVALID");
+  return staticSlotProjectionFor(bundle, selected, mode, slotExecutionOrder(bundle, selected, mode));
+}
+export function m8StaticSlotIdentity(projection: M8StaticSlotProjection): Sha256Digest { return sha256Canonical(projection); }
+function assertStaticSlotProjection(projection: M8StaticSlotProjection): void {
+  if (projection === null || typeof projection !== "object" || Array.isArray(projection) || projection.protocol !== STATIC_SLOT_PROTOCOL) binding("static slot projection is invalid");
+  if (projection.canonical_source_baseline.commit !== M8_CANONICAL_SOURCE_BASELINE.commit || projection.canonical_source_baseline.tree !== M8_CANONICAL_SOURCE_BASELINE.tree ||
+      projection.canonical_source_baseline.architecture_identity !== M8_CANONICAL_SOURCE_BASELINE.architecture_identity || projection.canonical_source_baseline.v0_identity !== M8_CANONICAL_SOURCE_BASELINE.v0_identity) binding("static slot canonical source baseline differs");
+  digest(projection.fixture_bundle_identity, "static slot fixture bundle identity"); digest(projection.fixture_identity, "static slot fixture identity");
+  if (!MODES.includes(projection.mode) || !Number.isSafeInteger(projection.slot_execution_order) || projection.slot_execution_order < 0 || projection.slot_execution_order >= 27 ||
+      projection.static_budgets.max_replans !== 0 || projection.static_budgets.hard_m4_mutation_tool_limit !== null && projection.static_budgets.hard_m4_mutation_tool_limit !== 1 ||
+      projection.single_owner_acceptance.static_plan_is_not_final_owner_acceptance !== true) binding("static slot projection fields are invalid");
+  const encoded = canonicalize(projection);
+  for (const field of ["workspace_identity", "initial_state_identity", "m3_state_token", "run_id", "contract_content_sha256", "task_content_sha256", "task_graph_content_sha256", "plan_content_sha256", "execution_authority_digest", "reservation", "bounded_invocation", "bounded_worker_invocation", "m4_evidence", "terminal_evidence_identity", "terminal_workflow_result", "postflight_identity", "final_postflight_identity"]) {
+    if (encoded.includes(`\"${field}\"`)) binding("static slot projection includes a run-specific field");
+  }
+}
+export function m8StaticSlotSpecification(projection: M8StaticSlotProjection): M8StaticSlotSpecification {
+  assertStaticSlotProjection(projection);
+  return Object.freeze({ static_slot_projection: projection, static_slot_spec_identity: m8StaticSlotIdentity(projection) });
+}
+function assertStaticSlotSpecification(value: M8StaticSlotSpecification): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) binding("static slot specification is invalid");
+  assertStaticSlotProjection(value.static_slot_projection); digest(value.static_slot_spec_identity, "static slot specification identity");
+  if (value.static_slot_spec_identity !== m8StaticSlotIdentity(value.static_slot_projection)) binding("static slot specification identity was not recomputed");
+}
+function runtimeLogicalRoutes(authority: BoundedExecutionAuthority, mode: M8Mode): readonly M8StaticLogicalRoute[] {
+  return Object.freeze(logicalRoles(mode).map((role) => {
+    const route = authority.route_map.routes.find((entry) => entry.logical_role === role);
+    if (route === undefined) binding("native controller route is absent");
+    return Object.freeze({ logical_role: route.logical_role, provider_id: route.provider_id, model_id: route.model_id, effort: route.effort,
+      tool_policy: Object.freeze({ built_in_tools_disabled: route.tool_policy.built_in_tools_disabled, mutation_tool: route.tool_policy.mutation_tool,
+        command_gateway: route.tool_policy.command_gateway, maximum_tool_calls: route.tool_policy.maximum_tool_calls }) });
+  }));
+}
+function runtimeArgument(value: string, root: string): string {
+  if (!isAbsolute(value)) return value;
+  const canonicalRoot = resolve(root); const canonical = resolve(value);
+  const relation = relative(canonicalRoot, canonical);
+  return relation.length > 0 && !relation.startsWith("../") && relation !== ".." && !isAbsolute(relation) ? relation : value;
+}
+/** Projects native controller facts back into the same prospective static form without copying its run-specific identities. */
+export function m8RuntimeStaticSlotProjection(input: {
+  readonly arm: FrozenM8Arm;
+  readonly materialization: MaterializedM8Fixture;
+  readonly controller_authority: BoundedExecutionAuthority;
+}): M8StaticSlotProjection {
+  const { arm, materialization, controller_authority: authority } = input;
+  assertMaterialization(arm.scenario, materialization); assertControllerAuthority(authority);
+  if (authority.mode !== arm.mode) binding("native controller mode differs from static slot");
+  const commands = authority.contract.verification_commands.map((command) => {
+    const executable = command.argv[0]; if (executable === undefined) binding("native verification command is empty");
+    return Object.freeze({ command_id: command.command_id, executable, args: Object.freeze(command.argv.slice(1).map((value) => runtimeArgument(value, materialization.root))),
+      cwd: command.cwd, timeout_ms: command.timeout_ms, expected_exit: arm.scenario.verification.expected_exit, expected_result: arm.scenario.verification.expected_result });
+  });
+  const runtime: M8StaticSlotProjection = Object.freeze({
+    protocol: STATIC_SLOT_PROTOCOL,
+    canonical_source_baseline: M8_CANONICAL_SOURCE_BASELINE,
+    fixture_bundle_identity: arm.fixture_bundle_identity,
+    fixture_identity: materialization.semanticFixtureIdentity,
+    scenario: Object.freeze({ scenario_id: materialization.scenarioId, scenario_class: arm.scenario.scenario_class }),
+    mode: authority.mode,
+    direct_eligible: directEligibleScenario(arm.scenario),
+    logical_route: runtimeLogicalRoutes(authority, authority.mode),
+    baseline_mode: authority.baseline.baseline_mode,
+    static_scope: Object.freeze({ readable_paths: Object.freeze([...authority.contract.scope.readable_paths]), editable_paths: Object.freeze([...authority.contract.scope.editable_paths]),
+      frozen_paths: Object.freeze([...authority.contract.scope.frozen_paths]), required_outputs: Object.freeze([...authority.contract.required_outputs]), stopping_conditions: Object.freeze([...authority.contract.stopping_conditions]) }),
+    static_tasks: Object.freeze(authority.tasks.map((task) => Object.freeze({ task_id: task.task_id, objective: task.objective, editable_paths: Object.freeze([...task.scope.editable_paths]),
+      required_outputs: Object.freeze([...task.required_outputs]), dependencies: Object.freeze([...task.dependencies]), topological_rank: task.topological_rank,
+      assigned_role: task.assigned_role, write_owner: task.write_owner }))),
+    static_budgets: Object.freeze({ hard_m4_mutation_tool_limit: authority.controller_limits.hard_m4_mutation_tool_limit, max_replans: authority.controller_limits.max_replans,
+      route_maximum_tool_calls: authority.route_map.routes.find((entry) => entry.logical_role === logicalRoles(authority.mode)[0])!.tool_policy.maximum_tool_calls,
+      max_leaves: authority.budget.limits.max_leaves, max_attempts_per_leaf: authority.budget.limits.max_attempts_per_leaf, max_worker_invocations: authority.budget.limits.max_worker_invocations,
+      max_model_turns: authority.budget.limits.max_model_turns, max_tool_calls: authority.budget.limits.max_tool_calls, max_input_tokens: authority.budget.limits.max_input_tokens,
+      max_output_tokens: authority.budget.limits.max_output_tokens, max_cost_microusd: authority.budget.limits.max_cost_microusd, max_wall_time_ms: authority.budget.limits.max_wall_time_ms }),
+    verification_command_specification: Object.freeze(commands),
+    expected_terminal_semantics: Object.freeze({ terminal: arm.scenario.expected_terminal_policy, task_success: arm.scenario.expected_behavior.task_success,
+      workflow_correctness: arm.scenario.expected_behavior.workflow_correctness, pilot_validity: arm.scenario.expected_behavior.pilot_validity }),
+    s09_mutation_limit_semantics: staticS09Semantics(arm.scenario),
+    s10_scope_refusal_semantics: staticS10Semantics(arm.scenario),
+    single_owner_acceptance: Object.freeze({ requires_genuine_final_owner_decision: authority.contract.owner_acceptance_criteria.length === 1 && authority.contract.owner_acceptance_criteria[0]?.owner_acceptance === true,
+      static_plan_is_not_final_owner_acceptance: true }),
+    slot_execution_order: arm.slot_execution_order,
+  });
+  assertStaticSlotProjection(runtime);
+  return runtime;
+}
+
+function freezeArm(bundle: M8FixtureBundle, scenarioValue: M8Scenario, mode: M8Mode): FrozenM8Arm {
+  const projection = m8StaticSlotProjection(bundle, scenarioValue, mode);
+  return Object.freeze({ fixture_bundle_identity: fixtureBundleIdentity(bundle), matrix_identity: m8MatrixIdentity(bundle), scenario: scenarioValue,
+    scenario_id: scenarioValue.scenario_id, mode, slot_execution_order: projection.slot_execution_order, static_slot: m8StaticSlotSpecification(projection) });
+}
+function freezeResult(bundle: M8FixtureBundle, arms: readonly FrozenM8Arm[]): M8FreezeResult {
+  return Object.freeze({ protocol: FREEZE_PROTOCOL, bundle, fixture_bundle_identity: fixtureBundleIdentity(bundle), matrix_identity: m8MatrixIdentity(bundle), arms: Object.freeze([...arms]) });
+}
+function assertModeSet(scenarioValue: M8Scenario, modes: readonly M8Mode[]): void {
   if (new Set(modes).size !== modes.length || modes.some((mode) => !MODES.includes(mode))) throw new Error("M8_FREEZE_INVALID_MODE_SET");
   if (modes.some((mode) => mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(scenarioValue))) throw new Error("M8_DIRECT_INELIGIBLE");
-  const fixtureIdentity = fixtureBundleIdentity(bundle); const matrixIdentity = m8MatrixIdentity(bundle);
-  const arms: FrozenM8Arm[] = [];
-  try {
-    for (const mode of modes) {
-      const materialization = await materializeM8Fixture(scenarioValue, invocation);
-      const controller = await freezeControllerAuthority(scenarioValue, mode, materialization);
-      const execution = m8ExecutionAuthorityDigest({ fixture_bundle_identity: fixtureIdentity, scenario: scenarioValue, mode, materialization, controller_authority: controller });
-      const armBase = {
-        fixture_bundle_identity: fixtureIdentity,
-        matrix_identity: matrixIdentity,
-        scenario: scenarioValue,
-        scenario_id: scenarioValue.scenario_id,
-        mode,
-        run_id: controller.run_id,
-        execution_authority_digest: execution,
-        controller_authority: controller,
-        materialization,
-      } as const;
-      const arm = Object.freeze({ ...armBase, approval_request: approvalRequest(armBase) });
-      arms.push(arm);
-      if (options.refuseExecution !== undefined && await options.refuseExecution(arm.approval_request) !== false) throw new Error("M8_FREEZE_EXECUTION_REFUSED_ONLY");
-    }
-    return Object.freeze(arms);
-  } catch (error: unknown) { await Promise.all(arms.map(disposeFrozenM8Arm)); throw error; }
 }
-
-function freezeResult(bundle: M8FixtureBundle, invocation: M8Invocation, arms: readonly FrozenM8Arm[]): M8FreezeResult {
-  return Object.freeze({ protocol: FREEZE_PROTOCOL, invocation, bundle, fixture_bundle_identity: fixtureBundleIdentity(bundle), matrix_identity: m8MatrixIdentity(bundle), arms: Object.freeze([...arms]) });
+/** Static-plan construction does not materialize a fixture or construct native execution authority. */
+export async function freezeM8Scenario(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, modes: readonly M8Mode[] = MODES): Promise<M8FreezeResult> {
+  const bundle = canonicalBundle(bundleValue); const selected = scenarioFromBundle(bundle, scenarioValue); assertModeSet(selected, modes);
+  const arms = modes.map((mode) => freezeArm(bundle, selected, mode)).sort((left, right) => left.slot_execution_order - right.slot_execution_order);
+  return freezeResult(bundle, arms);
 }
-
-/** Provider-free authority freeze uses the same controller construction path and stops at execution approval. */
-export async function freezeM8Scenario(bundleValue: M8FixtureBundle, scenarioValue: M8Scenario, modes: readonly M8Mode[] = MODES, options: { readonly temporaryParent?: string; readonly refuseExecution?: (request: FrozenM8Arm["approval_request"]) => Promise<false> | false } = {}): Promise<M8FreezeResult> {
-  const bundle = canonicalBundle(bundleValue); const selected = scenarioFromBundle(bundle, scenarioValue); const invocation = await createM8InvocationRoot(options.temporaryParent);
-  try { return freezeResult(bundle, invocation, await freezeSelectedScenario(bundle, selected, modes, invocation, options)); }
-  catch (error: unknown) { await disposeM8Invocation(invocation); throw error; }
+/** The complete static matrix is deterministic: one planned owner decision per canonical slot, no future run records. */
+export async function freezeM8Bundle(bundleValue: M8FixtureBundle): Promise<M8FreezeResult> {
+  const bundle = canonicalBundle(bundleValue);
+  return freezeResult(bundle, canonicalSlotDescriptors(bundle).map((slot) => freezeArm(bundle, slot.scenario, slot.mode)));
 }
-
-export async function freezeM8Bundle(bundleValue: M8FixtureBundle, options: { readonly temporaryParent?: string; readonly refuseExecution?: (request: FrozenM8Arm["approval_request"]) => Promise<false> | false } = {}): Promise<M8FreezeResult> {
-  const bundle = canonicalBundle(bundleValue); const invocation = await createM8InvocationRoot(options.temporaryParent); const arms: FrozenM8Arm[] = [];
-  try {
-    for (const scenarioValue of bundle.scenarios) arms.push(...await freezeSelectedScenario(bundle, scenarioValue, MODES.filter((mode) => mode !== "DIRECT_LUNA_HIGH" || directEligibleScenario(scenarioValue)), invocation, options));
-  } catch (error: unknown) { await Promise.all(arms.map(disposeFrozenM8Arm)); await disposeM8Invocation(invocation); throw error; }
-  return freezeResult(bundle, invocation, arms);
+/** Static plans own no workspace. It only retires actual materializations created later for this exact plan. */
+export async function disposeM8Freeze(value: M8FreezeResult): Promise<void> {
+  assertFreeze(value);
+  const owned = [...authoritativeRunRecords.entries()].filter(([, record]) => record.freeze === value);
+  for (const [handle, record] of owned) {
+    if (workspaceRecords.has(record.materialization)) await disposeMaterializedM8Fixture(record.materialization);
+    authoritativeRunRecords.delete(handle);
+  }
 }
-export async function disposeFrozenM8Arm(arm: FrozenM8Arm): Promise<void> { await disposeMaterializedM8Fixture(arm.materialization); }
-export async function disposeM8Freeze(value: M8FreezeResult): Promise<void> { await Promise.all(value.arms.map(disposeFrozenM8Arm)); await disposeM8Invocation(value.invocation); }
 
 function assertFrozenArm(arm: FrozenM8Arm, bundle: M8FixtureBundle, fixtureIdentity: Sha256Digest, matrixIdentity: Sha256Digest): void {
   try {
     const canonicalScenario = scenarioFromBundle(bundle, arm.scenario);
     if (arm.scenario_id !== canonicalScenario.scenario_id || !MODES.includes(arm.mode) || (arm.mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(canonicalScenario))) binding("scenario or mode is not an eligible canonical arm");
     if (arm.fixture_bundle_identity !== fixtureIdentity || arm.matrix_identity !== matrixIdentity) binding("fixture bundle or matrix identity differs");
-    assertMaterialization(canonicalScenario, arm.materialization);
-    assertControllerAuthority(arm.controller_authority);
-    if (arm.run_id !== arm.controller_authority.run_id || arm.mode !== arm.controller_authority.mode) binding("run ID or mode differs from actual controller authority");
-    const expectedExecution = m8ExecutionAuthorityDigest({ fixture_bundle_identity: fixtureIdentity, scenario: canonicalScenario, mode: arm.mode, materialization: arm.materialization, controller_authority: arm.controller_authority });
-    if (arm.execution_authority_digest !== expectedExecution) binding("execution authority digest was not recomputed from controller authority");
-    const expectedRequest = approvalRequest({ ...arm, scenario: canonicalScenario });
-    if (canonicalize(arm.approval_request) !== canonicalize(expectedRequest)) binding("approval request differs from execution authority digest");
+    const expected = m8StaticSlotSpecification(m8StaticSlotProjection(bundle, canonicalScenario, arm.mode));
+    if (arm.slot_execution_order !== expected.static_slot_projection.slot_execution_order || canonicalize(arm.static_slot) !== canonicalize(expected)) binding("static arm differs from canonical slot specification");
   } catch (error: unknown) {
     if (error instanceof Error && error.message.startsWith("M8_APPROVAL_BINDING_MISMATCH:")) throw error;
     binding(error instanceof Error ? error.message : "frozen arm validation failed");
   }
 }
-
 function assertFreeze(value: M8FreezeResult): void {
   try {
     if (value.protocol !== FREEZE_PROTOCOL || !Array.isArray(value.arms)) binding("freeze protocol or arms are invalid");
     const bundle = canonicalBundle(value.bundle); const fixtureIdentity = fixtureBundleIdentity(bundle); const matrixIdentity = m8MatrixIdentity(bundle);
     if (value.fixture_bundle_identity !== fixtureIdentity || value.matrix_identity !== matrixIdentity) binding("freeze fixture bundle or matrix identity is invalid");
-    const slots = new Set<string>(); const digests = new Set<string>();
+    let priorOrder = -1; const slots = new Set<string>();
     for (const arm of value.arms) {
       assertFrozenArm(arm, bundle, fixtureIdentity, matrixIdentity);
       const slot = `${arm.scenario_id}--${arm.mode}`;
-      if (slots.has(slot) || digests.has(arm.execution_authority_digest)) binding("freeze contains duplicate arm authority");
-      slots.add(slot); digests.add(arm.execution_authority_digest);
+      if (slots.has(slot) || arm.slot_execution_order <= priorOrder) binding("freeze contains duplicate or unordered static slots");
+      slots.add(slot); priorOrder = arm.slot_execution_order;
     }
   } catch (error: unknown) {
     if (error instanceof Error && error.message.startsWith("M8_APPROVAL_BINDING_MISMATCH:")) throw error;
     binding(error instanceof Error ? error.message : "freeze validation failed");
   }
 }
-
+function manifestBody(manifest: Pick<M8ApprovalManifest, "fixture_bundle_identity" | "matrix_identity" | "approved_static_slots">) {
+  return { protocol: APPROVAL_MANIFEST_PROTOCOL, fixture_bundle_identity: manifest.fixture_bundle_identity, matrix_identity: manifest.matrix_identity,
+    approved_static_slots: Object.freeze([...manifest.approved_static_slots]) } as const;
+}
 function assertManifest(manifest: M8ApprovalManifest): void {
   try {
-    if (manifest.protocol !== APPROVAL_MANIFEST_PROTOCOL || !Array.isArray(manifest.approved_execution_authority_digests)) binding("approval manifest protocol or digest set is invalid");
+    if (manifest.protocol !== APPROVAL_MANIFEST_PROTOCOL || !Array.isArray(manifest.approved_static_slots) || manifest.approved_static_slots.length === 0) binding("approval manifest static slots are invalid");
     digest(manifest.fixture_bundle_identity, "approval manifest fixture bundle identity"); digest(manifest.matrix_identity, "approval manifest matrix identity");
-    const approved = manifest.approved_execution_authority_digests.map((entry) => digest(entry, "approved execution authority identity"));
-    if (approved.length === 0 || new Set(approved).size !== approved.length || !sameDigestArray(approved, [...approved].sort())) binding("approval manifest digest set is not canonical");
-    const body = { protocol: APPROVAL_MANIFEST_PROTOCOL, fixture_bundle_identity: manifest.fixture_bundle_identity, matrix_identity: manifest.matrix_identity, approved_execution_authority_digests: Object.freeze([...approved]) } as const;
-    if (manifest.approval_manifest_identity !== sha256Canonical(body)) binding("approval manifest identity was not recomputed");
+    let priorOrder = -1;
+    for (const slot of manifest.approved_static_slots) {
+      assertStaticSlotSpecification(slot);
+      if (slot.static_slot_projection.slot_execution_order <= priorOrder) binding("approval manifest static slot order is not canonical");
+      priorOrder = slot.static_slot_projection.slot_execution_order;
+    }
+    if (manifest.approval_manifest_identity !== sha256Canonical(manifestBody(manifest))) binding("approval manifest identity was not recomputed");
   } catch (error: unknown) {
     if (error instanceof Error && error.message.startsWith("M8_APPROVAL_BINDING_MISMATCH:")) throw error;
     binding(error instanceof Error ? error.message : "approval manifest validation failed");
   }
 }
-
-export function createM8ApprovalManifest(freeze: M8FreezeResult, approved: readonly Sha256Digest[]): M8ApprovalManifest {
+/** Creates the existing single harness approval record from explicit owner-supplied static slot specifications. */
+export function createM8ApprovalManifest(freeze: M8FreezeResult, approved: readonly M8StaticSlotSpecification[]): M8ApprovalManifest {
   assertFreeze(freeze);
-  const expected = freeze.arms.map((arm) => arm.execution_authority_digest).sort(); const supplied = [...approved].sort();
-  if (!sameDigestArray(supplied, expected)) throw new Error("M8_APPROVAL_MANIFEST_MISMATCH");
-  const body = { protocol: APPROVAL_MANIFEST_PROTOCOL, fixture_bundle_identity: freeze.fixture_bundle_identity, matrix_identity: freeze.matrix_identity, approved_execution_authority_digests: Object.freeze(supplied) } as const;
+  if (approved.length !== freeze.arms.length || approved.some((slot, index) => slot.static_slot_projection.slot_execution_order !== freeze.arms[index]?.slot_execution_order)) {
+    throw new Error("M8_APPROVAL_MANIFEST_SLOT_SET_MISMATCH");
+  }
+  for (const slot of approved) assertStaticSlotSpecification(slot);
+  const body = manifestBody({ fixture_bundle_identity: freeze.fixture_bundle_identity, matrix_identity: freeze.matrix_identity, approved_static_slots: Object.freeze([...approved]) });
   return Object.freeze({ ...body, approval_manifest_identity: sha256Canonical(body) });
 }
-
-/** Validates the owner manifest against the exact frozen controller authority, never prose or a runner result. */
-export function assertM8ArmApproved(arm: FrozenM8Arm, manifest: M8ApprovalManifest): void {
+/** Finds the explicit owner-approved static slot. Native equality is checked only when approveTasks supplies actual authority. */
+export function assertM8ArmApproved(arm: FrozenM8Arm, manifest: M8ApprovalManifest): M8StaticSlotSpecification {
   assertManifest(manifest);
   if (manifest.fixture_bundle_identity !== arm.fixture_bundle_identity || manifest.matrix_identity !== arm.matrix_identity) binding("approval manifest does not bind this arm's fixture matrix");
-  try {
-    const canonicalScenario = scenario(arm.scenario, "approved arm scenario");
-    digest(arm.fixture_bundle_identity, "arm fixture bundle identity"); digest(arm.matrix_identity, "arm matrix identity");
-    assertMaterialization(canonicalScenario, arm.materialization);
-    assertControllerAuthority(arm.controller_authority);
-    if (arm.scenario_id !== canonicalScenario.scenario_id || arm.run_id !== arm.controller_authority.run_id || arm.mode !== arm.controller_authority.mode || (arm.mode === "DIRECT_LUNA_HIGH" && !directEligibleScenario(canonicalScenario))) binding("arm run, scenario, or mode differs from actual authority");
-    const expectedExecution = m8ExecutionAuthorityDigest({ fixture_bundle_identity: arm.fixture_bundle_identity, scenario: canonicalScenario, mode: arm.mode, materialization: arm.materialization, controller_authority: arm.controller_authority });
-    if (arm.execution_authority_digest !== expectedExecution || !manifest.approved_execution_authority_digests.includes(expectedExecution)) binding("exact execution authority is not owner-approved");
-    const expectedRequest = approvalRequest({ ...arm, scenario: canonicalScenario });
-    if (canonicalize(arm.approval_request) !== canonicalize(expectedRequest)) binding("approval request does not bind exact run, scenario, mode, and authority digest");
-  } catch (error: unknown) {
-    if (error instanceof Error && error.message.startsWith("M8_APPROVAL_BINDING_MISMATCH:")) throw error;
-    binding(error instanceof Error ? error.message : "arm approval validation failed");
-  }
+  const approved = manifest.approved_static_slots.filter((slot) => slot.static_slot_projection.slot_execution_order === arm.slot_execution_order);
+  if (approved.length !== 1) binding("owner-approved static slot is absent or ambiguous");
+  return approved[0]!;
 }
-
-function assertActualControllerApproval(arm: FrozenM8Arm, manifest: M8ApprovalManifest, input: {
+function captureActualControllerAuthority(arm: FrozenM8Arm, approved: M8StaticSlotSpecification, materialization: MaterializedM8Fixture, input: {
   readonly mode: M8Mode;
   readonly contract: BoundedExecutionAuthority["contract"];
   readonly tasks: readonly BoundedExecutionAuthority["tasks"][number][];
   readonly plan: BoundedExecutionAuthority["plan"];
   readonly executionAuthority: BoundedExecutionAuthority;
-}): Sha256Digest {
-  assertM8ArmApproved(arm, manifest);
-  try {
-    const actual = input.executionAuthority;
-    if (input.mode !== arm.mode || input.mode !== actual.mode || input.contract.content_sha256 !== actual.contract.content_sha256 || canonicalize(input.tasks.map((task) => task.content_sha256)) !== canonicalize(actual.tasks.map((task) => task.content_sha256)) || (input.plan?.content_sha256 ?? null) !== (actual.plan?.content_sha256 ?? null)) binding("controller approval callback payload differs from actual authority");
-    const actualDigest = m8ExecutionAuthorityDigest({ fixture_bundle_identity: arm.fixture_bundle_identity, scenario: arm.scenario, mode: arm.mode, materialization: arm.materialization, controller_authority: actual });
-    if (actualDigest !== arm.execution_authority_digest || actual.run_id !== arm.run_id || actual.mode !== arm.mode || !manifest.approved_execution_authority_digests.includes(actualDigest)) binding("actual controller authority is not the exact owner-approved authority");
-    return arm.mode === "ROUTED_DAG" ? actual.plan!.content_sha256 as Sha256Digest : actual.contract.content_sha256 as Sha256Digest;
-  } catch (error: unknown) {
-    if (error instanceof Error && error.message.startsWith("M8_APPROVAL_BINDING_MISMATCH:")) throw error;
-    binding(error instanceof Error ? error.message : "actual controller authority validation failed");
-  }
+}): ExecutedM8Arm {
+  const actual = input.executionAuthority;
+  if (input.mode !== arm.mode || input.mode !== actual.mode || input.contract.content_sha256 !== actual.contract.content_sha256 ||
+      canonicalize(input.tasks.map((task) => task.content_sha256)) !== canonicalize(actual.tasks.map((task) => task.content_sha256)) ||
+      (input.plan?.content_sha256 ?? null) !== (actual.plan?.content_sha256 ?? null)) binding("controller approval callback payload differs from actual authority");
+  const runtimeProjection = m8RuntimeStaticSlotProjection({ arm, materialization, controller_authority: actual });
+  const runtimeStaticSlot = m8StaticSlotSpecification(runtimeProjection);
+  const execution = m8ExecutionAuthorityDigest({ fixture_bundle_identity: arm.fixture_bundle_identity, scenario: arm.scenario, mode: arm.mode, materialization, controller_authority: actual });
+  return Object.freeze({ static_arm: arm, fixture_bundle_identity: arm.fixture_bundle_identity, matrix_identity: arm.matrix_identity, scenario: arm.scenario,
+    scenario_id: arm.scenario_id, mode: arm.mode, slot_execution_order: arm.slot_execution_order, static_slot: arm.static_slot, approved_static_slot: approved, runtime_static_slot: runtimeStaticSlot,
+    static_match: canonicalize(runtimeStaticSlot.static_slot_projection) === canonicalize(approved.static_slot_projection) && runtimeStaticSlot.static_slot_spec_identity === approved.static_slot_spec_identity,
+    materialization, controller_authority: actual, run_id: actual.run_id, execution_authority_digest: execution });
+}
+function nativeApprovalDigest(runtime: ExecutedM8Arm): Sha256Digest {
+  return runtime.controller_authority.mode === "ROUTED_DAG" ? runtime.controller_authority.plan!.content_sha256 as Sha256Digest : runtime.controller_authority.contract.content_sha256 as Sha256Digest;
 }
 
+export interface M8RunOptions {
+  /** Existing native final-Single owner callback; absence remains a rejection, never automatic acceptance. */
+  readonly approveOwnerAcceptance?: (input: { readonly task: TaskDocument; readonly finalState: WorkflowState }) => Promise<boolean>;
+}
 type M8ControllerRunner = typeof runBoundedMutationWorkflow;
 type DurableInspection = Awaited<ReturnType<typeof inspectRunStorage>>;
 type DurableRecords = Awaited<ReturnType<typeof readM5ManagedRecords>>;
@@ -866,15 +1101,15 @@ function isAuthoritative(inspection: DurableInspection, kind: string, identity: 
   return inspection.managedRecordClassifications.some((entry) => entry.object.kind === kind && entry.object.contentSha256 === identity &&
     entry.classification === "AUTHORITATIVE_MANAGED_RECORD");
 }
-function registeredWorkspace(arm: FrozenM8Arm, invocation: M8Invocation): WorkspaceRecord {
-  const workspace = workspaceRecords.get(arm.materialization);
-  if (workspace === undefined || workspace.invocation !== invocation || workspace.root !== arm.materialization.root) {
+function registeredWorkspace(materialization: MaterializedM8Fixture, invocation: M8Invocation): WorkspaceRecord {
+  const workspace = workspaceRecords.get(materialization);
+  if (workspace === undefined || workspace.invocation !== invocation || workspace.root !== materialization.root) {
     throw new Error("M8_HARNESS_WORKSPACE_REGISTRATION_INVALID");
   }
   return workspace;
 }
-async function revalidateRegisteredWorkspace(arm: FrozenM8Arm, invocation: M8Invocation): Promise<void> {
-  const workspace = registeredWorkspace(arm, invocation); const owner = ownedInvocation(invocation);
+async function revalidateRegisteredWorkspace(materialization: MaterializedM8Fixture, invocation: M8Invocation): Promise<void> {
+  const workspace = registeredWorkspace(materialization, invocation); const owner = ownedInvocation(invocation);
   await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.workspaceRegistration, owner.rootRegistration);
   let stats; let physical: string;
   try { [stats, physical] = await Promise.all([lstat(workspace.root), realpath(workspace.root)]); }
@@ -885,12 +1120,15 @@ async function revalidateRegisteredWorkspace(arm: FrozenM8Arm, invocation: M8Inv
   }
 }
 async function registerActualRun(
+  invocation: M8Invocation,
   freeze: M8FreezeResult,
   arm: FrozenM8Arm,
   approval: M8ApprovalManifest,
+  materialization: MaterializedM8Fixture,
+  runtime: ExecutedM8Arm | null,
   controllerResult: BoundedMutationRunResult,
 ): Promise<M8AuthoritativeRun> {
-  const owner = ownedInvocation(freeze.invocation);
+  const owner = ownedInvocation(invocation);
   let controllerRoot: DirectoryRegistration | null = null; let stateRoot: DirectoryRegistration | null = null; let registrationError: string | null = null;
   try {
     await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.retainedRegistration, owner.rootRegistration);
@@ -906,45 +1144,51 @@ async function registerActualRun(
     registrationError = error instanceof Error ? error.message : "M8_HARNESS_CONTROLLER_ROOT_REGISTRATION_FAILED";
     controllerRoot = null; stateRoot = null;
   }
-  const handle = Object.freeze({ run_identity: sha256Canonical({ protocol: "m8-authoritative-run-v1", execution_authority_digest: arm.execution_authority_digest, nonce: randomBytes(32).toString("hex") }) });
-  authoritativeRunRecords.set(handle, Object.freeze({ invocation: freeze.invocation, freeze, approval, arm, controllerResult, controllerRoot, stateRoot, registrationError }));
+  const handle = Object.freeze({ run_identity: sha256Canonical({ protocol: "m8-authoritative-run-v2", static_slot_spec_identity: arm.static_slot.static_slot_spec_identity,
+    execution_authority_digest: runtime?.execution_authority_digest ?? null, nonce: randomBytes(32).toString("hex") }) });
+  authoritativeRunRecords.set(handle, Object.freeze({ invocation, freeze, approval, arm, materialization, runtime, controllerResult, controllerRoot, stateRoot, registrationError }));
   return handle;
 }
 
-async function runApprovedM8Arm(freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest, controller: M8ControllerRunner): Promise<M8AuthoritativeRun> {
-  assertFreeze(freeze); assertM8ArmApproved(arm, manifest);
+async function runApprovedM8Arm(invocation: M8Invocation, freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest, controller: M8ControllerRunner, options: M8RunOptions): Promise<M8AuthoritativeRun> {
+  assertFreeze(freeze); const approved = assertM8ArmApproved(arm, manifest);
   if (!freeze.arms.includes(arm) || manifest.fixture_bundle_identity !== freeze.fixture_bundle_identity || manifest.matrix_identity !== freeze.matrix_identity) {
     throw new Error("M8_APPROVED_RUN_BINDING_INVALID");
   }
-  registeredWorkspace(arm, freeze.invocation);
-  const owner = ownedInvocation(freeze.invocation); const identity = `${arm.scenario_id}--${arm.mode}`;
+  const owner = ownedInvocation(invocation); const identity = `${arm.scenario_id}--${arm.mode}`;
   if (activeArm !== null) throw new Error(`M8_ONE_ACTIVE_ARM:${activeArm}`);
   activeArm = identity;
+  let materialization: MaterializedM8Fixture | undefined; let runtime: ExecutedM8Arm | null = null;
   try {
-    // The production controller returns only after its R1 parent has reached
-    // a settled outward disposition and reconciled owned resources. Its M2–M5
-    // state is retained only under this registered invocation's private root.
+    // Materialization happens only after static owner input is registered. The
+    // callback receives native authority before M5 reserves any worker.
+    materialization = await materializeM8Fixture(arm.scenario, invocation);
     const result = await controller(controllerGoal(arm.scenario, arm.mode), {
-      cwd: arm.materialization.root,
+      cwd: materialization.root,
       authority: controllerAuthority(arm.scenario),
       retainedArtifactRoot: owner.retained,
       ...(frozenBaselineApproval(arm.scenario) === undefined ? {} : { approveBaseline: frozenBaselineApproval(arm.scenario)! }),
-      approveTasks: async (input) => assertActualControllerApproval(arm, manifest, input),
-      // A final Single-owner acceptance is not manufactured by fixture prose.
-      approveOwnerAcceptance: async () => false,
+      approveTasks: async (input) => {
+        runtime = captureActualControllerAuthority(arm, approved, materialization!, input);
+        return runtime.static_match ? nativeApprovalDigest(runtime) : null;
+      },
+      ...(options.approveOwnerAcceptance === undefined ? {} : { approveOwnerAcceptance: options.approveOwnerAcceptance }),
     });
-    return registerActualRun(freeze, arm, manifest, result);
+    return await registerActualRun(invocation, freeze, arm, manifest, materialization, runtime, result);
+  } catch (error: unknown) {
+    if (materialization !== undefined && workspaceRecords.has(materialization)) await disposeMaterializedM8Fixture(materialization).catch(() => undefined);
+    throw error;
   } finally { activeArm = null; }
 }
 
-/** Production M8 admission has no runner callback and returns only a registered actual-run handle. */
-export async function runOneM8Arm(freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest): Promise<M8AuthoritativeRun> {
-  return runApprovedM8Arm(freeze, arm, manifest, runBoundedMutationWorkflow);
+/** Production M8 admission accepts only owner static input plus the existing genuine final-Single callback. */
+export async function runOneM8Arm(invocation: M8Invocation, freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest, options: M8RunOptions = {}): Promise<M8AuthoritativeRun> {
+  return runApprovedM8Arm(invocation, freeze, arm, manifest, runBoundedMutationWorkflow, options);
 }
 
 /** Test-only faux entrypoint: it retains the same controller implementation but never selects a provider runtime. */
-export async function runOneM8ArmForTests(freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest): Promise<M8AuthoritativeRun> {
-  return runApprovedM8Arm(freeze, arm, manifest, runBoundedMutationWorkflowForTests);
+export async function runOneM8ArmForTests(invocation: M8Invocation, freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest, options: M8RunOptions = {}): Promise<M8AuthoritativeRun> {
+  return runApprovedM8Arm(invocation, freeze, arm, manifest, runBoundedMutationWorkflowForTests, options);
 }
 export function activeM8ArmForTests(): string | null { return activeArm; }
 
@@ -965,7 +1209,7 @@ function expectedCommand(scenarioValue: M8Scenario): Extract<M8AcceptanceFact, {
   return value;
 }
 function optionalFinalPostflight(
-  arm: FrozenM8Arm,
+  arm: ExecutedM8Arm,
   records: DurableRecords,
   inspection: DurableInspection,
   terminal: M5ControlDecisionDocument,
@@ -990,7 +1234,7 @@ function optionalFinalPostflight(
   return fallback.length === 1 ? fallback[0]! : null;
 }
 function resolvedCommandEvidence(
-  arm: FrozenM8Arm,
+  arm: ExecutedM8Arm,
   policy: M5ControlPolicyDocument,
   records: DurableRecords,
   inspection: DurableInspection,
@@ -1020,7 +1264,7 @@ function resolvedCommandEvidence(
     exit_code: result.exit_code, command_spec_identity: result.command_spec_sha256 as Sha256Digest, m4_result_identity: result.content_sha256 as Sha256Digest })]);
 }
 function resolvedBudgetEvidence(
-  arm: FrozenM8Arm,
+  arm: ExecutedM8Arm,
   policy: M5ControlPolicyDocument,
   records: DurableRecords,
   inspection: DurableInspection,
@@ -1028,43 +1272,61 @@ function resolvedBudgetEvidence(
 ): M8AuthoritativeWorkflowEvidence["budget"] | undefined {
   if (!arm.scenario.acceptance_facts.some((fact) => fact.type === "required_budget_fact")) return undefined;
   const hardLimit = arm.controller_authority.controller_limits.hard_m4_mutation_tool_limit;
-  const totalM4RouteLimit = arm.controller_authority.route_map.routes.every((route) => route.tool_policy.maximum_tool_calls === 32);
+  const totalM4ToolLimit = arm.controller_authority.budget.limits.max_tool_calls;
+  const routeLimitsAreStatic = arm.controller_authority.route_map.routes.every((route) => route.tool_policy.maximum_tool_calls === TOTAL_M4_TOOL_LIMIT);
   const receipts = records.mutationReceipts.filter((receipt) => receipt.run_id === arm.run_id && receipt.outcome === "APPLIED" &&
     isAuthoritative(inspection, "M4_MUTATION_RECEIPT", receipt.content_sha256));
-  const refusals = records.admissionRefusals.filter((refusal) => refusal.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED" &&
+  const refusals = records.admissionRefusals.filter((refusal) => refusal.run_id === arm.run_id && refusal.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED" &&
     isAuthoritative(inspection, "M4_ADMISSION_REFUSAL", refusal.content_sha256));
-  const exhaustion = records.boundedWorkerResults.filter((result) => result.first_failure_code === "M4_TOOL_BUDGET_EXHAUSTED" &&
-    result.actual_usage.m4_tool_calls === 1 && result.m4_evidence_content_sha256.some((digest) => refusals.some((refusal) => refusal.content_sha256 === digest)) &&
-    isAuthoritative(inspection, "BOUNDED_WORKER_RESULT", result.content_sha256));
-  const exhaustedAt = exhaustion.map((entry) => entry.completed_at).sort().at(-1);
-  const productiveContinuation = exhaustedAt === undefined ? false : receipts.some((receipt) => receipt.completed_at > exhaustedAt);
+  const results = records.boundedWorkerResults.filter((result) => {
+    const invocation = records.boundedWorkerInvocations.find((entry) => entry.content_sha256 === result.invocation_content_sha256);
+    return invocation?.run_id === arm.run_id && isAuthoritative(inspection, "BOUNDED_WORKER_RESULT", result.content_sha256);
+  });
+  const exhaustion = results.filter((result) => {
+    const linked = refusals.filter((refusal) => refusal.bounded_worker_invocation_content_sha256 === result.invocation_content_sha256 && result.m4_evidence_content_sha256.includes(refusal.content_sha256));
+    return result.first_failure_code === "M4_TOOL_BUDGET_EXHAUSTED" && result.first_failure_stage === "M4_TOOL_ADMISSION" && linked.length === 1;
+  });
+  const refusalFollowsAcceptedMutation = receipts.length === 1 && refusals.length === 1 &&
+    receipts[0]!.successor_state_token_content_sha256 === refusals[0]!.admission_state_token_content_sha256;
+  const acceptedM4ToolCalls = results.reduce((total, result) => total + result.actual_usage.m4_tool_calls, 0);
+  const exhaustionCompletedAt = exhaustion.length === 1 ? exhaustion[0]!.completed_at : null;
+  const totalUsageBounded = exhaustion.length === 1 && acceptedM4ToolCalls >= receipts.length && acceptedM4ToolCalls <= totalM4ToolLimit;
+  const noProductiveContinuation = refusalFollowsAcceptedMutation && receipts.length <= 1 && exhaustionCompletedAt !== null &&
+    results.every((result) => result.content_sha256 === exhaustion[0]!.content_sha256 || result.completed_at <= exhaustionCompletedAt);
+  const exactRefusal = hardLimit === 1 && routeLimitsAreStatic && refusals.length === 1 && exhaustion.length === 1 && totalUsageBounded && refusalFollowsAcceptedMutation;
   const identities = [policy.content_sha256, terminal.content_sha256, ...receipts.map((entry) => entry.content_sha256), ...refusals.map((entry) => entry.content_sha256), ...exhaustion.map((entry) => entry.content_sha256)] as Sha256Digest[];
   identities.sort();
   return Object.freeze({ hard_mutation_tool_limit: hardLimit ?? 0, accepted_productive_mutations: receipts.length,
-    second_productive_mutation_rejected: hardLimit === 1 && totalM4RouteLimit && refusals.length === 1 && exhaustion.length === 1,
-    productive_continuation_after_exhaustion: productiveContinuation, evidence_identities: Object.freeze([...new Set(identities)]) });
+    accepted_m4_tool_calls: acceptedM4ToolCalls, total_m4_tool_limit: totalM4ToolLimit,
+    second_productive_mutation_rejected: exactRefusal, productive_continuation_after_exhaustion: !noProductiveContinuation,
+    evidence_identities: Object.freeze([...new Set(identities)]) });
 }
 function resolvedScopeEvidence(
-  arm: FrozenM8Arm,
+  arm: ExecutedM8Arm,
   policy: M5ControlPolicyDocument,
   records: DurableRecords,
   inspection: DurableInspection,
   state: WorkflowState,
   terminal: M5ControlDecisionDocument,
+  postflight: M3PostflightDocument,
 ): M8AuthoritativeWorkflowEvidence["scope"] | undefined {
   if (!arm.scenario.acceptance_facts.some((fact) => fact.type === "required_scope_refusal")) return undefined;
-  const refusals = records.admissionRefusals.filter((refusal) => refusal.refusal_code === "OUT_OF_SCOPE_WRITE" &&
+  const applied = records.mutationReceipts.filter((receipt) => receipt.run_id === arm.run_id && receipt.outcome === "APPLIED" &&
+    isAuthoritative(inspection, "M4_MUTATION_RECEIPT", receipt.content_sha256));
+  const refusals = records.admissionRefusals.filter((refusal) => refusal.run_id === arm.run_id && refusal.refusal_code === "OUT_OF_SCOPE_WRITE" &&
     isAuthoritative(inspection, "M4_ADMISSION_REFUSAL", refusal.content_sha256));
-  const blocked = records.boundedWorkerResults.filter((result) => result.first_failure_code === "OUT_OF_SCOPE_WRITE" &&
-    result.m4_evidence_content_sha256.some((digest) => refusals.some((refusal) => refusal.content_sha256 === digest)) &&
+  const blocked = records.boundedWorkerResults.filter((result) => result.first_failure_code === "OUT_OF_SCOPE_WRITE" && result.first_failure_stage === "M4_TOOL_ADMISSION" &&
+    refusals.some((refusal) => refusal.bounded_worker_invocation_content_sha256 === result.invocation_content_sha256 && result.m4_evidence_content_sha256.includes(refusal.content_sha256)) &&
     isAuthoritative(inspection, "BOUNDED_WORKER_RESULT", result.content_sha256));
-  const scopeRefusal = refusals.length === 1 && blocked.length === 1;
-  const identities = [policy.content_sha256, terminal.content_sha256, ...refusals.map((entry) => entry.content_sha256), ...blocked.map((entry) => entry.content_sha256)] as Sha256Digest[];
+  const repositoryUnchanged = postflight.repository_git_delta.length === 0;
+  const scopeRefusal = refusals.length === 1 && blocked.length === 1 && applied.length === 0 && repositoryUnchanged;
+  const identities = [policy.content_sha256, terminal.content_sha256, postflight.content_sha256, ...applied.map((entry) => entry.content_sha256), ...refusals.map((entry) => entry.content_sha256), ...blocked.map((entry) => entry.content_sha256)] as Sha256Digest[];
   identities.sort();
   return Object.freeze({ required_objective_unsatisfied: state.phase === "BLOCKED" && scopeRefusal,
-    scope_refusal_observed: scopeRefusal, evidence_identities: Object.freeze([...new Set(identities)]) });
+    scope_refusal_observed: scopeRefusal, accepted_productive_mutations: applied.length, repository_unchanged: repositoryUnchanged,
+    evidence_identities: Object.freeze([...new Set(identities)]) });
 }
-function requireControllerSources(arm: FrozenM8Arm, records: DurableRecords, inspection: DurableInspection, policy: M5ControlPolicyDocument): void {
+function requireControllerSources(arm: ExecutedM8Arm, records: DurableRecords, inspection: DurableInspection, policy: M5ControlPolicyDocument): void {
   const authority = arm.controller_authority;
   if (policy.run_id !== arm.run_id || policy.reducer_policy_content_sha256 !== authority.reducer_policy.content_sha256 ||
       policy.contract_sha256 !== authority.contract.contract_sha256 || policy.budget_sha256 !== authority.budget.budget_sha256 ||
@@ -1086,7 +1348,7 @@ function requireControllerSources(arm: FrozenM8Arm, records: DurableRecords, ins
   }
 }
 function requireResolvedBoundedExecutions(
-  arm: FrozenM8Arm,
+  arm: ExecutedM8Arm,
   policy: M5ControlPolicyDocument,
   records: DurableRecords,
   inspection: DurableInspection,
@@ -1122,14 +1384,18 @@ function requireResolvedBoundedExecutions(
   }
 }
 async function resolveDurableEvidence(record: AuthoritativeRunRecord): Promise<{ readonly evidence: M8AuthoritativeWorkflowEvidence; readonly finalRoot: string }> {
+  const arm = record.runtime;
+  if (arm === null) throw new Error("M8_DURABLE_AUTHORITY_INVALID:native execution authority was never constructed");
+  if (!arm.static_match) throw new Error("M8_STATIC_SLOT_MISMATCH:owner static slot did not match native authority");
   if (record.registrationError !== null || record.controllerRoot === null || record.stateRoot === null) {
     throw new Error(record.registrationError ?? "M8_HARNESS_CONTROLLER_ROOT_REGISTRATION_MISSING");
   }
-  await revalidateRegisteredWorkspace(record.arm, record.invocation);
+  await revalidateRegisteredWorkspace(record.materialization, record.invocation);
+  if (record.materialization !== arm.materialization) throw new Error("M8_DURABLE_AUTHORITY_INVALID:runtime workspace record differs");
   const owner = ownedInvocation(record.invocation);
   await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.retainedRegistration, owner.rootRegistration);
   await revalidatePrivateDirectory(record.controllerRoot, owner.retainedRegistration); await revalidatePrivateDirectory(record.stateRoot, record.controllerRoot);
-  const location = { stateRoot: record.stateRoot.path, runId: record.arm.run_id };
+  const location = { stateRoot: record.stateRoot.path, runId: arm.run_id };
   const [inspection, records] = await Promise.all([inspectRunStorage(location), readM5ManagedRecords(location)]);
   const state = inspection.workflowState;
   if (inspection.status !== "HEALTHY" || state === null || (state.phase !== "PASS" && state.phase !== "BLOCKED")) {
@@ -1138,47 +1404,51 @@ async function resolveDurableEvidence(record: AuthoritativeRunRecord): Promise<{
   if (record.controllerResult.finalState === null || !sameCanonical(record.controllerResult.finalState, state) || record.controllerResult.outcome !== state.phase) {
     throw new Error("M8_DURABLE_AUTHORITY_INVALID:controller result disagrees with persisted terminal state");
   }
-  const policy = exactlyOne(records.policies, (entry) => entry.run_id === record.arm.run_id &&
-    entry.reducer_policy_content_sha256 === record.arm.controller_authority.reducer_policy.content_sha256 &&
+  const policy = exactlyOne(records.policies, (entry) => entry.run_id === arm.run_id &&
+    entry.reducer_policy_content_sha256 === arm.controller_authority.reducer_policy.content_sha256 &&
     isAuthoritative(inspection, "M5_CONTROL_POLICY", entry.content_sha256), "M5 policy");
-  requireControllerSources(record.arm, records, inspection, policy); requireResolvedBoundedExecutions(record.arm, policy, records, inspection);
-  const terminal = terminalDecision(records, inspection, state, record.arm.run_id);
-  const postflight = optionalFinalPostflight(record.arm, records, inspection, terminal);
+  requireControllerSources(arm, records, inspection, policy); requireResolvedBoundedExecutions(arm, policy, records, inspection);
+  const terminal = terminalDecision(records, inspection, state, arm.run_id);
+  const postflight = optionalFinalPostflight(arm, records, inspection, terminal);
   if (postflight === null) throw new Error("M8_DURABLE_AUTHORITY_INVALID:exact final M3 postflight is absent");
-  const commands = resolvedCommandEvidence(record.arm, policy, records, inspection);
-  const authorityIds = [state.content_sha256, terminal.content_sha256, policy.content_sha256, record.arm.controller_authority.baseline.content_sha256,
-    ...(record.arm.controller_authority.baseline_approval === null ? [] : [record.arm.controller_authority.baseline_approval.content_sha256]), postflight.content_sha256] as Sha256Digest[];
+  const commands = resolvedCommandEvidence(arm, policy, records, inspection);
+  const budget = resolvedBudgetEvidence(arm, policy, records, inspection, terminal);
+  const scope = resolvedScopeEvidence(arm, policy, records, inspection, state, terminal, postflight);
+  const authorityIds = [state.content_sha256, terminal.content_sha256, policy.content_sha256, arm.controller_authority.baseline.content_sha256,
+    ...(arm.controller_authority.baseline_approval === null ? [] : [arm.controller_authority.baseline_approval.content_sha256]), postflight.content_sha256] as Sha256Digest[];
   authorityIds.sort();
-  return Object.freeze({ evidence: Object.freeze({ run_id: record.arm.run_id, execution_authority_digest: record.arm.execution_authority_digest,
+  return Object.freeze({ evidence: Object.freeze({ run_id: arm.run_id, execution_authority_digest: arm.execution_authority_digest,
     terminal_workflow_result: state.phase, terminal_evidence_identity: state.content_sha256 as Sha256Digest, final_postflight_identity: postflight.content_sha256 as Sha256Digest,
     final_repository_identity: postflight.repository.content_sha256 as Sha256Digest, final_git_fingerprint_identity: postflight.git_fingerprint.content_sha256 as Sha256Digest,
     authority_evidence_identities: Object.freeze([...new Set(authorityIds)]), command_results: commands,
-    ...(resolvedBudgetEvidence(record.arm, policy, records, inspection, terminal) === undefined ? {} : { budget: resolvedBudgetEvidence(record.arm, policy, records, inspection, terminal)! }),
-    ...(resolvedScopeEvidence(record.arm, policy, records, inspection, state, terminal) === undefined ? {} : { scope: resolvedScopeEvidence(record.arm, policy, records, inspection, state, terminal)! }),
-  }), finalRoot: record.arm.materialization.root });
+    ...(budget === undefined ? {} : { budget }), ...(scope === undefined ? {} : { scope }),
+  }), finalRoot: record.materialization.root });
 }
-function invalidCanonicalResult(arm: FrozenM8Arm, classification: M8FailureClassification): M8EvidenceResult {
-  return Object.freeze({ scenario_id: arm.scenario_id, mode: arm.mode, run_id: arm.run_id, execution_authority_digest: arm.execution_authority_digest,
-    terminal_workflow_result: null, task_success: false, workflow_correctness: false, pilot_validity: false, failure_classification: classification,
-    verifier_identity: null, terminal_evidence_identity: null, final_postflight_identity: null, command_result_identity: null });
+function invalidCanonicalResult(record: AuthoritativeRunRecord, classification: M8FailureClassification): M8EvidenceResult {
+  const runtime = record.runtime;
+  return Object.freeze({ scenario_id: record.arm.scenario_id, mode: record.arm.mode, run_id: runtime?.run_id ?? null,
+    execution_authority_digest: runtime?.execution_authority_digest ?? null, terminal_workflow_result: null, task_success: false,
+    workflow_correctness: false, pilot_validity: false, failure_classification: classification, verifier_identity: null,
+    terminal_evidence_identity: null, final_postflight_identity: null, command_result_identity: null });
 }
 function resolutionClassification(error: unknown): M8FailureClassification {
   const detail = error instanceof Error ? error.message : "";
+  if (detail.startsWith("M8_STATIC_SLOT_MISMATCH")) return "ORCHESTRATION_DEFECT";
   return detail.startsWith("M8_HARNESS") || detail.startsWith("M8_DURABLE_AUTHORITY_INVALID") || detail.startsWith("M8_EVIDENCE_PUBLICATION_UNSAFE")
     ? "HARNESS_DEFECT" : "ENVIRONMENT_DEFECT";
 }
 async function deriveCanonicalResult(record: AuthoritativeRunRecord): Promise<M8EvidenceResult> {
   try {
-    const resolved = await resolveDurableEvidence(record);
+    const resolved = await resolveDurableEvidence(record); const arm = record.runtime!;
     const { verifyM8PilotBlindly } = await import("./pilot-verifier.js");
-    const verifier = await verifyM8PilotBlindly({ scenario: record.arm.scenario, initial: record.arm.materialization, finalRoot: resolved.finalRoot,
-      authoritativeEvidence: resolved.evidence, expectedRunId: record.arm.run_id, expectedExecutionAuthorityDigest: record.arm.execution_authority_digest });
-    return Object.freeze({ scenario_id: record.arm.scenario_id, mode: record.arm.mode, run_id: record.arm.run_id,
-      execution_authority_digest: record.arm.execution_authority_digest, terminal_workflow_result: resolved.evidence.terminal_workflow_result,
+    const verifier = await verifyM8PilotBlindly({ scenario: arm.scenario, initial: arm.materialization, finalRoot: resolved.finalRoot,
+      authoritativeEvidence: resolved.evidence, expectedRunId: arm.run_id, expectedExecutionAuthorityDigest: arm.execution_authority_digest });
+    return Object.freeze({ scenario_id: arm.scenario_id, mode: arm.mode, run_id: arm.run_id,
+      execution_authority_digest: arm.execution_authority_digest, terminal_workflow_result: resolved.evidence.terminal_workflow_result,
       task_success: verifier.task_success, workflow_correctness: verifier.workflow_correctness, pilot_validity: verifier.pilot_validity,
       failure_classification: null, verifier_identity: verifier.verifier_identity, terminal_evidence_identity: resolved.evidence.terminal_evidence_identity,
       final_postflight_identity: resolved.evidence.final_postflight_identity, command_result_identity: resolved.evidence.command_results[0]?.m4_result_identity ?? null });
-  } catch (error: unknown) { return invalidCanonicalResult(record.arm, resolutionClassification(error)); }
+  } catch (error: unknown) { return invalidCanonicalResult(record, resolutionClassification(error)); }
 }
 
 async function assertPublicationTargetAbsent(pathValue: string): Promise<void> {
@@ -1235,7 +1505,7 @@ export function m8Summary(freeze: M8FreezeResult, results: readonly M8EvidenceRe
   const ordered = [...results].sort((left, right) => `${left.scenario_id}--${left.mode}`.localeCompare(`${right.scenario_id}--${right.mode}`));
   const valid = ordered.filter((result) => result.pilot_validity); const completed = valid.filter((result) => result.terminal_workflow_result !== null);
   const classifications = ordered.filter((result) => !result.pilot_validity && result.failure_classification !== null).map((result) => result.failure_classification!).sort();
-  return Object.freeze({ protocol: "m8-summary-v3", fixture_bundle_identity: freeze.fixture_bundle_identity, matrix_identity: freeze.matrix_identity,
+  return Object.freeze({ protocol: "m8-summary-v4", fixture_bundle_identity: freeze.fixture_bundle_identity, matrix_identity: freeze.matrix_identity,
     planned_slots: freeze.arms.length, valid_completed_slots: completed.length, invalid_slots: ordered.length - valid.length,
     product_PASS_count: completed.filter((result) => result.terminal_workflow_result === "PASS").length,
     product_BLOCKED_count: completed.filter((result) => result.terminal_workflow_result === "BLOCKED").length,
@@ -1253,7 +1523,7 @@ export async function writeM8Evidence(invocation: M8Invocation, runs: readonly M
   const owner = await revalidatePublicationTree(invocation);
   const first = authoritativeRunRecords.get(runs[0]!); if (first === undefined) throw new Error("M8_AUTHORITATIVE_RUN_UNREGISTERED");
   const freeze = first.freeze; const approval = first.approval; assertFreeze(freeze); assertManifest(approval);
-  if (invocation !== freeze.invocation || first.invocation !== invocation) throw new Error("M8_EVIDENCE_INVOCATION_MISMATCH");
+  if (first.invocation !== invocation) throw new Error("M8_EVIDENCE_INVOCATION_MISMATCH");
   if (approval.fixture_bundle_identity !== freeze.fixture_bundle_identity || approval.matrix_identity !== freeze.matrix_identity) binding("evidence approval does not bind freeze matrix");
   const selected: AuthoritativeRunRecord[] = [];
   const slots = new Set<string>();
@@ -1277,11 +1547,14 @@ export async function writeM8Evidence(invocation: M8Invocation, runs: readonly M
   for (const record of selected) canonicalResults.push(await deriveCanonicalResult(record));
   const ordered = canonicalResults.sort((left, right) => `${left.scenario_id}--${left.mode}`.localeCompare(`${right.scenario_id}--${right.mode}`));
   const manifest = Object.freeze({ protocol: EVIDENCE_PROTOCOL, fixture_bundle_identity: freeze.fixture_bundle_identity, matrix_identity: freeze.matrix_identity,
-    approval_manifest_identity: approval.approval_manifest_identity, arms: freeze.arms.map((arm) => ({ scenario_id: arm.scenario_id, mode: arm.mode,
-      run_id: arm.run_id, execution_authority_digest: arm.execution_authority_digest, workspace_identity: arm.materialization.workspace_identity,
-      initial_state_identity: arm.materialization.initialStateIdentity })) });
+    approval_manifest_identity: approval.approval_manifest_identity,
+    static_slots: freeze.arms.map((arm) => ({ scenario_id: arm.scenario_id, mode: arm.mode, slot_execution_order: arm.slot_execution_order,
+      static_slot_spec_identity: arm.static_slot.static_slot_spec_identity })),
+    executed_slots: selected.map((record) => ({ scenario_id: record.arm.scenario_id, mode: record.arm.mode, slot_execution_order: record.arm.slot_execution_order,
+      run_id: record.runtime?.run_id ?? null, execution_authority_digest: record.runtime?.execution_authority_digest ?? null,
+      workspace_identity: record.materialization.workspace_identity, initial_state_identity: record.materialization.initialStateIdentity })) });
   await publishCanonicalOwned(invocation, "EVIDENCE", "manifest.json", manifest);
-  await publishCanonicalOwned(invocation, "EVIDENCE", "approval-request.json", freeze.arms.map((arm) => arm.approval_request));
+  await publishCanonicalOwned(invocation, "EVIDENCE", "approval-request.json", freeze.arms.map((arm) => arm.static_slot));
   await publishCanonicalOwned(invocation, "EVIDENCE", "approval-manifest.json", approval);
   for (const result of ordered) await publishCanonicalOwned(invocation, "RESULTS", `${result.scenario_id}--${result.mode}.json`, result);
   await publishCanonicalOwned(invocation, "EVIDENCE", "summary.json", m8Summary(freeze, ordered));
