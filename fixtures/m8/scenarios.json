@@ -124,7 +124,7 @@
           "tasks": [
             {
               "task_id": "direct-m8-s01",
-              "objective": "Own frozen objective.",
+              "objective": "Mutate only src/service-a.conf and src/service-b.conf.\nIn each file, replace exactly:\n\nlog_level=info\\n\n\nwith:\n\nlog_level=warning\\n",
               "editable_paths": [
                 "src/service-a.conf",
                 "src/service-b.conf"
