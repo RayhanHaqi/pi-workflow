@@ -1593,7 +1593,7 @@ export interface BoundedPiAgentResult {
 async function publicCredentialStore(providerId: string): Promise<CredentialStoreRuntime> {
   const coding = record(await import(CODING_AGENT_MODULE_SPECIFIER), "Pi coding-agent public module");
   const reader = callable(coding["readStoredCredential"], "Pi public credential reader");
-  const credential = await promiseResult(reader(providerId), "Pi public credential reader");
+  const credential = reader(providerId);
   if (credential === undefined) fail("AUTHORITY_REJECTED", "Pi credential authority is unavailable", "CREDENTIAL");
   const ai = record(await import(AI_MODULE_SPECIFIER), "Pi AI public module");
   const Store = ai["InMemoryCredentialStore"];
