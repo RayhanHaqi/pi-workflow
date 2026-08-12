@@ -37,6 +37,7 @@ import {
   type BoundedMutationAuthority,
   type BoundedMutationGoal,
   type BoundedMutationRunResult,
+  type ExternalLifecycleDiagnosticEvidence,
 } from "../workflow-controller.js";
 import type { M8AuthoritativeWorkflowEvidence } from "./pilot-verifier.js";
 
@@ -292,6 +293,23 @@ export interface M8AuthoritativeRun {
   readonly run_identity: string;
 }
 
+/** Package-internal read-only result projection for a registered M8 run handle. */
+export interface M8AuthoritativeRunObservation {
+  readonly run_identity: string;
+  readonly workflow: Readonly<{
+    readonly outcome: BoundedMutationRunResult["outcome"];
+    readonly reason: string;
+  }>;
+  readonly result_transport: Readonly<{
+    readonly recognized_result_received: boolean;
+    readonly malformed_result_received: boolean;
+  }>;
+  readonly lifecycle: Readonly<{
+    readonly diagnostic_present: boolean;
+    readonly diagnostic: ExternalLifecycleDiagnosticEvidence | null;
+  }>;
+}
+
 type DirectoryRole = "INVOCATION_ROOT" | "WORKSPACES" | "EVIDENCE" | "RESULTS" | "RETAINED" | "CONTROLLER_ROOT" | "CONTROLLER_STATE";
 interface DirectoryRegistration {
   readonly path: string;
@@ -353,6 +371,39 @@ interface AuthoritativeRunRecord {
 const invocationRecords = new Map<M8Invocation, InvocationRecord>();
 const workspaceRecords = new Map<MaterializedM8Fixture, WorkspaceRecord>();
 const authoritativeRunRecords = new Map<M8AuthoritativeRun, AuthoritativeRunRecord>();
+
+function copyExternalLifecycleDiagnostic(diagnostic: ExternalLifecycleDiagnosticEvidence): ExternalLifecycleDiagnosticEvidence {
+  const copyError = (value: ExternalLifecycleDiagnosticEvidence["spawnError"]) => value === null ? null : Object.freeze({ errorClass: value.errorClass, message: value.message });
+  return Object.freeze({
+    childPid: diagnostic.childPid, childExecPath: diagnostic.childExecPath, childCwd: diagnostic.childCwd,
+    spawnObserved: diagnostic.spawnObserved, spawnError: copyError(diagnostic.spawnError), processError: copyError(diagnostic.processError),
+    startSendAttempted: diagnostic.startSendAttempted, startSendCallback: diagnostic.startSendCallback, startSendError: copyError(diagnostic.startSendError),
+    ipcMessageReceived: diagnostic.ipcMessageReceived, firstIpcMessageKind: diagnostic.firstIpcMessageKind,
+    recognizedResultReceived: diagnostic.recognizedResultReceived, malformedResultReceived: diagnostic.malformedResultReceived, ipcDisconnected: diagnostic.ipcDisconnected,
+    exitObserved: diagnostic.exitObserved, exitCode: diagnostic.exitCode, exitSignal: diagnostic.exitSignal,
+    closeObserved: diagnostic.closeObserved, closeCode: diagnostic.closeCode, closeSignal: diagnostic.closeSignal,
+    childExitPhase: diagnostic.childExitPhase, stderrTail: diagnostic.stderrTail, stderrTailTruncated: diagnostic.stderrTailTruncated,
+  });
+}
+
+/** Test-only observation of an already registered result; it cannot create or alter M8 authority. */
+export function observeM8AuthoritativeRunForTests(value: M8AuthoritativeRun): M8AuthoritativeRunObservation {
+  const record = authoritativeRunRecords.get(value);
+  if (record === undefined) throw new Error("M8_AUTHORITATIVE_RUN_UNREGISTERED");
+  const diagnostic = record.controllerResult.lifecycleDiagnostic;
+  // The external lifecycle contract omits diagnostics after its parent receives
+  // a recognized RESULT. Otherwise its retained diagnostic carries both flags.
+  const resultTransport = diagnostic === undefined
+    ? Object.freeze({ recognized_result_received: true, malformed_result_received: false })
+    : Object.freeze({ recognized_result_received: diagnostic.recognizedResultReceived, malformed_result_received: diagnostic.malformedResultReceived });
+  const lifecycleDiagnostic = diagnostic === undefined ? null : copyExternalLifecycleDiagnostic(diagnostic);
+  return Object.freeze({
+    run_identity: value.run_identity,
+    workflow: Object.freeze({ outcome: record.controllerResult.outcome, reason: record.controllerResult.reason }),
+    result_transport: resultTransport,
+    lifecycle: Object.freeze({ diagnostic_present: lifecycleDiagnostic !== null, diagnostic: lifecycleDiagnostic }),
+  });
+}
 
 function invalid(detail: string): never { throw new Error(`M8_FIXTURE_INVALID: ${detail}`); }
 function binding(detail: string): never { throw new Error(`M8_APPROVAL_BINDING_MISMATCH: ${detail}`); }

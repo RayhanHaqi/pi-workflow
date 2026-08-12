@@ -26,8 +26,10 @@ import {
   m8StaticSlotProjection,
   m8StaticSlotSpecification,
   materializeM8Fixture,
+  observeM8AuthoritativeRunForTests,
   semanticFixtureIdentity,
   parseM8FixtureBundle,
+  runOneM8Arm,
   runOneM8ArmForTests,
   writeM8Evidence,
   type M8AcceptanceFact,
@@ -344,6 +346,89 @@ test("runtime canonical-baseline mismatch blocks before worker reservation or fa
     assert.equal(records.boundedWorkerInvocations.length, 0, "no bounded invocation or faux provider work exists");
   } finally {
     configureBoundedWorkerFauxRuntimeForTests();
+    if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
+    if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("M8-HOST-01 production runOneM8Arm static mismatch returns recognized BLOCKED before productive authority", async () => {
+  const all = await bundle(); const s01 = scenario(all, "M8-S01"); const parent = await mkdtemp(join(tmpdir(), "m8-host-01-"));
+  let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
+  try {
+    const primaryBefore = await resolveRepositoryIdentity({ requestedPath: process.cwd(), requireHead: true }); const primaryGitBefore = await captureGitState(primaryBefore);
+    freeze = await freezeM8Scenario(all, s01, ["DIRECT_LUNA_HIGH"], (await staticPlanBaselineFixture()).options);
+    assert.equal(freeze.arms.length, 1); const arm = freeze.arms[0]!; const runtimeStaticSlot = arm.static_slot;
+    assert.deepEqual(s01.required_outputs, ["src/service-a.conf", "src/service-b.conf"], "S01 retains its two required service outputs");
+    assert.equal(runtimeStaticSlot.static_slot_projection.fixture_identity, semanticFixtureIdentity(s01), "the local static input binds canonical S01");
+    const approvedProjection = Object.freeze({ ...runtimeStaticSlot.static_slot_projection,
+      static_budgets: Object.freeze({ ...runtimeStaticSlot.static_slot_projection.static_budgets, max_tool_calls: runtimeStaticSlot.static_slot_projection.static_budgets.max_tool_calls + 1 }) });
+    const approvedStaticSlot = m8StaticSlotSpecification(approvedProjection);
+    assert.deepEqual({ ...approvedProjection, static_budgets: { ...approvedProjection.static_budgets, max_tool_calls: runtimeStaticSlot.static_slot_projection.static_budgets.max_tool_calls } }, runtimeStaticSlot.static_slot_projection,
+      "the controlled mismatch changes exactly static_budgets.max_tool_calls");
+    assert.notEqual(approvedStaticSlot.static_slot_spec_identity, runtimeStaticSlot.static_slot_spec_identity,
+      `approved=${approvedStaticSlot.static_slot_spec_identity} runtime=${runtimeStaticSlot.static_slot_spec_identity}`);
+    const approval = createM8ApprovalManifest(freeze, [approvedStaticSlot]); invocation = await createM8InvocationRoot(parent);
+    const invocationRoots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(invocationRoots.length, 1);
+    const invocationRoot = join(parent, invocationRoots[0]!); assert.equal((await lstat(invocationRoot)).isDirectory(), true, "registered M8 invocation root exists");
+    assert.deepEqual(await readdir(join(invocationRoot, "workspaces")), [], "materialization has not occurred before the production arm starts");
+
+    const handle = await runOneM8Arm(invocation, freeze, arm, approval);
+    const firstObservation = observeM8AuthoritativeRunForTests(handle);
+    const approvalMismatchReason = "EXECUTION_APPROVAL_MISMATCH: exact final Contract-bound execution authority or PlanApproval was not supplied";
+    const expectedWorkflowReason = `${approvalMismatchReason}; BLOCKED_EXTERNAL_COMPLETION_RECONCILIATION:M2=M2 completion authority is healthy;M3=UNCHANGED_CLEAN:repository exactly matches the approved baseline`;
+    assert.equal(firstObservation.run_identity, handle.run_identity);
+    assert.equal(firstObservation.workflow.outcome, "BLOCKED"); assert.equal(firstObservation.workflow.reason, expectedWorkflowReason);
+    assert.deepEqual(firstObservation.result_transport, { recognized_result_received: true, malformed_result_received: false });
+    assert.deepEqual(firstObservation.lifecycle, { diagnostic_present: false, diagnostic: null });
+
+    const workspaces = await readdir(join(invocationRoot, "workspaces")); assert.equal(workspaces.length, 1);
+    const workspace = join(invocationRoot, "workspaces", workspaces[0]!); const workspaceRepository = await resolveRepositoryIdentity({ requestedPath: workspace, requireHead: true });
+    const workspaceGit = await captureGitState(workspaceRepository);
+    assert.equal(workspaceRepository.worktree_root, workspace, "materialization is a synthetic Git repository");
+    assert.equal(workspaceGit.dirty, false, "the static mismatch leaves the materialized workspace clean");
+    for (const file of s01.initial_files) assert.deepEqual(await readFile(join(workspace, file.path)), Buffer.from(file.bytes_base64, "base64"), `materialized S01 fixture preserved ${file.path}`);
+    const retained = join(invocationRoot, "retained"); assert.equal((await lstat(retained)).isDirectory(), true, "registered retained root exists");
+    const controllerRoots = await readdir(retained); assert.equal(controllerRoots.length, 1); const stateRoot = join(retained, controllerRoots[0]!, "state");
+    const runIds = await readdir(join(stateRoot, "runs")); assert.equal(runIds.length, 1); const runId = runIds[0]!;
+
+    const actual: ActualRun = { parent, root: invocationRoot, invocation, freeze, arm, handle };
+    const runtimeProjectionValue = await runtimeProjection(actual); const nativeRuntimeIdentity = m8StaticSlotIdentity(runtimeProjectionValue);
+    assert.equal(nativeRuntimeIdentity, runtimeStaticSlot.static_slot_spec_identity, "the persisted native authority recomputes the runtime static identity");
+    assert.notEqual(nativeRuntimeIdentity, approvedStaticSlot.static_slot_spec_identity,
+      `approved=${approvedStaticSlot.static_slot_spec_identity} runtime=${nativeRuntimeIdentity}`);
+
+    const [inspectionBefore, recordsBefore] = await Promise.all([inspectRunStorage({ stateRoot, runId }), readM5ManagedRecords({ stateRoot, runId })]);
+    assert.equal(inspectionBefore.status, "HEALTHY"); assert.equal(inspectionBefore.workflowState?.phase, "BLOCKED"); assert.equal(inspectionBefore.workflowState?.terminal_reason, approvalMismatchReason);
+    assert.equal(recordsBefore.baselines.length, 1); assert.equal(recordsBefore.baselines[0]!.repository.worktree_root, workspace, "the external WORKFLOW child bootstrapped with the materialized workspace as cwd");
+    assert.equal(recordsBefore.decisions.some((decision) => decision.intent === "VALIDATE_CONTRACT"), true, "native controller bootstrap reached M5 validation");
+    assert.equal(recordsBefore.decisions.some((decision) => decision.intent === "SELECT_ROUTE"), true, "native controller bootstrap reached M5 route selection");
+    assert.equal(recordsBefore.decisions.filter((decision) => decision.intent === "AUTHORIZE_WORK" && decision.reservation !== null).length, 0, "no M5 AUTHORIZE_WORK reservation exists");
+    assert.equal(recordsBefore.decisions.some((decision) => decision.intent === "AUTHORIZE_WORK"), false, "the static mismatch reaches the approval boundary before worker authorization");
+    assert.equal(recordsBefore.boundedWorkerInvocations.length, 0, "no bounded-worker invocation exists"); assert.equal(recordsBefore.boundedWorkerResults.length, 0, "no bounded-worker result exists");
+    assert.equal(recordsBefore.usage.length, 0, "no M5 usage evidence exists");
+    assert.equal(recordsBefore.toolResults.length + recordsBefore.mutationReceipts.length + recordsBefore.commandResults.length + recordsBefore.admissionRefusals.length, 0, "no accepted M4 evidence exists");
+    assert.equal(recordsBefore.boundedWorkerResults.reduce((total, result) => total + result.actual_usage.m4_tool_calls, 0), 0, "accepted M4 usage is zero");
+
+    assert.equal(Object.isFrozen(firstObservation), true); assert.equal(Object.isFrozen(firstObservation.workflow), true); assert.equal(Object.isFrozen(firstObservation.result_transport), true); assert.equal(Object.isFrozen(firstObservation.lifecycle), true);
+    let mutationThrew = false;
+    try { (firstObservation as unknown as { workflow: { reason: string } }).workflow.reason = "forged"; }
+    catch { mutationThrew = true; }
+    assert.equal(mutationThrew || firstObservation.workflow.reason === expectedWorkflowReason, true, "the observed copy cannot be mutated");
+    const secondObservation = observeM8AuthoritativeRunForTests(handle);
+    assert.notEqual(secondObservation, firstObservation, "each observation is a detached projection"); assert.deepEqual(secondObservation, firstObservation, "a second observation retains the original values");
+    assert.throws(() => observeM8AuthoritativeRunForTests(forgedHandle()), /M8_AUTHORITATIVE_RUN_UNREGISTERED/);
+    assert.throws(() => observeM8AuthoritativeRunForTests(Object.freeze({}) as unknown as M8AuthoritativeRun), /M8_AUTHORITATIVE_RUN_UNREGISTERED/);
+
+    const [inspectionAfter, recordsAfter] = await Promise.all([inspectRunStorage({ stateRoot, runId }), readM5ManagedRecords({ stateRoot, runId })]);
+    const counts = (records: Awaited<ReturnType<typeof readM5ManagedRecords>>) => ({ reservations: records.decisions.filter((decision) => decision.intent === "AUTHORIZE_WORK" && decision.reservation !== null).length,
+      invocations: records.boundedWorkerInvocations.length, results: records.boundedWorkerResults.length, usage: records.usage.length,
+      m4: records.toolResults.length + records.mutationReceipts.length + records.commandResults.length + records.admissionRefusals.length });
+    assert.deepEqual(counts(recordsAfter), counts(recordsBefore), "observing does not alter durable productive authority");
+    assert.deepEqual(inspectionAfter.workflowState, inspectionBefore.workflowState, "observing does not alter the terminal result");
+    const primaryAfter = await resolveRepositoryIdentity({ requestedPath: process.cwd(), requireHead: true }); const primaryGitAfter = await captureGitState(primaryAfter);
+    assert.deepEqual(primaryAfter, primaryBefore, "the primary repository identity remains unchanged"); assert.deepEqual(primaryGitAfter, primaryGitBefore, "the primary repository Git state remains unchanged");
+  } finally {
     if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
     if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
     await rm(parent, { recursive: true, force: true });
