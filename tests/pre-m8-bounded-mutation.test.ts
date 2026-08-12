@@ -22,7 +22,7 @@ import {
   type BoundedMutationGoal,
 } from "../src/workflow-controller.js";
 import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
-import { configureM6FauxRuntimeForTests, runBoundedPiAgent, runBoundedPiAgentForTests } from "../src/pi-adapter/worker.js";
+import { configureM6FauxRuntimeForTests, M6WorkerError, runBoundedPiAgent, runBoundedPiAgentForTests } from "../src/pi-adapter/worker.js";
 import { assertDocumentValid, identifyContractDocument } from "../src/schemas/index.js";
 import { createM5R3Fixture, directFastPreflightFixture, removeM5R3Fixture, r3ProcessMetadata } from "./m5-r3-fixtures.js";
 
@@ -490,17 +490,50 @@ test("cleanup uncertainty and lock-release uncertainty never produce an outward 
   });
 });
 
-test("bounded-worker result preserves unavailable telemetry as null", () => {
-  const result = identifyContractDocument("pi_gacw_bounded_worker_result_v0", {
-    schema_id: "pi_gacw_bounded_worker_result_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
-    invocation_content_sha256: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-    outcome: "COMPLETED", first_failure_code: null, first_failure_stage: null, m3_evidence_content_sha256: [], m4_evidence_content_sha256: [],
-    actual_usage: { worker_invocations: 1, m4_tool_calls: 0, model_turns: null, provider_requests: null, input_tokens: null, output_tokens: null, cost_microusd: null, wall_time_ms: 0 },
-    cleanup_certain: true, advisory_report: null, completed_at: "2026-01-01T00:00:00.000Z",
+test("M6WorkerError diagnostics reach the bounded-worker result safely and remain optional", async () => {
+  const root = await fixture();
+  const retained = await mkdtemp(join(tmpdir(), "pre-m8-retained-"));
+  const rawMessage = `bounded\u0000diagnostic\r\nmessage\u007f ${"x".repeat(1_024)}`;
+  const expectedPrefix = "bounded diagnostic message ";
+  configureM6FauxRuntimeForTests({ providerId: "bounded-faux", modelId: "bounded-faux-model" }, () => {
+    throw new M6WorkerError("RUNTIME_CAPABILITY_INVALID", rawMessage, "RUNTIME_GUARD");
   });
-  assertDocumentValid("pi_gacw_bounded_worker_result_v0", result);
-  assert.equal(result.actual_usage.model_turns, null);
-  assert.equal(result.actual_usage.provider_requests, null);
+  try {
+    const execution = await run(root, goal("DIRECT_LUNA_HIGH"), {
+      async execute({ systemPrompt, userPrompt, maxModelTurns, deadlineMs, signal }) {
+        return runBoundedPiAgentForTests({
+          providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt, userPrompt, tools: [], maxModelTurns, deadlineMs,
+          ...(signal === undefined ? {} : { signal }),
+        });
+      },
+    }, { retainedArtifactRoot: retained });
+    assert.equal(execution.outcome, "BLOCKED");
+    assert.ok(execution.evidenceRoot !== undefined);
+    const records = await readM5ManagedRecords({ stateRoot: join(execution.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+    const result = records.boundedWorkerResults.find((entry) => entry.outcome === "BLOCKED");
+    assert.notEqual(result, undefined);
+    assert.equal(result!.first_failure_code, "RUNTIME_CAPABILITY_INVALID");
+    assert.equal(result!.first_failure_stage, "RUNTIME_GUARD");
+    assert.equal(result!.first_failure_message, `${expectedPrefix}${"x".repeat(512 - expectedPrefix.length)}`);
+    assert.equal(result!.first_failure_message!.length, 512);
+    assert.doesNotMatch(result!.first_failure_message!, /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u);
+
+    const withoutDiagnostic = identifyContractDocument("pi_gacw_bounded_worker_result_v0", {
+      schema_id: "pi_gacw_bounded_worker_result_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+      invocation_content_sha256: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      outcome: "COMPLETED", first_failure_code: null, first_failure_stage: null, m3_evidence_content_sha256: [], m4_evidence_content_sha256: [],
+      actual_usage: { worker_invocations: 1, m4_tool_calls: 0, model_turns: null, provider_requests: null, input_tokens: null, output_tokens: null, cost_microusd: null, wall_time_ms: 0 },
+      cleanup_certain: true, advisory_report: null, completed_at: "2026-01-01T00:00:00.000Z",
+    });
+    assertDocumentValid("pi_gacw_bounded_worker_result_v0", withoutDiagnostic);
+    assert.equal(Object.hasOwn(withoutDiagnostic, "first_failure_message"), false);
+    assert.equal(withoutDiagnostic.actual_usage.model_turns, null);
+    assert.equal(withoutDiagnostic.actual_usage.provider_requests, null);
+  } finally {
+    configureM6FauxRuntimeForTests(undefined);
+    await rm(retained, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("test-only bounded runtime requires explicit registered provenance", async () => {

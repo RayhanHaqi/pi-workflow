@@ -22,6 +22,17 @@ import {
 export type BoundedWorkerToolProfile = "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT";
 type M4AdmissionRefusalCode = "M4_TOOL_BUDGET_EXHAUSTED" | "OUT_OF_SCOPE_WRITE";
 
+const MAX_FIRST_FAILURE_MESSAGE_LENGTH = 512;
+
+/** Retain only a compact, log-safe M6 diagnostic; never retain an Error object or stack. */
+function boundedFailureMessage(message: string | undefined): string | undefined {
+  if (message === undefined) return undefined;
+  const utf8 = Buffer.from(message.slice(0, MAX_FIRST_FAILURE_MESSAGE_LENGTH * 4), "utf8").toString("utf8");
+  const normalized = utf8.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ").replace(/\s+/gu, " ").trim();
+  const bounded = [...normalized].slice(0, MAX_FIRST_FAILURE_MESSAGE_LENGTH).join("");
+  return bounded.length === 0 ? undefined : bounded;
+}
+
 export interface BoundedWorkerRoute {
   readonly logicalRole: "LUNA_EXECUTOR" | "SOL_OWNER" | "SOL_PLANNER" | "SOL_CLOSEOUT";
   readonly providerId: string;
@@ -60,6 +71,7 @@ export interface BoundedWorkerRuntime {
     readonly completed: boolean;
     readonly firstFailureCode?: string;
     readonly firstFailureStage?: string;
+    readonly firstFailureMessage?: string;
     readonly modelTurns?: number | null;
     readonly providerRequests?: number | null;
     readonly inputTokens?: number | null;
@@ -329,7 +341,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
   };
 
   let report: Awaited<ReturnType<BoundedWorkerRuntime["execute"]>> | undefined;
-  let first: { readonly code: string; readonly stage: string } | null = null;
+  let first: { readonly code: string; readonly stage: string; readonly message?: string } | null = null;
   try {
     if (cancelled(input.signal)) throw abortError("PRE_PROVIDER_ADMISSION");
     report = await runtime.execute({
@@ -340,7 +352,11 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     if (cancelled(input.signal)) first = { code: "WORKER_ABORTED", stage: "POST_RUNTIME" };
     else if (terminalRefusal !== null) first = terminalRefusal;
     else if (!report.completed) {
-      const reported = { code: report.firstFailureCode ?? "WORKER_BLOCKED", stage: report.firstFailureStage ?? "BOUNDED_WORKER" };
+      const reported = {
+        code: report.firstFailureCode ?? "WORKER_BLOCKED",
+        stage: report.firstFailureStage ?? "BOUNDED_WORKER",
+        ...(report.firstFailureMessage === undefined ? {} : { message: report.firstFailureMessage }),
+      };
       first = reported.stage === BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE ? { ...reported, stage: "BOUNDED_WORKER" } : reported;
     }
   } catch (error: unknown) {
@@ -350,6 +366,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
   const cleanupCertain = report?.cleanupCertain === true;
   const completed = first === null && report?.completed === true && cleanupCertain;
   if (!completed && first === null) first = { code: "CLEANUP_UNCERTAIN", stage: "CLEANUP" };
+  const firstFailureMessage = boundedFailureMessage(first?.message);
   const result = identifyContractDocument("pi_gacw_bounded_worker_result_v0", {
     schema_id: "pi_gacw_bounded_worker_result_v0",
     schema_version: "0.1.0",
@@ -358,6 +375,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     outcome: completed ? "COMPLETED" : "BLOCKED",
     first_failure_code: first?.code ?? null,
     first_failure_stage: first?.stage ?? null,
+    ...(firstFailureMessage === undefined ? {} : { first_failure_message: firstFailureMessage }),
     m3_evidence_content_sha256: [...m3Evidence].sort(),
     m4_evidence_content_sha256: [...m4Evidence].sort(),
     actual_usage: {

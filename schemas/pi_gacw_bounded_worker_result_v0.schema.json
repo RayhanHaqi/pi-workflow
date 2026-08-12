@@ -59,6 +59,11 @@
         }
       ]
     },
+    "first_failure_message": {
+      "minLength": 1,
+      "maxLength": 512,
+      "type": "string"
+    },
     "m3_evidence_content_sha256": {
       "uniqueItems": true,
       "maxItems": 100000,

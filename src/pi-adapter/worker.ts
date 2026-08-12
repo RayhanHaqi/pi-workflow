@@ -1580,6 +1580,8 @@ export interface BoundedPiAgentResult {
   readonly completed: boolean;
   readonly firstFailureCode?: string;
   readonly firstFailureStage?: string;
+  /** Bounded worker diagnostic from an internal M6WorkerError only. */
+  readonly firstFailureMessage?: string;
   readonly modelTurns: number | null;
   readonly providerRequests: number | null;
   readonly inputTokens: number | null;
@@ -1635,14 +1637,16 @@ async function runBoundedPiAgentImpl(
   let timer: NodeJS.Timeout | undefined;
   let abortListener: (() => void) | undefined;
   let prompt: Promise<void> | undefined;
-  let firstFailure: { code: string; stage: string } | undefined;
+  let firstFailure: { code: string; stage: string; message?: string } | undefined;
   let providerRequests = 0;
   let generationStarts = 0;
   let settledGenerationTurns = 0;
   let promptSettled = false;
   let idle = false;
   let cleanupCertain = true;
-  const latch = (code: string, stage: string): void => { firstFailure ??= { code: code.slice(0, 128), stage: stage.slice(0, 128) }; };
+  const latch = (code: string, stage: string, message?: string): void => {
+    firstFailure ??= { code: code.slice(0, 128), stage: stage.slice(0, 128), ...(message === undefined ? {} : { message }) };
+  };
   const rejectCancelled = (stage: string): void => {
     if (input.signal?.aborted !== true) return;
     latch("WORKER_ABORTED", stage);
@@ -1724,11 +1728,14 @@ async function runBoundedPiAgentImpl(
     rejectCancelled("PROMPT_ADMISSION");
     prompt = agent.prompt(input.userPrompt);
     try { await prompt; promptSettled = true; }
-    catch (error: unknown) { promptSettled = true; latch(error instanceof Error ? error.name : "PROMPT_FAILED", "PROMPT"); }
+    catch (error: unknown) {
+      promptSettled = true;
+      latch(error instanceof M6WorkerError ? error.code : error instanceof Error ? error.name : "PROMPT_FAILED", error instanceof M6WorkerError ? error.stage : "PROMPT", error instanceof M6WorkerError ? error.message : undefined);
+    }
     try { await agent.waitForIdle(); idle = true; }
-    catch (error: unknown) { latch(error instanceof Error ? error.name : "AGENT_IDLE", "IDLE"); }
+    catch (error: unknown) { latch(error instanceof M6WorkerError ? error.code : error instanceof Error ? error.name : "AGENT_IDLE", error instanceof M6WorkerError ? error.stage : "IDLE", error instanceof M6WorkerError ? error.message : undefined); }
   } catch (error: unknown) {
-    latch(error instanceof M6WorkerError ? error.code : error instanceof Error ? error.name : "RUNTIME_FAILURE", error instanceof M6WorkerError ? error.stage : "RUNTIME");
+    latch(error instanceof M6WorkerError ? error.code : error instanceof Error ? error.name : "RUNTIME_FAILURE", error instanceof M6WorkerError ? error.stage : "RUNTIME", error instanceof M6WorkerError ? error.message : undefined);
   } finally {
     if (input.signal !== undefined && abortListener !== undefined) input.signal.removeEventListener("abort", abortListener);
     if (timer !== undefined) clearTimeout(timer);
@@ -1749,7 +1756,11 @@ async function runBoundedPiAgentImpl(
   const completed = firstFailure === undefined && cleanupCertain && promptSettled && idle;
   return {
     completed,
-    ...(firstFailure === undefined && cleanupCertain ? {} : { firstFailureCode: firstFailure?.code ?? "CLEANUP_UNCERTAIN", firstFailureStage: firstFailure?.stage ?? "CLEANUP" }),
+    ...(firstFailure === undefined && cleanupCertain ? {} : {
+      firstFailureCode: firstFailure?.code ?? "CLEANUP_UNCERTAIN",
+      firstFailureStage: firstFailure?.stage ?? "CLEANUP",
+      ...(firstFailure?.message === undefined ? {} : { firstFailureMessage: firstFailure.message }),
+    }),
     modelTurns: generationStarts,
     providerRequests,
     inputTokens: null,

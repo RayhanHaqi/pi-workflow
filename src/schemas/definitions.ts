@@ -2110,6 +2110,7 @@ export const BoundedWorkerResultSchema = StrictObject(
     outcome: Type.Union([Type.Literal("COMPLETED"), Type.Literal("BLOCKED")]),
     first_failure_code: Type.Union([NonEmptyString(128), Type.Null()]),
     first_failure_stage: Type.Union([NonEmptyString(128), Type.Null()]),
+    first_failure_message: Type.Optional(NonEmptyString(512)),
     m3_evidence_content_sha256: Type.Array(Digest(), { uniqueItems: true, maxItems: 100_000 }),
     m4_evidence_content_sha256: Type.Array(Digest(), { uniqueItems: true, maxItems: 100_000 }),
     actual_usage: BoundedWorkerTelemetrySchema,
