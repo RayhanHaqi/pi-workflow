@@ -32,12 +32,14 @@ import {
 } from "../schemas/index.js";
 import {
   runBoundedMutationWorkflow,
+  runBoundedMutationWorkflowExternalForTests,
   runBoundedMutationWorkflowForTests,
   type BoundedExecutionAuthority,
   type BoundedMutationAuthority,
   type BoundedMutationGoal,
   type BoundedMutationRunResult,
   type ExternalLifecycleDiagnosticEvidence,
+  type ExternalLifecycleFixtureMode,
 } from "../workflow-controller.js";
 import type { M8AuthoritativeWorkflowEvidence } from "./pilot-verifier.js";
 
@@ -289,6 +291,8 @@ export interface M8EvidenceResult {
   readonly terminal_evidence_identity: Sha256Digest | null;
   readonly final_postflight_identity: Sha256Digest | null;
   readonly command_result_identity: Sha256Digest | null;
+  /** Optional observation only; it does not participate in canonical authority or validity. */
+  readonly lifecycle_diagnostic?: ExternalLifecycleDiagnosticEvidence;
 }
 
 /** Opaque registered result of one actual bounded-controller execution. */
@@ -1409,6 +1413,10 @@ export async function runOneM8Arm(invocation: M8Invocation, freeze: M8FreezeResu
 export async function runOneM8ArmForTests(invocation: M8Invocation, freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest, options: M8RunOptions = {}): Promise<M8AuthoritativeRun> {
   return runApprovedM8Arm(invocation, freeze, arm, manifest, runBoundedMutationWorkflowForTests, options);
 }
+/** Test-only lifecycle fixture entrypoint; it registers the existing controller result without changing M8 authority. */
+export async function runOneM8ArmExternalLifecycleForTests(invocation: M8Invocation, freeze: M8FreezeResult, arm: FrozenM8Arm, manifest: M8ApprovalManifest, mode: ExternalLifecycleFixtureMode): Promise<M8AuthoritativeRun> {
+  return runApprovedM8Arm(invocation, freeze, arm, manifest, async (goal, options) => runBoundedMutationWorkflowExternalForTests(goal, options, mode), {});
+}
 export function activeM8ArmForTests(): string | null { return activeArm; }
 
 function terminalDecision(
@@ -1648,7 +1656,8 @@ function invalidCanonicalResult(record: AuthoritativeRunRecord, classification: 
   return Object.freeze({ scenario_id: record.arm.scenario_id, mode: record.arm.mode, run_id: runtime?.run_id ?? null,
     execution_authority_digest: runtime?.execution_authority_digest ?? null, terminal_workflow_result: null, task_success: false,
     workflow_correctness: false, pilot_validity: false, failure_classification: classification, verifier_identity: null,
-    terminal_evidence_identity: null, final_postflight_identity: null, command_result_identity: null });
+    terminal_evidence_identity: null, final_postflight_identity: null, command_result_identity: null,
+    ...(record.controllerResult.lifecycleDiagnostic === undefined ? {} : { lifecycle_diagnostic: copyExternalLifecycleDiagnostic(record.controllerResult.lifecycleDiagnostic) }) });
 }
 function resolutionClassification(error: unknown): M8FailureClassification {
   const detail = error instanceof Error ? error.message : "";
@@ -1666,7 +1675,8 @@ async function deriveCanonicalResult(record: AuthoritativeRunRecord): Promise<M8
       execution_authority_digest: arm.execution_authority_digest, terminal_workflow_result: resolved.evidence.terminal_workflow_result,
       task_success: verifier.task_success, workflow_correctness: verifier.workflow_correctness, pilot_validity: verifier.pilot_validity,
       failure_classification: null, verifier_identity: verifier.verifier_identity, terminal_evidence_identity: resolved.evidence.terminal_evidence_identity,
-      final_postflight_identity: resolved.evidence.final_postflight_identity, command_result_identity: resolved.evidence.command_results[0]?.m4_result_identity ?? null });
+      final_postflight_identity: resolved.evidence.final_postflight_identity, command_result_identity: resolved.evidence.command_results[0]?.m4_result_identity ?? null,
+      ...(record.controllerResult.lifecycleDiagnostic === undefined ? {} : { lifecycle_diagnostic: copyExternalLifecycleDiagnostic(record.controllerResult.lifecycleDiagnostic) }) });
   } catch (error: unknown) { return invalidCanonicalResult(record, resolutionClassification(error)); }
 }
 

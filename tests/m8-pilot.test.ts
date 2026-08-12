@@ -31,6 +31,7 @@ import {
   semanticFixtureIdentity,
   parseM8FixtureBundle,
   runOneM8Arm,
+  runOneM8ArmExternalLifecycleForTests,
   runOneM8ArmForTests,
   writeM8Evidence,
   type M8AcceptanceFact,
@@ -177,6 +178,20 @@ async function disposeActual(value: ActualRun): Promise<void> {
   await disposeM8Freeze(value.freeze).catch(() => undefined);
   await disposeM8Invocation(value.invocation).catch(() => undefined);
   await rm(value.parent, { recursive: true, force: true });
+}
+async function createLifecycleDiagnosticActualRun(mode: "EARLY_EXIT" | "MALFORMED_RESULT"): Promise<ActualRun> {
+  const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-lifecycle-diagnostic-"));
+  let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
+  try {
+    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"], (await staticPlanBaselineFixture()).options); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(parent); await newlyAllocatedRetainedRuntimeRoot(retainedBefore);
+    const arm = freeze.arms[0]!; const handle = await runOneM8ArmExternalLifecycleForTests(invocation, freeze, arm, approvalFor(freeze), mode);
+    const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-"));
+    assert.equal(roots.length, 1); return { parent, root: join(parent, roots[0]!), invocation, freeze, arm, handle };
+  } catch (error: unknown) {
+    if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
+    if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true }); throw error;
+  }
 }
 
 async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DIRECT_LUNA_HIGH", options: M8RunOptions = {}): Promise<ActualRun> {
@@ -613,6 +628,38 @@ test("H02-T01 through H02-T05 durable authority cannot be caller-forged", async 
       assert.equal(result["terminal_workflow_result"], null); assert.equal(result["pilot_validity"], false); assert.equal(result["failure_classification"], "HARNESS_DEFECT");
     });
   } finally { await disposeActual(actual); }
+});
+
+test("M8 canonical lifecycle diagnostic projection is optional and non-authoritative", async () => {
+  const malformedRun = await createLifecycleDiagnosticActualRun("MALFORMED_RESULT");
+  try {
+    const observed = observeM8AuthoritativeRunForTests(malformedRun.handle); const diagnostic = observed.lifecycle.diagnostic;
+    assert.equal(observed.lifecycle.diagnostic_present, true); assert.notEqual(diagnostic, null);
+    assert.equal(diagnostic!.startSendAttempted, true); assert.equal(diagnostic!.startSendCallback, "SUCCEEDED");
+    assert.equal(diagnostic!.ipcMessageReceived, true); assert.equal(diagnostic!.firstIpcMessageKind, "RESULT");
+    assert.equal(diagnostic!.recognizedResultReceived, false); assert.equal(diagnostic!.malformedResultReceived, true);
+    assert.equal(diagnostic!.exitObserved, true); assert.equal(diagnostic!.exitCode, 24); assert.equal(diagnostic!.closeObserved, true); assert.equal(diagnostic!.closeCode, 24);
+    await writeM8Evidence(malformedRun.invocation, [malformedRun.handle]); const invalid = await publishedResult(malformedRun);
+    assert.deepEqual(invalid["lifecycle_diagnostic"], diagnostic, "canonical publication makes a detached copy of the controller diagnostic");
+    assert.deepEqual([invalid["terminal_workflow_result"], invalid["pilot_validity"], invalid["failure_classification"]], [null, false, "HARNESS_DEFECT"]);
+  } finally { await disposeActual(malformedRun); }
+
+  const earlyExitRun = await createLifecycleDiagnosticActualRun("EARLY_EXIT");
+  try {
+    const diagnostic = observeM8AuthoritativeRunForTests(earlyExitRun.handle).lifecycle.diagnostic; assert.notEqual(diagnostic, null);
+    assert.equal(diagnostic!.ipcMessageReceived, false); assert.equal(diagnostic!.exitCode, 23); assert.equal(diagnostic!.closeCode, 23);
+    assert.match(diagnostic!.stderrTail ?? "", /fixture early exit/); assert.equal(diagnostic!.stderrTailTruncated, false);
+    await writeM8Evidence(earlyExitRun.invocation, [earlyExitRun.handle]); const invalid = await publishedResult(earlyExitRun);
+    assert.deepEqual(invalid["lifecycle_diagnostic"], diagnostic, "bounded stderr facts survive the canonical detached copy");
+    assert.deepEqual([invalid["terminal_workflow_result"], invalid["pilot_validity"], invalid["failure_classification"]], [null, false, "HARNESS_DEFECT"]);
+  } finally { await disposeActual(earlyExitRun); }
+
+  const normalRun = await createActualRun();
+  try {
+    await writeM8Evidence(normalRun.invocation, [normalRun.handle]); const normal = await publishedResult(normalRun);
+    assert.equal(normal["lifecycle_diagnostic"], undefined);
+    assert.deepEqual([normal["terminal_workflow_result"], normal["task_success"], normal["workflow_correctness"], normal["pilot_validity"]], ["PASS", true, true, true]);
+  } finally { await disposeActual(normalRun); }
 });
 
 test("H02-T06/T07 no-op and corrupted S08 snapshots cannot become correct through success fields", async (t) => {
