@@ -202,6 +202,8 @@ const FORCE_STOP_EXIT_WAIT_MS = 2_000;
 const FORCE_STOP_REQUEST_TIMEOUT_MS = 15_000;
 const EXTERNAL_LIFECYCLE_STDERR_TAIL_BYTES = 4_096;
 const EXTERNAL_LIFECYCLE_ERROR_TEXT_BYTES = 1_024;
+// Linux sun_path holds 108 bytes including its terminating NUL.
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
 
 interface ActiveControlCapability {
   readonly path: string;
@@ -282,6 +284,12 @@ function physicalChild(pathValue: string, root: string): boolean {
 function validAbsolutePath(value: unknown): value is string {
   return typeof value === "string" && value.length > 1 && value.length <= 4_096 && isAbsolute(value) && resolve(value) === value && !value.includes("\0");
 }
+function assertLinuxControlSocketPathBudget(pathValue: string): void {
+  if (process.platform !== "linux") throw new BoundedWorkflowError("CONTROL_SOCKET_PLATFORM_UNSUPPORTED", "control sockets require the supported Linux pathname budget");
+  if (Buffer.byteLength(pathValue) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
+    throw new BoundedWorkflowError("CONTROL_SOCKET_PATH_TOO_LONG", "control socket pathname exceeds the Linux sun_path budget");
+  }
+}
 async function canonicalOwnedDirectory(pathValue: string, label: string): Promise<string> {
   if (!validAbsolutePath(pathValue)) throw new BoundedWorkflowError("RETAINED_ARTIFACT_ROOT_INVALID", `${label} must be an absolute normalized path`);
   let stats;
@@ -344,14 +352,20 @@ function completionClaimPath(capability: ForceStopCapabilityRecord): string {
 
 async function publishControlCapability(record: ForceStopCapabilityRecord): Promise<ActiveControlCapability> {
   const pathValue = join(record.control_root, `.pi-workflow-control-${randomBytes(16).toString("hex")}.json`);
-  const handle = await open(pathValue, "wx", 0o600);
-  try { await handle.writeFile(`${canonicalize(record)}\n`, "utf8"); await handle.chmod(0o600); await handle.sync(); }
-  finally { await handle.close(); }
-  const stats = await lstat(pathValue);
-  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o600) {
-    throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "control capability file is unsafe");
+  let created = false;
+  try {
+    const handle = await open(pathValue, "wx", 0o600); created = true;
+    try { await handle.writeFile(`${canonicalize(record)}\n`, "utf8"); await handle.chmod(0o600); await handle.sync(); }
+    finally { await handle.close(); }
+    const stats = await lstat(pathValue);
+    if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o600) {
+      throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "control capability file is unsafe");
+    }
+    return { path: pathValue, device: stats.dev, inode: stats.ino, record };
+  } catch (error: unknown) {
+    if (created) await unlink(pathValue).catch(() => undefined);
+    throw error;
   }
-  return { path: pathValue, device: stats.dev, inode: stats.ino, record };
 }
 
 async function readCompletionClaim(capability: ForceStopCapabilityRecord): Promise<CompletionClaim | null> {
@@ -1576,6 +1590,7 @@ function checkedChildResult(value: unknown): BoundedMutationRunResult {
 
 class InvocationLifecycleOwner {
   private readonly completion = deferred<BoundedMutationRunResult>();
+  private capability: ActiveControlCapability | null = null;
   private readonly childExitCompletion = deferred<void>();
   private readonly childCloseCompletion = deferred<void>();
   private childResult: BoundedMutationRunResult | null = null;
@@ -1588,7 +1603,7 @@ class InvocationLifecycleOwner {
 
   public constructor(
     private readonly workspace: InvocationWorkspace,
-    private readonly capability: ActiveControlCapability,
+    private readonly record: ForceStopCapabilityRecord,
     private readonly child: ChildProcess,
     private readonly diagnostics: ExternalLifecycleDiagnostics,
     private readonly options: BoundedMutationOptions,
@@ -1612,11 +1627,34 @@ class InvocationLifecycleOwner {
   public async listen(): Promise<void> {
     const server = createServer({ allowHalfOpen: true }, (socket) => { void this.handleSocket(socket); }); this.server = server;
     await new Promise<void>((resolveListen, rejectListen) => {
-      server.once("error", rejectListen); server.listen(this.capability.record.control_socket, () => { server.removeListener("error", rejectListen); resolveListen(); });
+      server.once("error", rejectListen); server.listen(this.record.control_socket, () => { server.removeListener("error", rejectListen); resolveListen(); });
     });
-    await chmod(this.capability.record.control_socket, 0o600);
-    const stats = await lstat(this.capability.record.control_socket);
-    if (!stats.isSocket() || (stats.mode & 0o777) !== 0o600) throw new ForceStopCapabilityError("control socket is unsafe");
+    const before = await lstat(this.record.control_socket);
+    const uid = currentUid();
+    if (before.isSymbolicLink() || !before.isSocket() || (uid !== undefined && before.uid !== uid)) throw new ForceStopCapabilityError("control socket identity is unsafe");
+    await chmod(this.record.control_socket, 0o600);
+    const after = await lstat(this.record.control_socket);
+    if (after.isSymbolicLink() || !after.isSocket() || after.dev !== before.dev || after.ino !== before.ino ||
+        (after.mode & 0o777) !== 0o600 || (uid !== undefined && after.uid !== uid)) throw new ForceStopCapabilityError("control socket mode is unsafe");
+  }
+
+  public async publishCapability(): Promise<ActiveControlCapability> {
+    if (!this.server?.listening) throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "control socket is not listening");
+    const capability = await publishControlCapability(this.record); this.capability = capability;
+    return capability;
+  }
+
+  public async cleanupBeforeStart(): Promise<void> {
+    try {
+      if (this.server?.listening) await new Promise<void>((resolveClose, rejectClose) => { this.server!.close((error) => error === undefined ? resolveClose() : rejectClose(error)); });
+    } catch { /* The outer lifecycle result remains fail-closed. */ }
+    try { await unlink(this.record.control_socket); }
+    catch (error: unknown) { if (errorCode(error) !== "ENOENT") throw error; }
+  }
+
+  private activeCapability(): ActiveControlCapability {
+    if (this.capability === null) throw new ForceStopCapabilityError("control capability is unavailable");
+    return this.capability;
   }
 
   public start(value: unknown, cwd: string, authority: BoundedMutationAuthority): void {
@@ -1647,7 +1685,7 @@ class InvocationLifecycleOwner {
       try {
         const message = JSON.parse(buffer.trim()) as unknown;
         const request = exactRecord(message, ["protocol", "operation", "grace_ms", "capability_content_sha256"], "force-stop request");
-        if (request["protocol"] !== FORCE_STOP_PROTOCOL || request["operation"] !== "FORCE_STOP" || !Number.isSafeInteger(request["grace_ms"]) || (request["grace_ms"] as number) < 0 || (request["grace_ms"] as number) > 30_000 || request["capability_content_sha256"] !== sha256Canonical(this.capability.record)) throw new ForceStopCapabilityError("force-stop request is invalid");
+        if (request["protocol"] !== FORCE_STOP_PROTOCOL || request["operation"] !== "FORCE_STOP" || !Number.isSafeInteger(request["grace_ms"]) || (request["grace_ms"] as number) < 0 || (request["grace_ms"] as number) > 30_000 || request["capability_content_sha256"] !== sha256Canonical(this.record)) throw new ForceStopCapabilityError("force-stop request is invalid");
         response = await this.requestCancellation("external force-stop request", request["grace_ms"] as number);
       } catch (error: unknown) {
         response = { disposition: "BLOCKED_FORCE_STOP_CAPABILITY_INVALID", detail: error instanceof Error ? error.message : "force-stop request failed", retiredCapabilityPath: null };
@@ -1706,15 +1744,15 @@ class InvocationLifecycleOwner {
 
   private async performCancellation(detail: string, graceMs: number): Promise<ForceStopResult> {
     let claim;
-    try { claim = await claimCompletion(this.capability.record, "CANCELLED", detail); }
+    try { claim = await claimCompletion(this.record, "CANCELLED", detail); }
     catch (error: unknown) {
       const result = { outcome: "BLOCKED" as const, reason: `BLOCKED_LIFECYCLE_CLAIM_UNCERTAIN:${error instanceof Error ? error.message : "unknown"}`, finalState: null };
       await this.finish(result, false); return { disposition: "BLOCKED_FORCE_STOP_RECONCILIATION_UNCERTAIN", detail: result.reason, retiredCapabilityPath: null };
     }
-    if (claim.claim.winner === "COMPLETED") return { disposition: "ALREADY_TERMINAL", detail: "COMPLETED won before force-stop", retiredCapabilityPath: this.capability.path };
-    if (!claim.won) return { disposition: "BLOCKED_CANCELLED", detail: "CANCELLED was already being resolved", retiredCapabilityPath: this.capability.path };
+    if (claim.claim.winner === "COMPLETED") return { disposition: "ALREADY_TERMINAL", detail: "COMPLETED won before force-stop", retiredCapabilityPath: this.activeCapability().path };
+    if (!claim.won) return { disposition: "BLOCKED_CANCELLED", detail: "CANCELLED was already being resolved", retiredCapabilityPath: this.activeCapability().path };
     try { this.child.send?.({ type: "CANCEL" }); } catch { /* session termination below is the hard boundary */ }
-    const terminated = await terminateInvocationSession(this.capability.record, graceMs);
+    const terminated = await terminateInvocationSession(this.record, graceMs);
     if (!terminated.settled) {
       const result = { outcome: "BLOCKED" as const, reason: `BLOCKED_FORCE_STOP_DESCENDANT_UNCERTAIN:${terminated.detail}`, finalState: null };
       await this.finish(result, false);
@@ -1725,25 +1763,25 @@ class InvocationLifecycleOwner {
       await this.finish(result, false);
       return { disposition: "BLOCKED_FORCE_STOP_RECONCILIATION_UNCERTAIN", detail: result.reason, retiredCapabilityPath: null };
     }
-    const [m2, m3] = await Promise.all([reconcileM2AfterProductiveDeath(this.capability.record), reconcileM3AfterProductiveDeath(this.capability.record)]);
+    const [m2, m3] = await Promise.all([reconcileM2AfterProductiveDeath(this.record), reconcileM3AfterProductiveDeath(this.record)]);
     const uncertainty = !m2.certain || m3.classification === "UNCERTAIN";
     const reason = uncertainty
       ? `BLOCKED_PROCESS_CRASH_RECONCILIATION_UNCERTAIN:M2=${m2.detail};M3=${m3.detail}`
       : `BLOCKED_CANCELLED:M2=${m2.detail};M3=${m3.classification}`;
     await this.finish({ outcome: "BLOCKED", reason, finalState: m2.state }, true);
     return uncertainty
-      ? { disposition: "BLOCKED_FORCE_STOP_RECONCILIATION_UNCERTAIN", detail: reason, retiredCapabilityPath: this.capability.path }
-      : { disposition: terminated.forced ? "BLOCKED_FORCE_TERMINATED" : "BLOCKED_CANCELLED", detail: reason, retiredCapabilityPath: this.capability.path };
+      ? { disposition: "BLOCKED_FORCE_STOP_RECONCILIATION_UNCERTAIN", detail: reason, retiredCapabilityPath: this.activeCapability().path }
+      : { disposition: terminated.forced ? "BLOCKED_FORCE_TERMINATED" : "BLOCKED_CANCELLED", detail: reason, retiredCapabilityPath: this.activeCapability().path };
   }
 
   private async completeNormally(): Promise<void> {
     if (this.childResult === null) { await this.requestCancellation("productive child exited without a validated result", 0); return; }
-    const settled = await waitForSessionSettlement(this.capability.record, FORCE_STOP_EXIT_WAIT_MS);
+    const settled = await waitForSessionSettlement(this.record, FORCE_STOP_EXIT_WAIT_MS);
     if (!settled.settled) { await this.requestCancellation("productive child/session did not settle before completion", 0); return; }
-    const [m2, m3] = await Promise.all([inspectM2ForCompletion(this.capability.record), reconcileM3AfterProductiveDeath(this.capability.record)]);
+    const [m2, m3] = await Promise.all([inspectM2ForCompletion(this.record), reconcileM3AfterProductiveDeath(this.record)]);
     if (!m2.certain || m3.classification === "UNCERTAIN") {
       let interrupted;
-      try { interrupted = await claimCompletion(this.capability.record, "CANCELLED", "completion reconciliation was uncertain"); }
+      try { interrupted = await claimCompletion(this.record, "CANCELLED", "completion reconciliation was uncertain"); }
       catch (error: unknown) {
         await this.finish({ outcome: "BLOCKED", reason: `BLOCKED_LIFECYCLE_CLAIM_UNCERTAIN:${error instanceof Error ? error.message : "unknown"}`, finalState: m2.state ?? this.childResult.finalState }, true); return;
       }
@@ -1755,7 +1793,7 @@ class InvocationLifecycleOwner {
       await this.finish({ outcome: "BLOCKED", reason, finalState: m2.state ?? this.childResult.finalState }, true); return;
     }
     let claim;
-    try { claim = await claimCompletion(this.capability.record, "COMPLETED", "productive child exited, session settled, and parent reconciliation completed"); }
+    try { claim = await claimCompletion(this.record, "COMPLETED", "productive child exited, session settled, and parent reconciliation completed"); }
     catch (error: unknown) {
       await this.finish({ outcome: "BLOCKED", reason: `BLOCKED_LIFECYCLE_CLAIM_UNCERTAIN:${error instanceof Error ? error.message : "unknown"}`, finalState: m2.state ?? this.childResult.finalState }, true); return;
     }
@@ -1776,7 +1814,7 @@ class InvocationLifecycleOwner {
     this.finalResult = withExternalLifecycleDiagnostic(this.workspace.retained ? { ...result, evidenceRoot: this.workspace.root } : result, this.diagnostics);
     try { if (this.server?.listening) this.server.close(); }
     catch { this.finalResult = { ...this.finalResult, outcome: "BLOCKED", reason: "BLOCKED_CLEANUP_UNCERTAIN:CONTROL_SOCKET" }; }
-    try { await unlink(this.capability.record.control_socket); }
+    try { await unlink(this.record.control_socket); }
     catch (error: unknown) { if (errorCode(error) !== "ENOENT") this.finalResult = { ...this.finalResult, outcome: "BLOCKED", reason: "BLOCKED_CLEANUP_UNCERTAIN:CONTROL_SOCKET" }; }
     if (!this.workspace.retained && sessionSettled) {
       try { await rm(this.workspace.root, { recursive: true, force: true }); }
@@ -1826,7 +1864,9 @@ async function runExternalLifecycleOwner(
   let workspace: InvocationWorkspace | undefined; let child: ChildProcess | undefined; let owner: InvocationLifecycleOwner | undefined; let diagnostics: ExternalLifecycleDiagnostics | undefined;
   try {
     const cwd = options.cwd ?? process.cwd(); const repository = await resolveRepositoryIdentity({ requestedPath: cwd, requireHead: true });
+    diagnostics = new ExternalLifecycleDiagnostics(process.execPath, cwd);
     workspace = await createInvocationWorkspace(options, repository);
+    assertLinuxControlSocketPathBudget(join(workspace.root, "control.sock"));
     const parent = await readProcIdentity(process.pid);
     if (parent === null) throw new BoundedWorkflowError("CONTROL_CAPABILITY_UNAVAILABLE", "external parent /proc identity is unavailable");
     const childExecArgv: string[] = [];
@@ -1839,7 +1879,6 @@ async function runExternalLifecycleOwner(
       if (entry.startsWith("--eval=")) continue;
       childExecArgv.push(entry);
     }
-    diagnostics = new ExternalLifecycleDiagnostics(process.execPath, cwd);
     try {
       child = spawn(process.execPath, [...childExecArgv, fileURLToPath(import.meta.url), "--pi-workflow-productive-child"], {
         cwd, detached: true, stdio: ["ignore", "ignore", "pipe", "ipc"], env: { ...process.env },
@@ -1854,9 +1893,9 @@ async function runExternalLifecycleOwner(
       invocation_session_id: productive.sessionId, control_root: workspace.root, control_socket: join(workspace.root, "control.sock"), state_root: workspace.stateRoot,
       run_id: RUN_ID, repository_root: repository.worktree_root, worktree_key: repository.worktree_key, created_at: new Date().toISOString(),
     };
-    const capability = await publishControlCapability(record);
-    owner = new InvocationLifecycleOwner(workspace, capability, child, diagnostics, options, kind, fixtureMode, onFixtureEvent);
+    owner = new InvocationLifecycleOwner(workspace, record, child, diagnostics, options, kind, fixtureMode, onFixtureEvent);
     await owner.listen();
+    const capability = await owner.publishCapability();
     const cancel = (): void => { void owner!.requestCancellation("caller cancellation", FORCE_STOP_GRACE_MS); };
     options.signal?.addEventListener("abort", cancel, { once: true });
     try {
@@ -1868,8 +1907,12 @@ async function runExternalLifecycleOwner(
       return await owner.result;
     } finally { options.signal?.removeEventListener("abort", cancel); }
   } catch (error: unknown) {
+    await owner?.cleanupBeforeStart().catch(() => undefined);
     try { child?.kill("SIGKILL"); } catch { /* child never became a valid invocation session */ }
-    if (workspace !== undefined && !workspace.retained) await rm(workspace.root, { recursive: true, force: true }).catch(() => undefined);
+    if (child !== undefined) await Promise.race([new Promise<void>((resolveClose) => child!.once("close", () => resolveClose())), delay(FORCE_STOP_EXIT_WAIT_MS)]);
+    // No START was sent on this path, so no retained lifecycle authority may
+    // remain for a failed preflight, bind, readiness, or publication attempt.
+    if (workspace !== undefined) await rm(workspace.root, { recursive: true, force: true }).catch(() => undefined);
     return withExternalLifecycleDiagnostic({ outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "BLOCKED"}: ${error.message}` : "BLOCKED_EXTERNAL_LIFECYCLE_START", finalState: null }, diagnostics);
   }
 }
@@ -1943,6 +1986,7 @@ async function productiveChildMain(): Promise<void> {
     if (start.kind === "FIXTURE") {
       const mode = start.fixtureMode;
       if (mode !== "HANG" && mode !== "WRITE_AND_HANG" && mode !== "INTERNAL_PASS_WAIT" && mode !== "COMPLETE" && mode !== "EARLY_EXIT" && mode !== "MALFORMED_RESULT") throw new Error("fixture mode is invalid");
+      if (mode === "COMPLETE") process.send?.({ type: "FIXTURE_STAGE", stage: "START_RECEIVED" });
       if (mode === "EARLY_EXIT") {
         await new Promise<void>((resolveWrite) => { process.stderr.write("fixture early exit\n", () => resolveWrite()); });
         await delay(25); process.exitCode = 23; return;

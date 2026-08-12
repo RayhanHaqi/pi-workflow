@@ -12,6 +12,7 @@ import { resolveRepositoryIdentity } from "../src/repository/index.js";
 import { captureGitState } from "../src/repository/fingerprint.js";
 import {
   canonicalSlotCount,
+  configureM8InvocationConstructionFailureForTests,
   createM8ApprovalManifest,
   deriveM8CanonicalSourceBaseline,
   createM8InvocationRoot,
@@ -120,6 +121,16 @@ async function withFixture(id: string, action: (materialized: Awaited<ReturnType
   }
 }
 
+async function retainedRuntimeRoots(): Promise<readonly string[]> {
+  return (await readdir(tmpdir())).filter((entry) => entry.startsWith("m8-retained-")).sort().map((entry) => join(tmpdir(), entry));
+}
+let lastRetainedRuntimeRoot: string | undefined;
+async function newlyAllocatedRetainedRuntimeRoot(before: readonly string[]): Promise<string> {
+  const after = await retainedRuntimeRoots(); const added = after.filter((entry) => !before.includes(entry));
+  assert.equal(added.length, 1, "one short retained runtime root is allocated for the invocation");
+  lastRetainedRuntimeRoot = added[0]!; return added[0]!;
+}
+
 interface ActualRun {
   readonly parent: string;
   readonly root: string;
@@ -135,7 +146,7 @@ async function createActualRun(id = "M8-S01", mode: M8Mode = "DIRECT_LUNA_HIGH",
   const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-h01-h02-"));
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
-    freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); invocation = await createM8InvocationRoot(parent);
+    freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(parent); const runtimeRetained = await newlyAllocatedRetainedRuntimeRoot(retainedBefore);
     const arm = freeze.arms[0]!; const approval = approvalFor(freeze);
     configureBoundedWorkerFauxRuntimeForTests(() => ({
       async execute(input) {
@@ -172,7 +183,7 @@ async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DI
   const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-refusal-authority-"));
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
-    freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); invocation = await createM8InvocationRoot(parent);
+    freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(parent); const runtimeRetained = await newlyAllocatedRetainedRuntimeRoot(retainedBefore);
     const arm = freeze.arms[0]!; const approval = approvalFor(freeze);
     configureBoundedWorkerFauxRuntimeForTests(() => ({
       async execute(input) {
@@ -204,8 +215,9 @@ async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DI
 }
 
 async function controllerStateRoot(value: ActualRun): Promise<string> {
-  const retained = join(value.root, "retained"); const roots = await readdir(retained); assert.equal(roots.length, 1);
-  return join(retained, roots[0]!, "state");
+  void value; assert.notEqual(lastRetainedRuntimeRoot, undefined);
+  const roots = await readdir(lastRetainedRuntimeRoot!); assert.equal(roots.length, 1);
+  return join(lastRetainedRuntimeRoot!, roots[0]!, "state");
 }
 async function controllerRunId(value: ActualRun): Promise<string> {
   const runs = await readdir(join(await controllerStateRoot(value), "runs")); assert.equal(runs.length, 1); return runs[0]!;
@@ -244,12 +256,51 @@ async function publishedResult(value: ActualRun): Promise<Record<string, unknown
   return JSON.parse(await readFile(join(value.root, "evidence", "results", `${value.arm.scenario_id}--${value.arm.mode}.json`), "utf8")) as Record<string, unknown>;
 }
 async function withBareInvocation(action: (value: { readonly parent: string; readonly root: string; readonly invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> }) => Promise<void>): Promise<void> {
-  const parent = await mkdtemp(join(tmpdir(), "m8-h01-bare-")); const invocation = await createM8InvocationRoot(parent);
-  const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(roots.length, 1);
-  try { await action({ parent, root: join(parent, roots[0]!), invocation }); }
-  finally { await rm(parent, { recursive: true, force: true }); }
+  const parent = await mkdtemp(join(tmpdir(), "m8-h01-bare-")); let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
+  let callbackFailure: unknown; let teardownFailure: unknown;
+  try {
+    invocation = await createM8InvocationRoot(parent);
+    const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(roots.length, 1);
+    await action({ parent, root: join(parent, roots[0]!), invocation });
+  } catch (error: unknown) { callbackFailure = error; }
+  try { if (invocation !== undefined) await disposeM8Invocation(invocation); }
+  catch (error: unknown) { teardownFailure = error; }
+  try { await rm(parent, { recursive: true, force: true }); }
+  catch (error: unknown) { teardownFailure ??= error; }
+  if (callbackFailure !== undefined) throw callbackFailure;
+  // H01 deliberately substitutes the long test root. Canonical disposal still
+  // revokes its opaque handle and removes the independent retained root first.
+  if (teardownFailure instanceof Error && teardownFailure.message === "M8_INVOCATION_DISPOSAL_UNSAFE") return;
+  if (teardownFailure !== undefined) throw teardownFailure;
 }
 const forgedHandle = (): M8AuthoritativeRun => Object.freeze({ run_identity: digest("f") }) as unknown as M8AuthoritativeRun;
+
+test("M8-CLEAN-01 partial invocation construction and bare teardown leave no retained roots or registrations", async () => {
+  const constructionParent = await mkdtemp(join(tmpdir(), "m8-clean-construction-")); const retainedBeforeConstruction = await retainedRuntimeRoots();
+  let failedInvocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
+  try {
+    configureM8InvocationConstructionFailureForTests(true);
+    await assert.rejects(async () => { failedInvocation = await createM8InvocationRoot(constructionParent); }, /M8_INVOCATION_CONSTRUCTION_TEST_CHECKPOINT/);
+    assert.equal(failedInvocation, undefined, "the checkpoint fails before an opaque invocation handle is returned");
+    assert.deepEqual((await readdir(constructionParent)).filter((entry) => entry.startsWith("m8-invocation-")), [], "failed construction removes the long invocation root");
+    assert.deepEqual(await retainedRuntimeRoots(), retainedBeforeConstruction, "failed construction removes the independently retained short root");
+    assert.equal((await lstat(constructionParent)).isDirectory(), true, "the test-owned outer parent remains removable");
+  } finally {
+    configureM8InvocationConstructionFailureForTests();
+    await rm(constructionParent, { recursive: true, force: true });
+  }
+
+  const retainedBeforeBare = await retainedRuntimeRoots(); let bareInvocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
+  let bareRoot: string | undefined; let bareRetained: string | undefined;
+  await withBareInvocation(async (value) => {
+    bareInvocation = value.invocation; bareRoot = value.root; bareRetained = await newlyAllocatedRetainedRuntimeRoot(retainedBeforeBare);
+    assert.equal((await lstat(bareRoot)).isDirectory(), true); assert.equal((await lstat(bareRetained)).isDirectory(), true);
+  });
+  assert.notEqual(bareInvocation, undefined); assert.notEqual(bareRoot, undefined); assert.notEqual(bareRetained, undefined);
+  await assert.rejects(() => lstat(bareRoot!), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  await assert.rejects(() => lstat(bareRetained!), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  await assert.rejects(() => disposeM8Invocation(bareInvocation!), /M8_INVOCATION_UNREGISTERED/);
+});
 
 test("R3 fixture matrix is exact and unknown facts fail closed", async () => {
   const parsed = await bundle();
@@ -331,7 +382,7 @@ test("runtime canonical-baseline mismatch blocks before worker reservation or fa
   const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-static-mismatch-"));
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
-    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"], (await staticPlanBaselineFixture()).options); invocation = await createM8InvocationRoot(parent);
+    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"], (await staticPlanBaselineFixture()).options); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(parent); await newlyAllocatedRetainedRuntimeRoot(retainedBefore);
     const arm = freeze.arms[0]!; const changed = m8StaticSlotSpecification({ ...arm.static_slot.static_slot_projection,
       canonical_source_baseline: { ...arm.static_slot.static_slot_projection.canonical_source_baseline, tree: alternateGitObjectId(arm.static_slot.static_slot_projection.canonical_source_baseline.tree) } });
     const approval = createM8ApprovalManifest(freeze, [changed]); let fauxProviderEntries = 0;
@@ -339,13 +390,44 @@ test("runtime canonical-baseline mismatch blocks before worker reservation or fa
     await runOneM8ArmForTests(invocation, freeze, arm, approval); configureBoundedWorkerFauxRuntimeForTests();
     assert.equal(fauxProviderEntries, 0, "B-05: baseline mismatch returned null from native approveTasks before worker/provider admission");
     const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(roots.length, 1);
-    const stateRoot = join(parent, roots[0]!, "retained", (await readdir(join(parent, roots[0]!, "retained")))[0]!, "state");
+    assert.notEqual(lastRetainedRuntimeRoot, undefined); const stateRoot = join(lastRetainedRuntimeRoot!, (await readdir(lastRetainedRuntimeRoot!))[0]!, "state");
     const runId = (await readdir(join(stateRoot, "runs")))[0]!; const [inspection, records] = await Promise.all([inspectRunStorage({ stateRoot, runId }), readM5ManagedRecords({ stateRoot, runId })]);
     assert.equal(inspection.workflowState?.phase, "BLOCKED");
     assert.equal(records.decisions.some((decision) => decision.reservation !== null), false, "static mismatch occurs before any M5 worker reservation");
     assert.equal(records.boundedWorkerInvocations.length, 0, "no bounded invocation or faux provider work exists");
   } finally {
     configureBoundedWorkerFauxRuntimeForTests();
+    if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
+    if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("M8-ROOT-01 long evidence archive uses a short invocation-owned retained root", async () => {
+  const all = await bundle(); const parent = await mkdtemp(join(tmpdir(), "m8-root-01-")); const archiveParent = join(parent, "archive-".repeat(12), "slot-00-fresh-retry-".repeat(4));
+  await mkdir(archiveParent, { recursive: true, mode: 0o700 });
+  let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
+  try {
+    const primaryBefore = await resolveRepositoryIdentity({ requestedPath: process.cwd(), requireHead: true }); const primaryGitBefore = await captureGitState(primaryBefore);
+    freeze = await freezeM8Scenario(all, scenario(all, "M8-S01"), ["DIRECT_LUNA_HIGH"], (await staticPlanBaselineFixture()).options);
+    const arm = freeze.arms[0]!; const approved = m8StaticSlotSpecification({ ...arm.static_slot.static_slot_projection,
+      static_budgets: { ...arm.static_slot.static_slot_projection.static_budgets, max_tool_calls: arm.static_slot.static_slot_projection.static_budgets.max_tool_calls + 1 } });
+    const manifest = createM8ApprovalManifest(freeze, [approved]); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(archiveParent);
+    const retained = await newlyAllocatedRetainedRuntimeRoot(retainedBefore); const invocationRoots = (await readdir(archiveParent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(invocationRoots.length, 1);
+    const invocationRoot = join(archiveParent, invocationRoots[0]!); assert.ok(Buffer.byteLength(join(retained, `pi-pre-m8-bounded-${"x".repeat(6)}`, "control.sock")) <= 107);
+    assert.ok(Buffer.byteLength(join(invocationRoot, "retained", `pi-pre-m8-bounded-${"x".repeat(6)}`, "control.sock")) > 107, "the historical archive placement would exceed the Linux budget");
+
+    const handle = await runOneM8Arm(invocation, freeze, arm, manifest); const observation = observeM8AuthoritativeRunForTests(handle);
+    assert.deepEqual(observation.result_transport, { recognized_result_received: true, malformed_result_received: false }); assert.equal(observation.workflow.outcome, "BLOCKED");
+    const controllerRoots = await readdir(retained); assert.equal(controllerRoots.length, 1, "the opaque invocation registered the retained runtime root used by the controller");
+    const stateRoot = join(retained, controllerRoots[0]!, "state"); const runId = (await readdir(join(stateRoot, "runs")))[0]!;
+    const [inspection, records] = await Promise.all([inspectRunStorage({ stateRoot, runId }), readM5ManagedRecords({ stateRoot, runId })]);
+    assert.equal(inspection.workflowState?.phase, "BLOCKED"); assert.equal(records.decisions.some((decision) => decision.reservation !== null), false);
+    assert.equal(records.boundedWorkerInvocations.length, 0); assert.equal(records.toolResults.length + records.mutationReceipts.length + records.commandResults.length + records.admissionRefusals.length, 0);
+    const evidenceRoot = await writeM8Evidence(invocation, [handle]); assert.equal(evidenceRoot, join(invocationRoot, "evidence"), "safe evidence publication remains in the long archive branch");
+    const primaryAfter = await resolveRepositoryIdentity({ requestedPath: process.cwd(), requireHead: true }); const primaryGitAfter = await captureGitState(primaryAfter);
+    assert.deepEqual(primaryAfter, primaryBefore); assert.deepEqual(primaryGitAfter, primaryGitBefore);
+  } finally {
     if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
     if (invocation !== undefined) await disposeM8Invocation(invocation).catch(() => undefined);
     await rm(parent, { recursive: true, force: true });
@@ -368,7 +450,7 @@ test("M8-HOST-01 production runOneM8Arm static mismatch returns recognized BLOCK
       "the controlled mismatch changes exactly static_budgets.max_tool_calls");
     assert.notEqual(approvedStaticSlot.static_slot_spec_identity, runtimeStaticSlot.static_slot_spec_identity,
       `approved=${approvedStaticSlot.static_slot_spec_identity} runtime=${runtimeStaticSlot.static_slot_spec_identity}`);
-    const approval = createM8ApprovalManifest(freeze, [approvedStaticSlot]); invocation = await createM8InvocationRoot(parent);
+    const approval = createM8ApprovalManifest(freeze, [approvedStaticSlot]); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(parent); const retained = await newlyAllocatedRetainedRuntimeRoot(retainedBefore);
     const invocationRoots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-")); assert.equal(invocationRoots.length, 1);
     const invocationRoot = join(parent, invocationRoots[0]!); assert.equal((await lstat(invocationRoot)).isDirectory(), true, "registered M8 invocation root exists");
     assert.deepEqual(await readdir(join(invocationRoot, "workspaces")), [], "materialization has not occurred before the production arm starts");
@@ -388,7 +470,7 @@ test("M8-HOST-01 production runOneM8Arm static mismatch returns recognized BLOCK
     assert.equal(workspaceRepository.worktree_root, workspace, "materialization is a synthetic Git repository");
     assert.equal(workspaceGit.dirty, false, "the static mismatch leaves the materialized workspace clean");
     for (const file of s01.initial_files) assert.deepEqual(await readFile(join(workspace, file.path)), Buffer.from(file.bytes_base64, "base64"), `materialized S01 fixture preserved ${file.path}`);
-    const retained = join(invocationRoot, "retained"); assert.equal((await lstat(retained)).isDirectory(), true, "registered retained root exists");
+    assert.equal((await lstat(retained)).isDirectory(), true, "registered short retained runtime root exists");
     const controllerRoots = await readdir(retained); assert.equal(controllerRoots.length, 1); const stateRoot = join(retained, controllerRoots[0]!, "state");
     const runIds = await readdir(join(stateRoot, "runs")); assert.equal(runIds.length, 1); const runId = runIds[0]!;
 
@@ -524,8 +606,9 @@ test("H02-T01 through H02-T05 durable authority cannot be caller-forged", async 
       await assert.rejects(() => runOneM8ArmForTests(actual.invocation, actual.freeze, altered, approvalFor(actual.freeze)), /M8_APPROVED_RUN_BINDING_INVALID/);
     });
     await t.test("T03/T04 wrong terminal/postflight durable state becomes invalid evidence", async () => {
-      const retained = join(actual.root, "retained"); const controllerRoots = await readdir(retained); assert.equal(controllerRoots.length, 1);
-      await writeFile(join(retained, controllerRoots[0]!, "state", "runs", await controllerRunId(actual), "state.json"), "{}\n", { mode: 0o600 });
+      assert.notEqual(lastRetainedRuntimeRoot, undefined);
+      const controllerRoots = await readdir(lastRetainedRuntimeRoot!); assert.equal(controllerRoots.length, 1);
+      await writeFile(join(lastRetainedRuntimeRoot!, controllerRoots[0]!, "state", "runs", await controllerRunId(actual), "state.json"), "{}\n", { mode: 0o600 });
       await writeM8Evidence(actual.invocation, [actual.handle]); const result = await publishedResult(actual);
       assert.equal(result["terminal_workflow_result"], null); assert.equal(result["pilot_validity"], false); assert.equal(result["failure_classification"], "HARNESS_DEFECT");
     });

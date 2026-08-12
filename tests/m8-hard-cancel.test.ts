@@ -164,6 +164,38 @@ test("D-01/R1-T03 COMPLETE remains a recognized successful lifecycle result", as
   } finally { await dispose(value); }
 });
 
+test("D-07 control socket is ready and private before capability publication and START", async () => {
+  const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-d07-retained-")); const events: string[] = [];
+  try {
+    const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+      cwd: root, authority: authority(), retainedArtifactRoot: retained,
+      approveTasks: async ({ contract }) => contract.content_sha256 as `sha256:${string}`,
+      onControlCapability: async ({ path }) => {
+        events.push("CAPABILITY_PUBLISHED"); const capability = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+        const socketPath = capability["control_socket"] as string; assert.ok(Buffer.byteLength(socketPath) <= 107, "requested pathname includes the Linux NUL-reserved budget");
+        const socket = await lstat(socketPath); assert.equal(socket.isSymbolicLink(), false); assert.equal(socket.isSocket(), true); assert.equal(socket.mode & 0o777, 0o600);
+        assert.equal(socketPath, join(retained, (await (await import("node:fs/promises")).readdir(retained))[0]!, "control.sock"), "capability names the exact ready socket");
+      },
+    }, "COMPLETE", (stage) => { if (stage === "START_RECEIVED") events.push(stage); });
+    assert.deepEqual(events, ["CAPABILITY_PUBLISHED", "START_RECEIVED"], "START reaches the productive child only after ready capability publication");
+    assert.equal(result.outcome, "PASS", result.reason); assert.equal(result.lifecycleDiagnostic, undefined, "COMPLETE reached a recognized provider-free RESULT");
+
+    const overlongRetained = join(tmpdir(), `m8-d07-overlong-${"x".repeat(100)}`); await mkdir(overlongRetained, { recursive: true, mode: 0o700 });
+    let capabilityCalls = 0; let approvalCalls = 0; const overlongSocket = join(overlongRetained, `pi-pre-m8-bounded-${"x".repeat(6)}`, "control.sock");
+    try {
+      const blocked = await runBoundedMutationWorkflowExternalForTests(goal(), {
+        cwd: root, authority: authority(), retainedArtifactRoot: overlongRetained,
+        approveTasks: async () => { approvalCalls += 1; return null; }, onControlCapability: () => { capabilityCalls += 1; },
+      }, "COMPLETE");
+      assert.equal(blocked.outcome, "BLOCKED"); assert.match(blocked.reason, /^CONTROL_SOCKET_PATH_TOO_LONG:/);
+      assert.equal(blocked.lifecycleDiagnostic?.spawnObserved, false); assert.equal(blocked.lifecycleDiagnostic?.startSendAttempted, false);
+      assert.equal(capabilityCalls, 0); assert.equal(approvalCalls, 0, "the preflight admits no M3/M4/M5 or provider authority");
+      await assert.rejects(lstat(overlongSocket), { code: "ENOENT" });
+      assert.deepEqual(await (await import("node:fs/promises")).readdir(overlongRetained), [], "the exact over-budget child was removed without truncation or stale capability");
+    } finally { await rm(overlongRetained, { recursive: true, force: true }); }
+  } finally { await dispose({ root, retained }); }
+});
+
 test("D-06 WORKFLOW S01-equivalent bootstrap reaches approveTasks and returns recognized BLOCKED result", async () => {
   const root = await s01Repository(); const retained = await mkdtemp(join(tmpdir(), "m8-s01-bootstrap-retained-")); const input = s01Goal(); let approveTaskCalls = 0;
   try {

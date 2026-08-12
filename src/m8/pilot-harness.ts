@@ -53,6 +53,9 @@ const M8_FIXTURE_APPROVER = "m8-fixture-freeze";
 const M8_FIXTURE_APPROVED_AT = "2000-01-01T00:00:00.000Z";
 const TOTAL_M4_TOOL_LIMIT = 32;
 const MAX_WALL_TIME_MS = 120_000;
+// Linux sun_path holds 108 bytes including its terminating NUL.
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
+const MKDTEMP_SUFFIX_WIDTH = 6;
 
 /** Immutable architecture/version identities; commit/tree are derived at static-plan freeze time. */
 const M8_ARCHITECTURE_IDENTITY = "b20e4a5a349f2bc0389bd2f70369481ebffd7c635922bb064b8c83b3af7dc3ea" as Sha256Digest;
@@ -319,6 +322,10 @@ interface DirectoryRegistration {
   readonly mode: number;
   readonly role: DirectoryRole;
 }
+interface ConstructionDirectory {
+  readonly registration: DirectoryRegistration;
+  readonly parent: DirectoryRegistration | null;
+}
 interface InvocationRecord {
   readonly root: string;
   readonly workspaces: string;
@@ -371,6 +378,12 @@ interface AuthoritativeRunRecord {
 const invocationRecords = new Map<M8Invocation, InvocationRecord>();
 const workspaceRecords = new Map<MaterializedM8Fixture, WorkspaceRecord>();
 const authoritativeRunRecords = new Map<M8AuthoritativeRun, AuthoritativeRunRecord>();
+let failM8InvocationConstructionAfterRetainedRegistrationForTests = false;
+
+/** Package-internal test checkpoint at the sole pre-publication retained-root boundary. */
+export function configureM8InvocationConstructionFailureForTests(enabled = false): void {
+  failM8InvocationConstructionAfterRetainedRegistrationForTests = enabled;
+}
 
 function copyExternalLifecycleDiagnostic(diagnostic: ExternalLifecycleDiagnosticEvidence): ExternalLifecycleDiagnosticEvidence {
   const copyError = (value: ExternalLifecycleDiagnosticEvidence["spawnError"]) => value === null ? null : Object.freeze({ errorClass: value.errorClass, message: value.message });
@@ -533,18 +546,68 @@ async function revalidatePrivateDirectory(registration: DirectoryRegistration, p
     publicationUnsafe(`${registration.role} is not its registered direct child`);
   }
 }
+/** Captures exact identity before a newly created directory reaches private registration. */
+async function captureConstructionDirectory(pathValue: string, role: DirectoryRole): Promise<DirectoryRegistration> {
+  const canonical = resolve(pathValue);
+  let stats; let physical: string;
+  try { [stats, physical] = await Promise.all([lstat(canonical), realpath(canonical)]); }
+  catch { throw new Error(`M8_INVOCATION_CONSTRUCTION_UNAVAILABLE:${role}`); }
+  if (!stats!.isDirectory() || stats!.isSymbolicLink() || physical! !== canonical || (currentUid() !== -1 && stats!.uid !== currentUid())) {
+    throw new Error(`M8_INVOCATION_CONSTRUCTION_UNSAFE:${role}`);
+  }
+  return Object.freeze({ path: canonical, device: stats!.dev, inode: stats!.ino, uid: stats!.uid, mode: stats!.mode & 0o777, role });
+}
+async function revalidateConstructionDirectory(registration: DirectoryRegistration, parent: DirectoryRegistration | null): Promise<void> {
+  let stats; let physical: string;
+  try { [stats, physical] = await Promise.all([lstat(registration.path), realpath(registration.path)]); }
+  catch { throw new Error(`M8_INVOCATION_CONSTRUCTION_CLEANUP_UNSAFE:${registration.role}:UNAVAILABLE`); }
+  if (!stats!.isDirectory() || stats!.isSymbolicLink() || physical! !== registration.path || stats!.dev !== registration.device ||
+      stats!.ino !== registration.inode || stats!.uid !== registration.uid || (stats!.mode & 0o777) !== registration.mode ||
+      (parent !== null && (dirname(registration.path) !== parent.path || !physicallyWithin(parent.path, registration.path)))) {
+    throw new Error(`M8_INVOCATION_CONSTRUCTION_CLEANUP_UNSAFE:${registration.role}:IDENTITY`);
+  }
+}
+async function cleanupM8InvocationConstruction(entries: readonly ConstructionDirectory[]): Promise<readonly string[]> {
+  const failures: string[] = []; const blockedAncestors = new Set<string>();
+  for (const entry of [...entries].reverse()) {
+    if (blockedAncestors.has(entry.registration.path)) {
+      if (failures.length < 8) failures.push(`${entry.registration.role}:DESCENDANT`);
+      if (entry.parent !== null) blockedAncestors.add(entry.parent.path);
+      continue;
+    }
+    try {
+      await revalidateConstructionDirectory(entry.registration, entry.parent);
+      await rm(entry.registration.path, { recursive: true, force: false });
+    } catch (error: unknown) {
+      if (failures.length < 8) failures.push(`${entry.registration.role}:${error instanceof Error ? error.message.slice(0, 192) : "UNKNOWN"}`);
+      if (entry.parent !== null) blockedAncestors.add(entry.parent.path);
+    }
+  }
+  return Object.freeze(failures);
+}
 async function revalidatePublicationTree(invocation: M8Invocation): Promise<InvocationRecord> {
   const owner = ownedInvocation(invocation);
   await revalidatePrivateDirectory(owner.rootRegistration);
   await revalidatePrivateDirectory(owner.workspaceRegistration, owner.rootRegistration);
   await revalidatePrivateDirectory(owner.evidenceRegistration, owner.rootRegistration);
   await revalidatePrivateDirectory(owner.resultsRegistration, owner.evidenceRegistration);
-  await revalidatePrivateDirectory(owner.retainedRegistration, owner.rootRegistration);
+  // Retained lifecycle state is separately placed at a short private path, but
+  // remains registered exclusively to this opaque invocation handle.
+  await revalidatePrivateDirectory(owner.retainedRegistration);
   if (owner.root === owner.evidence || owner.root === owner.results || owner.root === owner.retained || owner.root === process.cwd() ||
-      owner.root === resolve(process.cwd()) || !physicallyWithin(owner.root, owner.evidence) || !physicallyWithin(owner.evidence, owner.results)) {
+      owner.root === resolve(process.cwd()) || !physicallyWithin(owner.root, owner.evidence) || !physicallyWithin(owner.evidence, owner.results) ||
+      physicallyWithin(owner.root, owner.retained) || physicallyWithin(owner.retained, owner.root)) {
     publicationUnsafe("registered publication tree is not invocation-owned");
   }
   return owner;
+}
+
+function assertM8ControlSocketPathBudget(retainedRoot: string): void {
+  if (process.platform !== "linux") throw new Error("M8_CONTROL_SOCKET_PLATFORM_UNSUPPORTED");
+  const worstCase = join(retainedRoot, `pi-pre-m8-bounded-${"x".repeat(MKDTEMP_SUFFIX_WIDTH)}`, "control.sock");
+  if (Buffer.byteLength(worstCase) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
+    throw new Error("M8_CONTROL_SOCKET_PATH_OVER_BUDGET");
+  }
 }
 
 function fileManifest(value: unknown, label: string): M8FileManifest {
@@ -717,34 +780,55 @@ async function statusIdentity(root: string): Promise<Sha256Digest> {
   return sha256Canonical({ protocol: "m8-initial-status-v1", porcelain_base64: Buffer.from(result.stdout).toString("base64") });
 }
 
-/** Creates one private absolute root for an M8 invocation and registers every owned publication directory. */
+/** Creates one opaque M8 invocation with a long evidence branch and short retained runtime branch. */
 export async function createM8InvocationRoot(temporaryParent = tmpdir()): Promise<M8Invocation> {
   const requestedParent = resolve(temporaryParent); await mkdir(requestedParent, { recursive: true, mode: 0o700 });
   const [parentStat, parent] = await Promise.all([lstat(requestedParent), realpath(requestedParent)]);
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("M8_INVOCATION_PARENT_INVALID");
-  const root = await mkdtemp(join(parent, "m8-invocation-")); await chmod(root, 0o700);
-  const workspaces = join(root, "workspaces"); const evidence = join(root, "evidence"); const results = join(evidence, "results"); const retained = join(root, "retained");
-  await Promise.all([mkdir(workspaces, { mode: 0o700 }), mkdir(evidence, { mode: 0o700 }), mkdir(retained, { mode: 0o700 })]);
-  await mkdir(results, { mode: 0o700 });
-  const [rootRegistration, workspaceRegistration, evidenceRegistration, resultsRegistration, retainedRegistration] = await Promise.all([
-    registerPrivateDirectory(root, "INVOCATION_ROOT"), registerPrivateDirectory(workspaces, "WORKSPACES"), registerPrivateDirectory(evidence, "EVIDENCE"),
-    registerPrivateDirectory(results, "RESULTS"), registerPrivateDirectory(retained, "RETAINED"),
-  ]);
-  const invocation = Object.freeze({ invocation_identity: sha256Canonical({ protocol: "m8-invocation-v1", root }) });
-  invocationRecords.set(invocation, Object.freeze({ root, workspaces, evidence, results, retained, rootRegistration, workspaceRegistration, evidenceRegistration, resultsRegistration, retainedRegistration }));
-  return invocation;
+  const construction: ConstructionDirectory[] = []; let invocation: M8Invocation | undefined;
+  try {
+    const root = await mkdtemp(join(parent, "m8-invocation-")); const rootCleanup = await captureConstructionDirectory(root, "INVOCATION_ROOT");
+    construction.push({ registration: rootCleanup, parent: null }); await chmod(root, 0o700); const rootRegistration = await registerPrivateDirectory(root, "INVOCATION_ROOT");
+    // The caller-selected branch is evidence/archive placement. Live retained
+    // state is allocated only here under the OS private temporary convention.
+    const retained = await mkdtemp(join(tmpdir(), "m8-retained-")); const retainedCleanup = await captureConstructionDirectory(retained, "RETAINED");
+    construction.push({ registration: retainedCleanup, parent: null }); await chmod(retained, 0o700); const retainedRegistration = await registerPrivateDirectory(retained, "RETAINED");
+    if (failM8InvocationConstructionAfterRetainedRegistrationForTests) {
+      failM8InvocationConstructionAfterRetainedRegistrationForTests = false;
+      throw new Error("M8_INVOCATION_CONSTRUCTION_TEST_CHECKPOINT");
+    }
+    const workspaces = join(root, "workspaces"); await mkdir(workspaces, { mode: 0o700 }); const workspacesCleanup = await captureConstructionDirectory(workspaces, "WORKSPACES");
+    construction.push({ registration: workspacesCleanup, parent: rootCleanup }); const workspaceRegistration = await registerPrivateDirectory(workspaces, "WORKSPACES");
+    const evidence = join(root, "evidence"); await mkdir(evidence, { mode: 0o700 }); const evidenceCleanup = await captureConstructionDirectory(evidence, "EVIDENCE");
+    construction.push({ registration: evidenceCleanup, parent: rootCleanup }); const evidenceRegistration = await registerPrivateDirectory(evidence, "EVIDENCE");
+    const results = join(evidence, "results"); await mkdir(results, { mode: 0o700 }); const resultsCleanup = await captureConstructionDirectory(results, "RESULTS");
+    construction.push({ registration: resultsCleanup, parent: evidenceCleanup }); const resultsRegistration = await registerPrivateDirectory(results, "RESULTS");
+    invocation = Object.freeze({ invocation_identity: sha256Canonical({ protocol: "m8-invocation-v1", root, retained }) });
+    invocationRecords.set(invocation, Object.freeze({ root, workspaces, evidence, results, retained, rootRegistration, workspaceRegistration, evidenceRegistration, resultsRegistration, retainedRegistration }));
+    return invocation;
+  } catch (error: unknown) {
+    if (invocation !== undefined) invocationRecords.delete(invocation);
+    const cleanupFailures = await cleanupM8InvocationConstruction(construction);
+    if (cleanupFailures.length !== 0) {
+      throw new AggregateError([error], `M8_INVOCATION_CONSTRUCTION_CLEANUP_UNCERTAIN:${cleanupFailures.join("|")}`, { cause: error });
+    }
+    throw error;
+  }
 }
 function ownedInvocation(value: M8Invocation): InvocationRecord {
   const record = invocationRecords.get(value); if (record === undefined) throw new Error("M8_INVOCATION_UNREGISTERED"); return record;
 }
-/** Explicit owner cleanup only; it never accepts a path and refuses unsafe or substituted trees. */
+/** Explicit owner cleanup only; it never accepts a path and revokes an unsafe invocation after safe independent cleanup. */
 export async function disposeM8Invocation(value: M8Invocation): Promise<void> {
   const owner = ownedInvocation(value); if ([...workspaceRecords.values()].some((workspace) => workspace.invocation === value)) throw new Error("M8_INVOCATION_WORKSPACES_LIVE");
-  try { await revalidatePublicationTree(value); }
-  catch { throw new Error("M8_INVOCATION_DISPOSAL_UNSAFE"); }
-  await rm(owner.root, { recursive: true, force: false });
+  let failure: unknown;
+  try { await revalidatePublicationTree(value); await rm(owner.root, { recursive: true, force: false }); }
+  catch (error: unknown) { failure = error; }
+  try { await revalidatePrivateDirectory(owner.retainedRegistration); await rm(owner.retained, { recursive: true, force: false }); }
+  catch (error: unknown) { failure ??= error; }
   invocationRecords.delete(value);
   for (const [handle, record] of authoritativeRunRecords) if (record.invocation === value) authoritativeRunRecords.delete(handle);
+  if (failure !== undefined) throw new Error("M8_INVOCATION_DISPOSAL_UNSAFE", { cause: failure });
 }
 /** Synthetic, Git-isolated materialization under a registered invocation root. */
 export async function materializeM8Fixture(scenarioValue: M8Scenario, invocationOrParent: M8Invocation | string = tmpdir()): Promise<MaterializedM8Fixture> {
@@ -1264,7 +1348,7 @@ async function registerActualRun(
   const owner = ownedInvocation(invocation);
   let controllerRoot: DirectoryRegistration | null = null; let stateRoot: DirectoryRegistration | null = null; let registrationError: string | null = null;
   try {
-    await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.retainedRegistration, owner.rootRegistration);
+    await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.retainedRegistration);
     if (controllerResult.evidenceRoot === undefined || resolve(controllerResult.evidenceRoot) !== controllerResult.evidenceRoot ||
         dirname(controllerResult.evidenceRoot) !== owner.retained || !physicallyWithin(owner.retained, controllerResult.evidenceRoot)) {
       throw new Error("M8_HARNESS_CONTROLLER_ROOT_UNBOUND");
@@ -1295,6 +1379,8 @@ async function runApprovedM8Arm(invocation: M8Invocation, freeze: M8FreezeResult
   try {
     // Materialization happens only after static owner input is registered. The
     // callback receives native authority before M5 reserves any worker.
+    await revalidatePrivateDirectory(owner.retainedRegistration);
+    assertM8ControlSocketPathBudget(owner.retained);
     materialization = await materializeM8Fixture(arm.scenario, invocation);
     const result = await controller(controllerGoal(arm.scenario, arm.mode), {
       cwd: materialization.root,
@@ -1526,7 +1612,7 @@ async function resolveDurableEvidence(record: AuthoritativeRunRecord): Promise<{
   await revalidateRegisteredWorkspace(record.materialization, record.invocation);
   if (record.materialization !== arm.materialization) throw new Error("M8_DURABLE_AUTHORITY_INVALID:runtime workspace record differs");
   const owner = ownedInvocation(record.invocation);
-  await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.retainedRegistration, owner.rootRegistration);
+  await revalidatePrivateDirectory(owner.rootRegistration); await revalidatePrivateDirectory(owner.retainedRegistration);
   await revalidatePrivateDirectory(record.controllerRoot, owner.retainedRegistration); await revalidatePrivateDirectory(record.stateRoot, record.controllerRoot);
   const location = { stateRoot: record.stateRoot.path, runId: arm.run_id };
   const [inspection, records] = await Promise.all([inspectRunStorage(location), readM5ManagedRecords(location)]);
