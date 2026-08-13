@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -225,6 +225,7 @@ function writer(paths: readonly string[], options: { readonly cleanupCertain?: b
 interface PiMutationRuntimeCounters {
   readToolExecutions: number;
   patchToolExecutions: number;
+  providerReadResults?: unknown[];
 }
 
 /** Exercises the shared Pi loop with the real bounded-worker tool closures. */
@@ -242,8 +243,10 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
               const value = record(params, "Pi read parameters"); const path = value["path"];
               if (typeof path !== "string" || path.length === 0) throw new Error("Pi read path is invalid");
               counters.readToolExecutions += 1;
-              await tools.readPath(path);
-              return { content: [], details: {} };
+              const result = await tools.readPath(path);
+              const providerResult = { content: [{ type: "text", text: result.content ?? "" }], details: {} };
+              counters.providerReadResults?.push(providerResult);
+              return providerResult;
             },
           },
           {
@@ -255,13 +258,16 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
               const value = record(params, "Pi patch parameters"); const path = value["path"]; const operation = value["operation"];
               const replacement = value["replacement_base64"]; const exists = value["expected_preimage_exists"];
               const digest = value["expected_preimage_digest"]; const size = value["expected_preimage_size"]; const mode = value["expected_preimage_mode"];
+              const hasDigest = Object.hasOwn(value, "expected_preimage_digest"); const hasSize = Object.hasOwn(value, "expected_preimage_size"); const hasMode = Object.hasOwn(value, "expected_preimage_mode");
               if (typeof path !== "string" || path.length === 0 || (operation !== "CREATE" && operation !== "REPLACE" && operation !== "DELETE") ||
                   (replacement !== null && typeof replacement !== "string") || typeof exists !== "boolean" ||
-                  (digest !== null && typeof digest !== "string") || (size !== null && (typeof size !== "number" || !Number.isSafeInteger(size))) ||
-                  (mode !== null && (typeof mode !== "number" || !Number.isSafeInteger(mode)))) throw new Error("Pi patch parameters are invalid");
+                  (hasDigest && digest !== null && typeof digest !== "string") || (hasSize && size !== null && (typeof size !== "number" || !Number.isSafeInteger(size))) ||
+                  (hasMode && mode !== null && (typeof mode !== "number" || !Number.isSafeInteger(mode)))) throw new Error("Pi patch parameters are invalid");
               counters.patchToolExecutions += 1;
               await tools.writePath({ path, operation, replacementBytes: replacement === null ? null : Buffer.from(replacement, "base64"), expectedPreimageExists: exists,
-                expectedPreimageDigest: digest as Sha256Digest | null, expectedPreimageSize: size as number | null, expectedPreimageMode: mode as number | null });
+                ...(hasDigest ? { expectedPreimageDigest: digest as Sha256Digest | null } : {}),
+                ...(hasSize ? { expectedPreimageSize: size as number | null } : {}),
+                ...(hasMode ? { expectedPreimageMode: mode as number | null } : {}), });
               return { content: [], details: {} };
             },
           },
@@ -795,6 +801,99 @@ test("actual Pi ordering delegates M4 admission to the bounded worker", async (t
       assert.equal(terminal!.failures[0]!.source_error_code, "OUT_OF_SCOPE_WRITE");
       const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: root });
       assert.equal(status.stdout, "", "the repository remains unchanged when bounded scope refuses before gateway execution");
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("F-01 Option B fills only omitted CAS preimage facts without exposing them to the provider", async (t) => {
+  const complete = { expected_preimage_digest: `sha256:${"0".repeat(64)}`, expected_preimage_size: 6, expected_preimage_mode: 0o644 };
+  const patch = (path: string, operation: "CREATE" | "REPLACE" | "DELETE", fields: JsonRecord = {}): BoundedPiFauxCall => ({
+    name: "apply_patch_scoped",
+    args: {
+      path, operation, replacement_base64: operation === "DELETE" ? null : Buffer.from(`changed:${path}\n`, "utf8").toString("base64"),
+      expected_preimage_exists: operation !== "CREATE", ...fields,
+    },
+  });
+  const report: BoundedPiFauxCall = { name: "submit_worker_report", args: { report: "bounded report" } };
+  const targetGoal = (path: string) => goal("DIRECT_LUNA_HIGH", [path], [path]);
+  const exercise = async (path: string, calls: readonly BoundedPiFauxCall[]) => {
+    const root = await fixture();
+    if (path === "verify/input.txt") await chmod(join(root, path), 0o644);
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-f01-"));
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0 };
+    const providerCalls = installBoundedPiFauxRuntimeCalls(calls);
+    try {
+      const result = await run(root, targetGoal(path), piMutationRuntime(counters), { retainedArtifactRoot: retained });
+      assert.ok(result.evidenceRoot !== undefined);
+      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+      return { result, records, counters, providerCalls: providerCalls() };
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  await t.test("CREATE normalizes omitted preimage fields to null without a read", async () => {
+    const outcome = await exercise("created.txt", [patch("created.txt", "CREATE"), report]);
+    assert.equal(outcome.result.outcome, "PASS", outcome.result.reason);
+    assert.equal(outcome.counters.patchToolExecutions, 1);
+    assert.equal(outcome.counters.readToolExecutions, 0);
+    assert.equal(outcome.records.toolResults.length, 0, "CREATE issued no preimage read");
+    assert.equal(outcome.records.mutationReceipts[0]!.before.digest, null);
+    assert.equal(outcome.records.mutationReceipts[0]!.before.size, null);
+    assert.equal(outcome.records.mutationReceipts[0]!.before.mode, null);
+  });
+
+  await t.test("REPLACE and DELETE reacquire omitted preimages through one bounded read", async (nested) => {
+    for (const operation of ["REPLACE", "DELETE"] as const) await nested.test(operation, async () => {
+      const outcome = await exercise("verify/input.txt", [patch("verify/input.txt", operation), report]);
+      assert.equal(outcome.result.outcome, "PASS", outcome.result.reason);
+      assert.equal(outcome.counters.patchToolExecutions, 1);
+      assert.equal(outcome.counters.readToolExecutions, 0, "the preimage read is internal, not provider-requested");
+      assert.equal(outcome.records.toolResults.length, 1, "exactly one internal read produced M4 evidence");
+      assert.equal(outcome.records.mutationReceipts[0]!.outcome, "APPLIED");
+      assert.equal(outcome.records.mutationReceipts[0]!.before.size, 6);
+      assert.equal(outcome.records.mutationReceipts[0]!.before.mode, 0o644);
+    });
+  });
+
+  await t.test("partial omission fills only absent fields and preserves explicit CAS assertions", async () => {
+    const outcome = await exercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_size: complete.expected_preimage_size }), report]);
+    assert.equal(outcome.result.outcome, "PASS", outcome.result.reason);
+    assert.equal(outcome.records.toolResults.length, 1);
+    assert.equal(outcome.records.mutationReceipts[0]!.before.size, complete.expected_preimage_size);
+    assert.notEqual(outcome.records.mutationReceipts[0]!.before.digest, null);
+    assert.notEqual(outcome.records.mutationReceipts[0]!.before.mode, null);
+  });
+
+  await t.test("stale explicit CAS and explicit null remain M4 rejections", async () => {
+    const stale = await exercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_digest: complete.expected_preimage_digest })]);
+    assert.equal(stale.result.outcome, "BLOCKED");
+    assert.equal(stale.records.toolResults.length, 1, "only absent fields were internally filled");
+    assert.equal(stale.records.mutationReceipts[0]!.outcome, "PREIMAGE_MISMATCH", "the stale explicit digest reached M4 unchanged");
+
+    const explicitNull = await exercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_digest: null })]);
+    assert.equal(explicitNull.result.outcome, "BLOCKED");
+    assert.equal(explicitNull.records.toolResults.length, 1, "explicit null was not replaced, although absent siblings were filled");
+    assert.equal(explicitNull.records.mutationReceipts.length, 0, "M4 rejected the explicit null before mutation admission");
+  });
+
+  await t.test("provider-visible reads remain text-only", async () => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-f01-provider-"));
+    const providerReadResults: unknown[] = [];
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0, providerReadResults };
+    installBoundedPiFauxRuntimeCalls([{ name: "read_scoped", args: { path: "verify/input.txt" } }, report]);
+    try {
+      await run(root, targetGoal("out.txt"), piMutationRuntime(counters), { retainedArtifactRoot: retained });
+      assert.equal(counters.readToolExecutions, 1);
+      assert.deepEqual(providerReadResults, [{ content: [{ type: "text", text: "input\n" }], details: {} }]);
+      assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode/u);
     } finally {
       configureM6FauxRuntimeForTests(undefined);
       await rm(retained, { recursive: true, force: true });

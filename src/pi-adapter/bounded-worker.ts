@@ -41,15 +41,20 @@ export interface BoundedWorkerRoute {
 }
 
 export interface BoundedWorkerTools {
-  readonly readPath: (path: string) => Promise<{ readonly content: string | null; readonly resultContentSha256: Sha256Digest }>;
+  /** Trusted metadata is internal to this adapter; provider-visible reads remain text-only. */
+  readonly readPath: (path: string) => Promise<{
+    readonly content: string | null;
+    readonly resultContentSha256: Sha256Digest;
+    readonly metadata: { readonly digest: Sha256Digest; readonly size: number; readonly mode: number };
+  }>;
   readonly writePath: (input: {
     readonly path: string;
     readonly operation: "CREATE" | "REPLACE" | "DELETE";
     readonly replacementBytes: Uint8Array | null;
     readonly expectedPreimageExists: boolean;
-    readonly expectedPreimageDigest: Sha256Digest | null;
-    readonly expectedPreimageSize: number | null;
-    readonly expectedPreimageMode: number | null;
+    readonly expectedPreimageDigest?: Sha256Digest | null;
+    readonly expectedPreimageSize?: number | null;
+    readonly expectedPreimageMode?: number | null;
   }) => Promise<Sha256Digest>;
   readonly readEvidence: (kind: string, contentSha256: Sha256Digest) => Promise<Sha256Digest>;
   readonly submitReport: (report: string) => void;
@@ -172,10 +177,11 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
         const exists = value["expected_preimage_exists"]; if (typeof exists !== "boolean") throw Object.assign(new Error("preimage existence is invalid"), { code: "TOOL_REQUEST_INVALID" });
         const content = value["replacement_base64"]; const replacementBytes = content === null ? null : typeof content === "string" ? Buffer.from(content, "base64") : (() => { throw Object.assign(new Error("replacement bytes are invalid"), { code: "TOOL_REQUEST_INVALID" }); })();
         const digest = value["expected_preimage_digest"]; const size = value["expected_preimage_size"]; const mode = value["expected_preimage_mode"];
+        const hasDigest = Object.hasOwn(value, "expected_preimage_digest"); const hasSize = Object.hasOwn(value, "expected_preimage_size"); const hasMode = Object.hasOwn(value, "expected_preimage_mode");
         await input.tools.writePath({ path: stringParam(value, "path"), operation, replacementBytes, expectedPreimageExists: exists,
-          expectedPreimageDigest: digest === null ? null : typeof digest === "string" ? digest as Sha256Digest : (() => { throw Object.assign(new Error("preimage digest is invalid"), { code: "TOOL_REQUEST_INVALID" }); })(),
-          expectedPreimageSize: size === null ? null : typeof size === "number" && Number.isSafeInteger(size) ? size : (() => { throw Object.assign(new Error("preimage size is invalid"), { code: "TOOL_REQUEST_INVALID" }); })(),
-          expectedPreimageMode: mode === null ? null : typeof mode === "number" && Number.isSafeInteger(mode) ? mode : (() => { throw Object.assign(new Error("preimage mode is invalid"), { code: "TOOL_REQUEST_INVALID" }); })(), });
+          ...(hasDigest ? { expectedPreimageDigest: digest === null ? null : typeof digest === "string" ? digest as Sha256Digest : (() => { throw Object.assign(new Error("preimage digest is invalid"), { code: "TOOL_REQUEST_INVALID" }); })() } : {}),
+          ...(hasSize ? { expectedPreimageSize: size === null ? null : typeof size === "number" && Number.isSafeInteger(size) ? size : (() => { throw Object.assign(new Error("preimage size is invalid"), { code: "TOOL_REQUEST_INVALID" }); })() } : {}),
+          ...(hasMode ? { expectedPreimageMode: mode === null ? null : typeof mode === "number" && Number.isSafeInteger(mode) ? mode : (() => { throw Object.assign(new Error("preimage mode is invalid"), { code: "TOOL_REQUEST_INVALID" }); })() } : {}), });
         return toolResult("applied");
       },
     };
@@ -280,7 +286,12 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     const refusal = await publishBoundedWorkerM4AdmissionRefusal({ stateRoot: input.stateRoot, runId: input.runId }, {
       boundedWorkerInvocationContentSha256: invocation.content_sha256 as Sha256Digest,
       admissionStateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest,
-      attemptedMutation: request,
+      attemptedMutation: {
+        ...request,
+        expectedPreimageDigest: request.expectedPreimageDigest ?? null,
+        expectedPreimageSize: request.expectedPreimageSize ?? null,
+        expectedPreimageMode: request.expectedPreimageMode ?? null,
+      },
       refusalCode: code,
     });
     addM4Evidence(refusal.content_sha256 as Sha256Digest, false);
@@ -295,7 +306,11 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
       requireAcceptedM4ToolBudget();
       const result = await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path, offset: 0, length: 65_536, mode: "TEXT" });
       addM4Evidence(result.resultRecord.content_sha256 as Sha256Digest, true);
-      return { content: result.content, resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest };
+      return {
+        content: result.content,
+        resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest,
+        metadata: { digest: result.metadata.digest as Sha256Digest, size: result.metadata.size, mode: result.metadata.mode },
+      };
     },
     async writePath(request) {
       assertProductiveAuthorityOpen();
@@ -305,19 +320,27 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
       if (acceptedMutationAdmissions >= input.maxM4MutationCalls) await refuseMutationAdmission(request, "M4_TOOL_BUDGET_EXHAUSTED", "M4 mutation-admission budget exhausted");
       if (acceptedM4ToolCalls >= input.maxM4ToolCalls) await refuseMutationAdmission(request, "M4_TOOL_BUDGET_EXHAUSTED", "accepted M4 tool-call budget exhausted");
       if (performance.now() - start > input.deadlineMs) throw Object.assign(new Error("bounded worker deadline exceeded"), { code: "WORKER_DEADLINE_EXCEEDED" });
+      const needsPreimage = request.operation !== "CREATE" && request.expectedPreimageExists === true &&
+        (request.expectedPreimageDigest === undefined || request.expectedPreimageSize === undefined || request.expectedPreimageMode === undefined);
+      const preimage = needsPreimage ? await tools.readPath(request.path) : undefined;
+      const expectedPreimageDigest = request.expectedPreimageDigest === undefined ? preimage?.metadata.digest ?? null : request.expectedPreimageDigest;
+      const expectedPreimageSize = request.expectedPreimageSize === undefined ? preimage?.metadata.size ?? null : request.expectedPreimageSize;
+      const expectedPreimageMode = request.expectedPreimageMode === undefined ? preimage?.metadata.mode ?? null : request.expectedPreimageMode;
+      const normalizedRequest = { ...request, expectedPreimageDigest, expectedPreimageSize, expectedPreimageMode };
+      if (acceptedM4ToolCalls >= input.maxM4ToolCalls) await refuseMutationAdmission(normalizedRequest, "M4_TOOL_BUDGET_EXHAUSTED", "accepted M4 tool-call budget exhausted");
       const result = await input.gateway.apply_patch_scoped({
         stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest,
         lockAcquisitionContentSha256: lockAcquisitionAuthority(input.lock).content_sha256 as Sha256Digest,
-        operation: request.operation,
-        path: request.path,
+        operation: normalizedRequest.operation,
+        path: normalizedRequest.path,
         ownershipClass: "OWNER_ACCEPTED_MUTABLE",
         dataClass: "PUBLIC_SOURCE",
-        expectedPreimageExists: request.expectedPreimageExists,
-        expectedPreimageDigest: request.expectedPreimageDigest,
-        expectedPreimageSize: request.expectedPreimageSize,
-        expectedPreimageMode: request.expectedPreimageMode,
-        replacementBytes: request.replacementBytes,
-        requestedFinalMode: request.operation === "DELETE" ? null : 0o644,
+        expectedPreimageExists: normalizedRequest.expectedPreimageExists,
+        expectedPreimageDigest: normalizedRequest.expectedPreimageDigest,
+        expectedPreimageSize: normalizedRequest.expectedPreimageSize,
+        expectedPreimageMode: normalizedRequest.expectedPreimageMode,
+        replacementBytes: normalizedRequest.replacementBytes,
+        requestedFinalMode: normalizedRequest.operation === "DELETE" ? null : 0o644,
       });
       addM4Evidence(result.receipt.content_sha256 as Sha256Digest, true);
       acceptedMutationAdmissions += 1;
