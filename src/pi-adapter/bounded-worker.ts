@@ -161,7 +161,7 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
       if (cancelled(input.signal)) throw abortError("PRE_TOOL_ADMISSION");
     };
     const readTool = {
-      name: "read_scoped", label: "Scoped read", description: "Read one allowed repository path through M4.",
+      name: "read_scoped", label: "Scoped read", description: "Read one allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; ., an empty path, ./..., root aliases, .. or traversal, and absolute paths are invalid.",
       parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" } } },
       async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
     };

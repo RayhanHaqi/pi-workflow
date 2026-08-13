@@ -327,6 +327,16 @@ test("R3 fixture matrix is exact and unknown facts fail closed", async () => {
   assert.throws(() => parseM8FixtureBundle(raw), /M8_FIXTURE_INVALID/);
 });
 
+test("S01 Single Owner carries the exact canonical mechanical-edit objective", async () => {
+  const s01 = scenario(await bundle(), "M8-S01");
+  const singleOwner = s01.routes.SINGLE_OWNER_SOL.tasks[0]!;
+  const direct = s01.routes.DIRECT_LUNA_HIGH.tasks[0]!;
+  const expected = "Mutate only src/service-a.conf and src/service-b.conf.\nIn each file, replace exactly:\n\nlog_level=info\\n\n\nwith:\n\nlog_level=warning\\n";
+  assert.notEqual(singleOwner.objective, "Own frozen objective.");
+  assert.equal(singleOwner.objective, expected);
+  assert.equal(singleOwner.objective, direct.objective, "matched S01 arms retain the same benchmark task");
+});
+
 test("static slots bind the authoritative current baseline and preserve the exact 27-slot order", async () => {
   const parsed = await bundle(); const s01 = scenario(parsed, "M8-S01"); const { baseline, options } = await staticPlanBaselineFixture();
   const first = m8StaticSlotProjection(parsed, s01, "DIRECT_LUNA_HIGH", baseline);

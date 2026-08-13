@@ -588,6 +588,11 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
     scope, required_outputs: required, tasks: Object.freeze(candidate), baseline_mode: baseline });
 }
 
+function providerVisibleTaskContract(objective: string, readablePaths: readonly string[], editablePaths: readonly string[], plannerPlan: PlanApprovalDocument | null): string {
+  const paths = (values: readonly string[]) => values.map((entry) => `- ${entry}`).join("\n") || "- (none)";
+  const plannerInstruction = plannerPlan === null ? "" : `\nPlanner instruction: submit exactly candidate_plan_sha256:${plannerPlan.content_sha256}; topology, scope, and identity expansion are forbidden.`;
+  return `Frozen task contract\n\nObjective (exact frozen text):\n${objective}\n\nReadable paths (exact frozen scope):\n${paths(readablePaths)}\n\nEditable paths (exact frozen scope):\n${paths(editablePaths)}\n\nScoped path requirements:\n- Scoped tool path arguments are exact canonical repository-relative paths; use the listed spelling exactly.\n- read_scoped.path must name one authorized regular file within the frozen readable scope.\n- Repository-root aliases and discovery are not authorized. Invalid forms include ., an empty path, ./..., root aliases, .. or traversal, and absolute paths.\n- Do not normalize an alias into another path.${plannerInstruction}`;
+}
 function processMetadata() { return { controller_instance_id: "pre-m8-bounded-controller", process_id: Math.max(1, process.pid), invocation_id: "pre-m8-bounded-invocation" }; }
 function evidence(value: unknown): { readonly bytes: Buffer; readonly mediaType: string } { return { bytes: Buffer.from(`${canonicalize(value)}\n`, "utf8"), mediaType: "application/json" }; }
 function event(type: TransitionEvent["event_type"], payload: Record<string, unknown> = {}): TransitionEvent {
@@ -1086,7 +1091,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       const execution = await workerRunner({ stateRoot, runId: RUN_ID, operationId, reservation: admission, task, taskGraph: graph, plan: workerPlan, inputStateToken: invocationState, lock: lock!, gateway,
         route: { logicalRole: routeRole, providerId: selectedRoute.provider_id, modelId: selectedRoute.model_id, effort: selectedRoute.effort }, profile,
         systemPrompt: `Pre-M8 bounded ${profile}; use only supplied M4 tools; no retry, replan, commands, shell, filesystem, or network.`,
-        userPrompt: profile === "SOL_PLANNER" ? `${goal.objective}\nSubmit exactly candidate_plan_sha256:${workerPlan!.content_sha256}; topology, scope, and identity expansion are forbidden.` : task?.objective ?? goal.objective,
+        userPrompt: providerVisibleTaskContract(task?.objective ?? goal.objective, task?.scope.readable_paths ?? goal.scope.readable_paths, task?.scope.editable_paths ?? goal.scope.editable_paths, profile === "SOL_PLANNER" ? workerPlan : null),
         allowedReadPaths: goal.scope.readable_paths, allowedEditPaths: task?.scope.editable_paths ?? [], maxM4ToolCalls, maxM4MutationCalls,
         maxModelTurns: (() => { const remaining = admission.budget.find((entry) => entry.dimension === "MODEL_TURN")?.soft_remaining; if (remaining === undefined || remaining === null) throw new BoundedWorkflowError("M5_MODEL_TURN_AUTHORITY", "M5 did not provide an enforceable model-turn admission remainder"); return remaining; })(), deadlineMs: MAX_WALL_TIME_MS, signal: controllerAbort.signal });
       const [inspection, records, m5Records] = await Promise.all([inspectRunStorage({ stateRoot, runId: RUN_ID }), readBoundedWorkerRecords({ stateRoot, runId: RUN_ID }), readM5ManagedRecords({ stateRoot, runId: RUN_ID })]);

@@ -24,6 +24,7 @@ import {
 import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
 import { configureM6FauxRuntimeForTests, M6WorkerError, runBoundedPiAgent, runBoundedPiAgentForTests } from "../src/pi-adapter/worker.js";
 import { assertDocumentValid, identifyContractDocument } from "../src/schemas/index.js";
+import { assertM4CanonicalPath } from "../src/secure-fs/path.js";
 import { createM5R3Fixture, directFastPreflightFixture, removeM5R3Fixture, r3ProcessMetadata } from "./m5-r3-fixtures.js";
 
 const execFileAsync = promisify(execFile);
@@ -205,6 +206,38 @@ function goal(mode: BoundedMutationGoal["execution_mode"], outputs = ["out.txt"]
   };
 }
 
+const s01MechanicalObjective = "Mutate only src/service-a.conf and src/service-b.conf.\nIn each file, replace exactly:\n\nlog_level=info\\n\n\nwith:\n\nlog_level=warning\\n";
+function s01SingleOwnerGoal(): BoundedMutationGoal {
+  const task = {
+    task_id: "sol-m8-s01",
+    objective: s01MechanicalObjective,
+    editable_paths: ["src/service-a.conf", "src/service-b.conf"],
+    required_outputs: ["src/service-a.conf", "src/service-b.conf"],
+    dependencies: [],
+  } as const;
+  return {
+    objective: s01MechanicalObjective,
+    stop_condition: "Stop at deterministic acceptance.",
+    execution_mode: "SINGLE_OWNER_SOL",
+    scope: { readable_paths: ["src/service-a.conf", "src/service-b.conf", "verify", "verify/check.mjs"], editable_paths: task.editable_paths, frozen_paths: ["verify"] },
+    required_outputs: task.required_outputs,
+    tasks: [task],
+  };
+}
+async function s01Fixture(): Promise<string> {
+  const root = await fixture();
+  await mkdir(join(root, "src"));
+  await writeFile(join(root, "src", "service-a.conf"), "log_level=info\n");
+  await writeFile(join(root, "src", "service-b.conf"), "log_level=info\n");
+  await writeFile(join(root, "verify", "check.mjs"), "process.exit(0);\n");
+  await chmod(join(root, "src", "service-a.conf"), 0o644);
+  await chmod(join(root, "src", "service-b.conf"), 0o644);
+  await chmod(join(root, "verify", "check.mjs"), 0o644);
+  await execFileAsync("git", ["add", "src/service-a.conf", "src/service-b.conf", "verify/check.mjs"], { cwd: root });
+  await execFileAsync("git", ["commit", "-qm", "add S01 files"], { cwd: root });
+  return root;
+}
+
 function writer(paths: readonly string[], options: { readonly cleanupCertain?: boolean; readonly plannerIdentity?: boolean; readonly modelTurns?: number | null } = {}): BoundedWorkerRuntime {
   let index = 0;
   return {
@@ -321,6 +354,78 @@ test("pre-M8 Direct Luna, Single Owner Sol, and sequential Routed DAG pass throu
       assert.equal(result.finalState?.counters.worker_invocations.total, mode === "ROUTED_DAG" ? outputs.length + 2 : 1);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+});
+
+test("provider-visible S01 contract exposes only frozen task scope and exact reads remain bounded", async () => {
+  const root = await s01Fixture();
+  const retained = await mkdtemp(join(tmpdir(), "pre-m8-s01-contract-"));
+  let providerPrompt = "";
+  try {
+    const result = await run(root, s01SingleOwnerGoal(), {
+      async execute({ profile, tools, userPrompt }) {
+        try {
+          assert.equal(profile, "MUTATION_EXECUTOR");
+          providerPrompt = userPrompt;
+          const paths = ["src/service-a.conf", "src/service-b.conf"] as const;
+          for (const path of paths) {
+            const before = await tools.readPath(path);
+            await tools.writePath({ path, operation: "REPLACE", replacementBytes: Buffer.from("log_level=warning\n"), expectedPreimageExists: true,
+              expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
+          }
+          tools.submitReport("bounded S01 fixture report");
+          return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        } catch (error: unknown) {
+          return { completed: false, firstFailureCode: error !== null && typeof error === "object" && "code" in error ? String(error.code) : "TEST_RUNTIME_FAILURE", firstFailureStage: "TEST", firstFailureMessage: error instanceof Error ? error.message : String(error), cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        }
+      },
+    }, { retainedArtifactRoot: retained });
+    assert.equal(result.outcome, "PASS", result.reason);
+    assert.match(providerPrompt, new RegExp(`Objective \\(exact frozen text\\):\\n${s01MechanicalObjective.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`));
+    assert.match(providerPrompt, /Readable paths \(exact frozen scope\):\n- src\/service-a\.conf\n- src\/service-b\.conf\n- verify\n- verify\/check\.mjs/);
+    assert.match(providerPrompt, /Editable paths \(exact frozen scope\):\n- src\/service-a\.conf\n- src\/service-b\.conf/);
+    assert.match(providerPrompt, /exact canonical repository-relative paths/);
+    assert.match(providerPrompt, /Repository-root aliases and discovery are not authorized/);
+    assert.match(providerPrompt, /Invalid forms include \., an empty path, \.\/\.\.\., root aliases, \.\. or traversal, and absolute paths/);
+    assert.ok(result.evidenceRoot !== undefined);
+    const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+    assert.deepEqual(records.toolResults.map((entry) => entry.path).sort(), ["src/service-a.conf", "src/service-b.conf"], "both exact authorized regular files reached M4");
+  } finally {
+    await rm(retained, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("read_scoped root aliases and out-of-scope nested paths fail before read gateway admission", async (t) => {
+  const rejectedRead = async (requestedPath: string) => {
+    const root = await s01Fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-s01-read-refusal-"));
+    try {
+      const result = await run(root, s01SingleOwnerGoal(), {
+        async execute({ tools }) {
+          try {
+            await tools.readPath(requestedPath);
+            return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+          } catch (error: unknown) {
+            return { completed: false, firstFailureCode: error !== null && typeof error === "object" && "code" in error ? String(error.code) : "TEST_RUNTIME_FAILURE", firstFailureStage: "TEST", cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+          }
+        },
+      }, { retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "BLOCKED");
+      assert.ok(result.evidenceRoot !== undefined);
+      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+      assert.equal(records.toolResults.length, 0, `${requestedPath} was rejected before gateway read admission`);
+      assert.equal(records.mutationReceipts.length, 0);
+    } finally {
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  await t.test("repository root alias dot", () => rejectedRead("."));
+  await t.test("canonical but task-external nested path", () => rejectedRead("src/service-a.conf/nested"));
+  for (const path of ["", "./src/service-a.conf", "../src/service-a.conf", "/tmp/service-a.conf"] as const) {
+    assert.throws(() => assertM4CanonicalPath(path), /INVALID_CANONICAL_PATH/, `${path || "empty path"} remains non-canonical`);
+  }
 });
 
 test("out-of-scope, wrong-output, missing/failed verification, and late drift block", async (t) => {
