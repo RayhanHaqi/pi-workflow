@@ -1576,6 +1576,37 @@ export interface BoundedPiAgentInput {
   readonly signal?: AbortSignal;
 }
 
+function boundedDiagnosticText(value: string, maximumCodePoints: number): string {
+  const utf8 = Buffer.from(value.slice(0, maximumCodePoints * 4), "utf8").toString("utf8");
+  const normalized = utf8.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ").replace(/\s+/gu, " ").trim();
+  return [...normalized].slice(0, maximumCodePoints).join("");
+}
+
+function safeAfterToolArgumentProjection(name: string, args: unknown): string {
+  if (!isJsonRecord(args)) return "omitted";
+  const text = (key: string, maximumCodePoints = 160): string => typeof args[key] === "string" ? boundedDiagnosticText(args[key], maximumCodePoints) : "unavailable";
+  const digest = (key: string): string => typeof args[key] === "string" && /^sha256:[0-9a-f]{64}$/u.test(args[key]) ? args[key] : "unavailable";
+  const booleanValue = (key: string): string => typeof args[key] === "boolean" ? String(args[key]) : "unavailable";
+  const safeInteger = (key: string): string => typeof args[key] === "number" && Number.isSafeInteger(args[key]) ? String(args[key]) : "unavailable";
+  if (name === "read_scoped") return `path=${text("path")}`;
+  if (name === "apply_patch_scoped") {
+    const operation = args["operation"];
+    return `path=${text("path")},operation=${operation === "CREATE" || operation === "REPLACE" || operation === "DELETE" ? operation : "unavailable"},preimage_exists=${booleanValue("expected_preimage_exists")},preimage_digest=${digest("expected_preimage_digest")},preimage_size=${safeInteger("expected_preimage_size")},preimage_mode=${safeInteger("expected_preimage_mode")}`;
+  }
+  if (name === "read_authoritative_evidence") return `kind=${text("kind", 96)},content_sha256=${digest("content_sha256")}`;
+  if (name.startsWith("submit_")) return `report_length=${typeof args["report"] === "string" ? args["report"].length : "unavailable"}`;
+  return "omitted";
+}
+
+/** Retain only validated, non-payload tool metadata and Pi's first error text. */
+function afterToolFailureMessage(name: string, args: unknown, result: unknown): string {
+  const resultRecord = isJsonRecord(result) ? result : undefined;
+  const content = resultRecord !== undefined && Array.isArray(resultRecord["content"]) ? resultRecord["content"] : [];
+  const firstContent = isJsonRecord(content[0]) ? content[0] : undefined;
+  const errorText = typeof firstContent?.["text"] === "string" ? boundedDiagnosticText(firstContent["text"], 240) : "unavailable";
+  return boundedDiagnosticText(`tool=${boundedDiagnosticText(name, 96)}; args=${safeAfterToolArgumentProjection(name, args)}; error=${errorText}`, 480);
+}
+
 export interface BoundedPiAgentResult {
   readonly completed: boolean;
   readonly firstFailureCode?: string;
@@ -1703,7 +1734,11 @@ async function runBoundedPiAgentImpl(
         const value = record(context, "afterToolCall context");
         const call = record(value["toolCall"], "tool call");
         const name = string(call["name"], "tool call name");
-        if (boolean(value["isError"], "tool result error state")) { latch("TOOL_EXECUTION_FAILED", "TOOL_EXECUTION"); agent?.abort(); return { terminate: true }; }
+        if (boolean(value["isError"], "tool result error state")) {
+          latch("TOOL_EXECUTION_FAILED", "TOOL_EXECUTION", afterToolFailureMessage(name, value["args"], value["result"]));
+          agent?.abort();
+          return { terminate: true };
+        }
         if (name.startsWith("submit_")) return { terminate: true };
         return undefined;
       },

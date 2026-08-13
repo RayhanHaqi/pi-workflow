@@ -536,6 +536,64 @@ test("M6WorkerError diagnostics reach the bounded-worker result safely and remai
   }
 });
 
+test("Pi afterToolCall retains only a bounded safe tool failure diagnostic", async () => {
+  const root = await fixture();
+  const retained = await mkdtemp(join(tmpdir(), "pre-m8-retained-"));
+  const replacementPayload = "UNSAFE_REPLACEMENT_BASE64_PAYLOAD";
+  const errorText = `Pi-provided tool failure ${"x".repeat(1_024)}`;
+  const patchArguments = {
+    path: "src/safe-target.ts", operation: "REPLACE", replacement_base64: replacementPayload, expected_preimage_exists: true,
+    expected_preimage_digest: `sha256:${"a".repeat(64)}`, expected_preimage_size: 17, expected_preimage_mode: 0o644,
+  };
+  const failingInput = (execute: () => Promise<never>, signal?: AbortSignal): Parameters<typeof runBoundedPiAgentForTests>[0] => ({
+    providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt: "bounded", userPrompt: "bounded", maxModelTurns: 1, deadlineMs: 5_000,
+    tools: [{
+      name: "apply_patch_scoped", label: "Scoped patch", description: "Scoped patch", parameters: {
+        type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
+          path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
+        },
+      },
+      async execute() { return execute(); },
+    }],
+    ...(signal === undefined ? {} : { signal }),
+  });
+  try {
+    const providerCalls = installBoundedPiFauxRuntimeCalls([{ name: "apply_patch_scoped", args: patchArguments }]);
+    const execution = await run(root, goal("DIRECT_LUNA_HIGH"), {
+      async execute({ signal }) { return runBoundedPiAgentForTests(failingInput(async () => { throw new Error(errorText); }, signal)); },
+    }, { retainedArtifactRoot: retained });
+    assert.equal(execution.outcome, "BLOCKED");
+    assert.equal(providerCalls(), 1);
+    assert.ok(execution.evidenceRoot !== undefined);
+    const records = await readM5ManagedRecords({ stateRoot: join(execution.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+    const result = records.boundedWorkerResults.find((entry) => entry.outcome === "BLOCKED");
+    assert.notEqual(result, undefined);
+    assert.equal(result!.first_failure_code, "TOOL_EXECUTION_FAILED");
+    assert.equal(result!.first_failure_stage, "TOOL_EXECUTION");
+    assert.match(result!.first_failure_message!, /tool=apply_patch_scoped/u);
+    assert.match(result!.first_failure_message!, /path=src\/safe-target\.ts/u);
+    assert.match(result!.first_failure_message!, /operation=REPLACE/u);
+    assert.match(result!.first_failure_message!, /Pi-provided tool failure/u);
+    assert.doesNotMatch(result!.first_failure_message!, /replacement_base64|UNSAFE_REPLACEMENT_BASE64_PAYLOAD/u);
+    assert.ok([...result!.first_failure_message!].length <= 480);
+
+    const controller = new AbortController();
+    const secondProviderCalls = installBoundedPiFauxRuntimeCalls([{ name: "apply_patch_scoped", args: patchArguments }]);
+    const alreadyLatched = await runBoundedPiAgentForTests(failingInput(async () => {
+      controller.abort();
+      throw new Error("later tool failure must not replace the first latch");
+    }, controller.signal));
+    assert.equal(secondProviderCalls(), 1);
+    assert.equal(alreadyLatched.firstFailureCode, "WORKER_ABORTED");
+    assert.equal(alreadyLatched.firstFailureStage, "ABORT");
+    assert.equal(alreadyLatched.firstFailureMessage, undefined);
+  } finally {
+    configureM6FauxRuntimeForTests(undefined);
+    await rm(retained, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("test-only bounded runtime requires explicit registered provenance", async () => {
   const root = await fixture();
   configureBoundedWorkerFauxRuntimeForTests(undefined);
