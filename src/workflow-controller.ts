@@ -1877,6 +1877,9 @@ async function runExternalLifecycleOwner(
       // would recursively invoke this lifecycle parent instead of the child.
       if (entry === "--eval" || entry === "-e") { index += 1; continue; }
       if (entry.startsWith("--eval=")) continue;
+      // --input-type is valid only for string input, never the child file entrypoint.
+      if (entry === "--input-type") { index += 1; continue; }
+      if (entry.startsWith("--input-type=")) continue;
       childExecArgv.push(entry);
     }
     try {

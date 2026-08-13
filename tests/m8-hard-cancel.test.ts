@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -162,6 +163,28 @@ test("D-01/R1-T03 COMPLETE remains a recognized successful lifecycle result", as
     const claim = JSON.parse(await readFile(join(dirname(value.capability), "completion.claim.json"), "utf8")) as Record<string, unknown>;
     assert.equal(claim["winner"], "COMPLETED");
   } finally { await dispose(value); }
+});
+
+test("productive-child input-type execArgv sanitizer preserves file bootstrap and unrelated flags", async () => {
+  const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-input-type-retained-")); const probe = join(retained, "exec-argv-probe.mjs"); const probeResult = join(retained, "exec-argv.json");
+  const originalExecArgv = process.execArgv; const originalProbePath = process.env["M8_EXECARGV_PROBE_PATH"];
+  try {
+    await writeFile(probe, "import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.M8_EXECARGV_PROBE_PATH, JSON.stringify(process.execArgv));\n", { mode: 0o600 });
+    for (const inheritedInputType of [["--input-type=module"], ["--input-type", "module"]] as const) {
+      const events: string[] = []; await rm(probeResult, { force: true }); process.execArgv = [...originalExecArgv, ...inheritedInputType, "--trace-warnings", `--import=${pathToFileURL(probe).href}`]; process.env["M8_EXECARGV_PROBE_PATH"] = probeResult;
+      const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+        cwd: root, authority: authority(), retainedArtifactRoot: retained,
+        approveTasks: async ({ contract }) => contract.content_sha256 as `sha256:${string}`,
+      }, "COMPLETE", (stage) => { if (stage === "START_RECEIVED") events.push(stage); });
+      assert.deepEqual(events, ["START_RECEIVED"], "productive child reaches bootstrap and handles START"); assert.doesNotMatch(result.reason, /ERR_INPUT_TYPE_NOT_ALLOWED/);
+      const childExecArgv = JSON.parse(await readFile(probeResult, "utf8")) as string[];
+      assert.ok(childExecArgv.includes("--trace-warnings"), "unrelated inherited execArgv survives"); assert.equal(childExecArgv.some((entry) => entry === "--input-type" || entry.startsWith("--input-type=") || entry === "module"), false, "input-type and its split value are not inherited");
+    }
+  } finally {
+    process.execArgv = originalExecArgv;
+    if (originalProbePath === undefined) delete process.env["M8_EXECARGV_PROBE_PATH"]; else process.env["M8_EXECARGV_PROBE_PATH"] = originalProbePath;
+    await dispose({ root, retained });
+  }
 });
 
 test("D-07 control socket is ready and private before capability publication and START", async () => {
