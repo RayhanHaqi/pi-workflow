@@ -1887,6 +1887,8 @@ async function runExternalLifecycleOwner(
       if (entry.startsWith("--input-type=")) continue;
       // tsx resolves this relative operator-local configuration after the child changes cwd.
       if (entry === "--tsconfig") { index += 1; continue; }
+      // Resolve the required tsx bootstrap before the productive child changes cwd.
+      if (entry === "--import" && process.execArgv[index + 1] === "tsx") { childExecArgv.push(entry, import.meta.resolve("tsx")); index += 1; continue; }
       childExecArgv.push(entry);
     }
     try {

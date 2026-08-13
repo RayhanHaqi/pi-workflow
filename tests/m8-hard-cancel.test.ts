@@ -187,6 +187,30 @@ test("productive-child input-type execArgv sanitizer preserves file bootstrap an
   }
 });
 
+test("productive-child execArgv sanitizer resolves split tsx bootstrap before changing cwd", async () => {
+  const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-tsx-bootstrap-retained-")); const probe = join(retained, "exec-argv-probe.mjs"); const probeResult = join(retained, "exec-argv.json");
+  const originalExecArgv = process.execArgv; const originalProbePath = process.env["M8_EXECARGV_PROBE_PATH"];
+  try {
+    await assert.rejects(execFileAsync(process.execPath, ["--input-type=module", "--eval", "import.meta.resolve('tsx');"], { cwd: root }), (error: unknown) => {
+      assert.match((error as { readonly stderr?: string }).stderr ?? "", /ERR_MODULE_NOT_FOUND/); return true;
+    }, "isolated fixture cwd cannot resolve bare tsx");
+    await writeFile(probe, "import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.M8_EXECARGV_PROBE_PATH, JSON.stringify(process.execArgv));\n", { mode: 0o600 });
+    const probeUrl = pathToFileURL(probe).href; const events: string[] = []; process.execArgv = ["--import", "tsx", "--trace-warnings", "--import", probeUrl]; process.env["M8_EXECARGV_PROBE_PATH"] = probeResult;
+    const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+      cwd: root, authority: authority(), retainedArtifactRoot: retained,
+      approveTasks: async ({ contract }) => contract.content_sha256 as `sha256:${string}`,
+    }, "COMPLETE", (stage) => { if (stage === "START_RECEIVED") events.push(stage); });
+    assert.deepEqual(events, ["START_RECEIVED"], "productive child reaches START from the isolated fixture cwd"); assert.equal(result.outcome, "PASS", result.reason);
+    const childExecArgv = JSON.parse(await readFile(probeResult, "utf8")) as string[]; const tsxImportIndex = childExecArgv.indexOf("--import"); const tsxSpecifier = childExecArgv[tsxImportIndex + 1]!;
+    assert.ok(tsxImportIndex >= 0, "tsx import flag is retained"); assert.notEqual(tsxSpecifier, "tsx", "bare tsx is not passed to the productive child"); assert.match(tsxSpecifier, /^file:\/\//u, "tsx import target is resolved and cwd-independent");
+    assert.ok(childExecArgv.some((entry, index) => entry === "--import" && childExecArgv[index + 1] === probeUrl), "safe absolute import remains preserved"); assert.ok(childExecArgv.includes("--trace-warnings"), "safe unrelated execArgv remains preserved");
+  } finally {
+    process.execArgv = originalExecArgv;
+    if (originalProbePath === undefined) delete process.env["M8_EXECARGV_PROBE_PATH"]; else process.env["M8_EXECARGV_PROBE_PATH"] = originalProbePath;
+    await dispose({ root, retained });
+  }
+});
+
 test("productive-child execArgv sanitizer removes the parent-relative tsconfig pair", async () => {
   const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-tsconfig-retained-")); const probe = join(retained, "exec-argv-probe.mjs"); const probeResult = join(retained, "exec-argv.json");
   const originalExecArgv = process.execArgv; const originalProbePath = process.env["M8_EXECARGV_PROBE_PATH"];
