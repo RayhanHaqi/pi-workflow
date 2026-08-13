@@ -1885,6 +1885,8 @@ async function runExternalLifecycleOwner(
       // --input-type is valid only for string input, never the child file entrypoint.
       if (entry === "--input-type") { index += 1; continue; }
       if (entry.startsWith("--input-type=")) continue;
+      // tsx resolves this relative operator-local configuration after the child changes cwd.
+      if (entry === "--tsconfig") { index += 1; continue; }
       childExecArgv.push(entry);
     }
     try {

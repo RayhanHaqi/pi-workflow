@@ -187,6 +187,29 @@ test("productive-child input-type execArgv sanitizer preserves file bootstrap an
   }
 });
 
+test("productive-child execArgv sanitizer removes the parent-relative tsconfig pair", async () => {
+  const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-tsconfig-retained-")); const probe = join(retained, "exec-argv-probe.mjs"); const probeResult = join(retained, "exec-argv.json");
+  const originalExecArgv = process.execArgv; const originalProbePath = process.env["M8_EXECARGV_PROBE_PATH"];
+  try {
+    assert.equal((await lstat(join(process.cwd(), "tsconfig.json"))).isFile(), true, "operator cwd has the relative tsconfig");
+    await assert.rejects(lstat(join(root, "tsconfig.json")), { code: "ENOENT" }, "productive child fixture cwd has no parent tsconfig");
+    await writeFile(probe, "import { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.M8_EXECARGV_PROBE_PATH, JSON.stringify(process.execArgv));\n", { mode: 0o600 });
+    const events: string[] = []; process.execArgv = [...originalExecArgv, "--tsconfig", "tsconfig.json", "--trace-warnings", `--import=${pathToFileURL(probe).href}`]; process.env["M8_EXECARGV_PROBE_PATH"] = probeResult;
+    const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+      cwd: root, authority: authority(), retainedArtifactRoot: retained,
+      approveTasks: async ({ contract }) => contract.content_sha256 as `sha256:${string}`,
+    }, "COMPLETE", (stage) => { if (stage === "START_RECEIVED") events.push(stage); });
+    assert.deepEqual(events, ["START_RECEIVED"], "productive child executes from the fixture cwd without the operator-relative tsconfig"); assert.equal(result.outcome, "PASS", result.reason);
+    const childExecArgv = JSON.parse(await readFile(probeResult, "utf8")) as string[];
+    assert.equal(childExecArgv.includes("--tsconfig"), false, "tsconfig flag is not inherited"); assert.equal(childExecArgv.includes("tsconfig.json"), false, "tsconfig value is not left as an orphan child argument");
+    assert.ok(childExecArgv.includes("--trace-warnings"), "safe unrelated inherited execArgv survives");
+  } finally {
+    process.execArgv = originalExecArgv;
+    if (originalProbePath === undefined) delete process.env["M8_EXECARGV_PROBE_PATH"]; else process.env["M8_EXECARGV_PROBE_PATH"] = originalProbePath;
+    await dispose({ root, retained });
+  }
+});
+
 test("D-07 control socket is ready and private before capability publication and START", async () => {
   const root = await repository(); const retained = await mkdtemp(join(tmpdir(), "m8-d07-retained-")); const events: string[] = [];
   try {
