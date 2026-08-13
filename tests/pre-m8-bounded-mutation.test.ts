@@ -224,6 +224,17 @@ function s01SingleOwnerGoal(): BoundedMutationGoal {
     tasks: [task],
   };
 }
+function s01RoutedGoal(): BoundedMutationGoal {
+  const singleOwner = s01SingleOwnerGoal();
+  return {
+    ...singleOwner,
+    execution_mode: "ROUTED_DAG",
+    tasks: [
+      { task_id: "luna-m8-s01-a", objective: "Apply the frozen service-a.conf mutation.", editable_paths: ["src/service-a.conf"], required_outputs: ["src/service-a.conf"], dependencies: [] },
+      { task_id: "luna-m8-s01-b", objective: "Apply the frozen service-b.conf mutation.", editable_paths: ["src/service-b.conf"], required_outputs: ["src/service-b.conf"], dependencies: ["luna-m8-s01-a"] },
+    ],
+  };
+}
 async function s01Fixture(): Promise<string> {
   const root = await fixture();
   await mkdir(join(root, "src"));
@@ -356,39 +367,75 @@ test("pre-M8 Direct Luna, Single Owner Sol, and sequential Routed DAG pass throu
   });
 });
 
-test("provider-visible S01 contract exposes only frozen task scope and exact reads remain bounded", async () => {
+test("provider-visible Routed S01 scope separates regular-file reads from prefix authority", async () => {
   const root = await s01Fixture();
   const retained = await mkdtemp(join(tmpdir(), "pre-m8-s01-contract-"));
-  let providerPrompt = "";
+  const frozenReadablePaths = ["src/service-a.conf", "src/service-b.conf", "verify", "verify/check.mjs"];
+  let plannerPrompt = "";
+  let mutationIndex = 0;
+  let rejectedPrefixReads = 0;
+  let approvedPlanIdentity = "";
   try {
-    const result = await run(root, s01SingleOwnerGoal(), {
+    const result = await run(root, s01RoutedGoal(), {
       async execute({ profile, tools, userPrompt }) {
         try {
-          assert.equal(profile, "MUTATION_EXECUTOR");
-          providerPrompt = userPrompt;
-          const paths = ["src/service-a.conf", "src/service-b.conf"] as const;
-          for (const path of paths) {
-            const before = await tools.readPath(path);
-            await tools.writePath({ path, operation: "REPLACE", replacementBytes: Buffer.from("log_level=warning\n"), expectedPreimageExists: true,
+          if (profile === "SOL_PLANNER") {
+            plannerPrompt = userPrompt;
+            const candidateIdentity = /candidate_plan_sha256:(sha256:[0-9a-f]{64})/u.exec(userPrompt)?.[1];
+            assert.equal(candidateIdentity, approvedPlanIdentity, "planner sees the exact approved candidate identity");
+            tools.submitReport(`candidate_plan_sha256:${candidateIdentity}`);
+          } else if (profile === "MUTATION_EXECUTOR") {
+            const targetPath = mutationIndex++ === 0 ? "src/service-a.conf" : "src/service-b.conf";
+            if (targetPath === "src/service-a.conf") {
+              await assert.rejects(tools.readPath("verify"), (error: unknown) => {
+                assert.equal(error !== null && typeof error === "object" && "code" in error ? String(error.code) : "", "OUT_OF_SCOPE_READ");
+                rejectedPrefixReads += 1;
+                return true;
+              });
+              assert.equal((await tools.readPath("src/service-b.conf")).content, "log_level=info\n");
+              assert.equal((await tools.readPath("verify/check.mjs")).content, "process.exit(0);\n");
+            }
+            const before = await tools.readPath(targetPath);
+            assert.equal(before.content, "log_level=info\n");
+            await tools.writePath({ path: targetPath, operation: "REPLACE", replacementBytes: Buffer.from("log_level=warning\n"), expectedPreimageExists: true,
               expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
+            tools.submitReport("bounded S01 fixture report");
+          } else {
+            tools.submitReport("bounded S01 closeout report");
           }
-          tools.submitReport("bounded S01 fixture report");
           return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
         } catch (error: unknown) {
           return { completed: false, firstFailureCode: error !== null && typeof error === "object" && "code" in error ? String(error.code) : "TEST_RUNTIME_FAILURE", firstFailureStage: "TEST", firstFailureMessage: error instanceof Error ? error.message : String(error), cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
         }
       },
-    }, { retainedArtifactRoot: retained });
+    }, {
+      retainedArtifactRoot: retained,
+      approveTasks: async ({ plan, tasks }) => {
+        assert.ok(plan !== null, "Routed S01 retains its frozen PlanApproval");
+        assert.deepEqual(plan.bindings.scope.readable_paths, frozenReadablePaths);
+        assert.deepEqual(tasks.map((task) => task.scope.readable_paths), [frozenReadablePaths, frozenReadablePaths]);
+        approvedPlanIdentity = plan.content_sha256;
+        return plan.content_sha256 as Sha256Digest;
+      },
+    });
     assert.equal(result.outcome, "PASS", result.reason);
-    assert.match(providerPrompt, new RegExp(`Objective \\(exact frozen text\\):\\n${s01MechanicalObjective.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`));
-    assert.match(providerPrompt, /Readable paths \(exact frozen scope\):\n- src\/service-a\.conf\n- src\/service-b\.conf\n- verify\n- verify\/check\.mjs/);
-    assert.match(providerPrompt, /Editable paths \(exact frozen scope\):\n- src\/service-a\.conf\n- src\/service-b\.conf/);
-    assert.match(providerPrompt, /exact canonical repository-relative paths/);
-    assert.match(providerPrompt, /Repository-root aliases and discovery are not authorized/);
-    assert.match(providerPrompt, /Invalid forms include \., an empty path, \.\/\.\.\., root aliases, \.\. or traversal, and absolute paths/);
+    assert.equal(mutationIndex, 2);
+    assert.equal(rejectedPrefixReads, 1, "verify was rejected by bounded-worker admission before M4");
+    assert.match(plannerPrompt, new RegExp(`Objective \\(exact frozen text\\):\\n${s01MechanicalObjective.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`));
+    assert.match(plannerPrompt, /Readable paths \(exact frozen scope\):\nRegular-file read targets \(valid read_scoped\.path values\):\n- src\/service-a\.conf\n- src\/service-b\.conf\n- verify\/check\.mjs\n\nDirectory\/prefix authority \(not valid read_scoped\.path values\):\n- verify/);
+    assert.match(plannerPrompt, /Editable paths \(exact frozen scope\):\n- src\/service-a\.conf\n- src\/service-b\.conf/);
+    assert.match(plannerPrompt, /Directory\/prefix authority establishes frozen scope and command\/cwd authority; it is not a regular-file read target and must not be passed directly to read_scoped\.path/);
+    assert.match(plannerPrompt, /exact canonical repository-relative paths/);
+    assert.match(plannerPrompt, /Repository-root aliases and discovery are not authorized/);
+    assert.match(plannerPrompt, /Invalid forms include \., an empty path, \.\/\.\.\., root aliases, \.\. or traversal, and absolute paths/);
+    assert.match(plannerPrompt, new RegExp(`Planner instruction: submit exactly candidate_plan_sha256:${approvedPlanIdentity}`));
     assert.ok(result.evidenceRoot !== undefined);
     const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
-    assert.deepEqual(records.toolResults.map((entry) => entry.path).sort(), ["src/service-a.conf", "src/service-b.conf"], "both exact authorized regular files reached M4");
+    const admittedReadPaths = records.toolResults.map((entry) => entry.path);
+    assert.ok(!admittedReadPaths.includes("verify"), "prefix authority never reached M4 as a regular-file read");
+    assert.ok(admittedReadPaths.includes("verify/check.mjs"), "the exact verification script remains readable");
+    assert.ok(admittedReadPaths.includes("src/service-a.conf"));
+    assert.ok(admittedReadPaths.includes("src/service-b.conf"));
   } finally {
     await rm(retained, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
