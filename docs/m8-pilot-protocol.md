@@ -1,6 +1,8 @@
 # M8 Pilot Protocol
 
-M8 remains synthetic and provider-free. This harness normalization does not authorize provider-backed pilots.
+M8 pilot repositories and tasks remain synthetic and disposable. Provider-free operations are fixture validation; static fixture/plan freeze; unit, integration, and faux-runtime tests; deterministic static identity derivation; and pre-execution evidence derivation. Those operations neither load nor use a provider.
+
+Real M8 pilot execution may use only the exact frozen provider/model/effort route for its selected slot, only through the existing canonical M8 run path, and only with a clean canonical implementation baseline, exact frozen slot/plan authority, and explicit owner execution authorization. Owner execution authorization cannot be inferred from static approval. Real execution remains sequential, bounded, non-recursive, and no-fallback: it permits no automatic retry, resume, provider/model/effort substitution, hidden provider use, dynamic DAG growth, or bypass of existing approval/admission authority.
 
 ## Static owner approval
 
