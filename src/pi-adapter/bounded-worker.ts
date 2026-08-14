@@ -166,9 +166,9 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
       async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
     };
     const patchTool = {
-      name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4.",
+      name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
       parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
-        path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
+        path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" },
       } },
       async execute(_id: string, params: unknown) {
         rejectCancelledToolAdmission();
@@ -176,12 +176,7 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
         if (operation !== "CREATE" && operation !== "REPLACE" && operation !== "DELETE") throw Object.assign(new Error("patch operation is invalid"), { code: "TOOL_REQUEST_INVALID" });
         const exists = value["expected_preimage_exists"]; if (typeof exists !== "boolean") throw Object.assign(new Error("preimage existence is invalid"), { code: "TOOL_REQUEST_INVALID" });
         const content = value["replacement_base64"]; const replacementBytes = content === null ? null : typeof content === "string" ? Buffer.from(content, "base64") : (() => { throw Object.assign(new Error("replacement bytes are invalid"), { code: "TOOL_REQUEST_INVALID" }); })();
-        const digest = value["expected_preimage_digest"]; const size = value["expected_preimage_size"]; const mode = value["expected_preimage_mode"];
-        const hasDigest = Object.hasOwn(value, "expected_preimage_digest"); const hasSize = Object.hasOwn(value, "expected_preimage_size"); const hasMode = Object.hasOwn(value, "expected_preimage_mode");
-        await input.tools.writePath({ path: stringParam(value, "path"), operation, replacementBytes, expectedPreimageExists: exists,
-          ...(hasDigest ? { expectedPreimageDigest: digest === null ? null : typeof digest === "string" ? digest as Sha256Digest : (() => { throw Object.assign(new Error("preimage digest is invalid"), { code: "TOOL_REQUEST_INVALID" }); })() } : {}),
-          ...(hasSize ? { expectedPreimageSize: size === null ? null : typeof size === "number" && Number.isSafeInteger(size) ? size : (() => { throw Object.assign(new Error("preimage size is invalid"), { code: "TOOL_REQUEST_INVALID" }); })() } : {}),
-          ...(hasMode ? { expectedPreimageMode: mode === null ? null : typeof mode === "number" && Number.isSafeInteger(mode) ? mode : (() => { throw Object.assign(new Error("preimage mode is invalid"), { code: "TOOL_REQUEST_INVALID" }); })() } : {}), });
+        await input.tools.writePath({ path: stringParam(value, "path"), operation, replacementBytes, expectedPreimageExists: exists });
         return toolResult("applied");
       },
     };

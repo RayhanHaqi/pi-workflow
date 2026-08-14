@@ -270,10 +270,18 @@ interface PiMutationRuntimeCounters {
   readToolExecutions: number;
   patchToolExecutions: number;
   providerReadResults?: unknown[];
+  providerPatchContract?: JsonRecord;
 }
 
 /** Exercises the shared Pi loop with the real bounded-worker tool closures. */
 function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRuntime {
+  const providerPatchContract = {
+    description: "Apply exact bytes to one allowed path through M4. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
+    parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
+      path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" },
+    } },
+  };
+  counters.providerPatchContract = providerPatchContract;
   return {
     async execute({ profile, systemPrompt, userPrompt, tools, maxModelTurns, deadlineMs, signal }) {
       if (profile !== "MUTATION_EXECUTOR") throw new Error("test Pi mutation runtime only supports mutation execution");
@@ -294,24 +302,14 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
             },
           },
           {
-            name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4.",
-            parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
-              path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
-            } },
+            name: "apply_patch_scoped", label: "Scoped patch", ...providerPatchContract,
             async execute(_id, params) {
               const value = record(params, "Pi patch parameters"); const path = value["path"]; const operation = value["operation"];
               const replacement = value["replacement_base64"]; const exists = value["expected_preimage_exists"];
-              const digest = value["expected_preimage_digest"]; const size = value["expected_preimage_size"]; const mode = value["expected_preimage_mode"];
-              const hasDigest = Object.hasOwn(value, "expected_preimage_digest"); const hasSize = Object.hasOwn(value, "expected_preimage_size"); const hasMode = Object.hasOwn(value, "expected_preimage_mode");
               if (typeof path !== "string" || path.length === 0 || (operation !== "CREATE" && operation !== "REPLACE" && operation !== "DELETE") ||
-                  (replacement !== null && typeof replacement !== "string") || typeof exists !== "boolean" ||
-                  (hasDigest && digest !== null && typeof digest !== "string") || (hasSize && size !== null && (typeof size !== "number" || !Number.isSafeInteger(size))) ||
-                  (hasMode && mode !== null && (typeof mode !== "number" || !Number.isSafeInteger(mode)))) throw new Error("Pi patch parameters are invalid");
+                  (replacement !== null && typeof replacement !== "string") || typeof exists !== "boolean") throw new Error("Pi patch parameters are invalid");
               counters.patchToolExecutions += 1;
-              await tools.writePath({ path, operation, replacementBytes: replacement === null ? null : Buffer.from(replacement, "base64"), expectedPreimageExists: exists,
-                ...(hasDigest ? { expectedPreimageDigest: digest as Sha256Digest | null } : {}),
-                ...(hasSize ? { expectedPreimageSize: size as number | null } : {}),
-                ...(hasMode ? { expectedPreimageMode: mode as number | null } : {}), });
+              await tools.writePath({ path, operation, replacementBytes: replacement === null ? null : Buffer.from(replacement, "base64"), expectedPreimageExists: exists });
               return { content: [], details: {} };
             },
           },
@@ -701,14 +699,13 @@ test("Pi afterToolCall retains only a bounded safe tool failure diagnostic", asy
   const errorText = `Pi-provided tool failure ${"x".repeat(1_024)}`;
   const patchArguments = {
     path: "src/safe-target.ts", operation: "REPLACE", replacement_base64: replacementPayload, expected_preimage_exists: true,
-    expected_preimage_digest: `sha256:${"a".repeat(64)}`, expected_preimage_size: 17, expected_preimage_mode: 0o644,
   };
   const failingInput = (execute: () => Promise<never>, signal?: AbortSignal): Parameters<typeof runBoundedPiAgentForTests>[0] => ({
     providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt: "bounded", userPrompt: "bounded", maxModelTurns: 1, deadlineMs: 5_000,
     tools: [{
       name: "apply_patch_scoped", label: "Scoped patch", description: "Scoped patch", parameters: {
         type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
-          path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" }, expected_preimage_digest: { type: ["string", "null"] }, expected_preimage_size: { type: ["integer", "null"] }, expected_preimage_mode: { type: ["integer", "null"] },
+          path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" },
         },
       },
       async execute() { return execute(); },
@@ -839,7 +836,6 @@ test("actual Pi ordering delegates M4 admission to the bounded worker", async (t
     name: "apply_patch_scoped",
     args: {
       path, operation: "CREATE", replacement_base64: Buffer.from(text, "utf8").toString("base64"), expected_preimage_exists: false,
-      expected_preimage_digest: null, expected_preimage_size: null, expected_preimage_mode: null,
     },
   });
 
@@ -961,27 +957,30 @@ test("actual Pi ordering delegates M4 admission to the bounded worker", async (t
   });
 });
 
-test("F-01 Option B fills only omitted CAS preimage facts without exposing them to the provider", async (t) => {
-  const complete = { expected_preimage_digest: `sha256:${"0".repeat(64)}`, expected_preimage_size: 6, expected_preimage_mode: 0o644 };
-  const patch = (path: string, operation: "CREATE" | "REPLACE" | "DELETE", fields: JsonRecord = {}): BoundedPiFauxCall => ({
+test("F-01 keeps provider patch CAS metadata controller-owned while preserving internal CAS", async (t) => {
+  const preimage = "def enabled():\n    return False\n";
+  assert.equal(Buffer.byteLength(preimage, "utf8"), 32);
+  const patch = (path: string, operation: "CREATE" | "REPLACE" | "DELETE", extra: JsonRecord = {}): BoundedPiFauxCall => ({
     name: "apply_patch_scoped",
     args: {
       path, operation, replacement_base64: operation === "DELETE" ? null : Buffer.from(`changed:${path}\n`, "utf8").toString("base64"),
-      expected_preimage_exists: operation !== "CREATE", ...fields,
+      expected_preimage_exists: operation !== "CREATE", ...extra,
     },
   });
   const report: BoundedPiFauxCall = { name: "submit_worker_report", args: { report: "bounded report" } };
   const targetGoal = (path: string) => goal("DIRECT_LUNA_HIGH", [path], [path]);
-  const exercise = async (path: string, calls: readonly BoundedPiFauxCall[]) => {
+  const providerExercise = async (path: string, calls: readonly BoundedPiFauxCall[]) => {
     const root = await fixture();
-    if (path === "verify/input.txt") await chmod(join(root, path), 0o644);
+    if (path === "verify/input.txt") {
+      await writeFile(join(root, path), preimage); await chmod(join(root, path), 0o644);
+      await execFileAsync("git", ["add", path], { cwd: root }); await execFileAsync("git", ["commit", "-qm", "set 32-byte preimage"], { cwd: root });
+    }
     const retained = await mkdtemp(join(tmpdir(), "pre-m8-f01-"));
     const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0 };
     const providerCalls = installBoundedPiFauxRuntimeCalls(calls);
     try {
       const result = await run(root, targetGoal(path), piMutationRuntime(counters), { retainedArtifactRoot: retained });
-      assert.ok(result.evidenceRoot !== undefined);
-      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+      const records = result.evidenceRoot === undefined ? undefined : await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
       return { result, records, counters, providerCalls: providerCalls() };
     } finally {
       configureM6FauxRuntimeForTests(undefined);
@@ -990,49 +989,92 @@ test("F-01 Option B fills only omitted CAS preimage facts without exposing them 
     }
   };
 
-  await t.test("CREATE normalizes omitted preimage fields to null without a read", async () => {
-    const outcome = await exercise("created.txt", [patch("created.txt", "CREATE"), report]);
+  await t.test("provider schema excludes CAS fields, rejects injection before execution, and describes controller ownership", async () => {
+    const outcome = await providerExercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_size: 29 })]);
+    const contract = outcome.counters.providerPatchContract;
+    assert.notEqual(contract, undefined);
+    const parameters = record(contract!["parameters"], "provider patch parameters");
+    const properties = record(parameters["properties"], "provider patch properties");
+    assert.deepEqual(Object.keys(properties).sort(), ["expected_preimage_exists", "operation", "path", "replacement_base64"]);
+    for (const field of ["expected_preimage_digest", "expected_preimage_size", "expected_preimage_mode"] as const) assert.equal(Object.hasOwn(properties, field), false, `${field} is not provider-visible`);
+    assert.equal(parameters["additionalProperties"], false);
+    assert.match(String(contract!["description"]), /CAS preimage digest, size, and mode are controller-acquired/u);
+    assert.match(String(contract!["description"]), /do not supply CAS metadata/u);
+    assert.ok(outcome.providerCalls >= 1);
+    assert.equal(outcome.counters.patchToolExecutions, 0, "additionalProperties:false rejected the injected size before tool execution");
+    assert.equal(outcome.result.outcome, "BLOCKED");
+    assert.equal(outcome.records?.toolResults.length ?? 0, 0, "schema rejection produced no M4 read evidence");
+    assert.equal(outcome.records?.mutationReceipts.length ?? 0, 0, "schema rejection produced no M4 mutation evidence");
+  });
+
+  await t.test("provider-only CREATE has no preimage read and normalizes trusted CAS to null", async () => {
+    const outcome = await providerExercise("created.txt", [patch("created.txt", "CREATE"), report]);
     assert.equal(outcome.result.outcome, "PASS", outcome.result.reason);
     assert.equal(outcome.counters.patchToolExecutions, 1);
     assert.equal(outcome.counters.readToolExecutions, 0);
-    assert.equal(outcome.records.toolResults.length, 0, "CREATE issued no preimage read");
-    assert.equal(outcome.records.mutationReceipts[0]!.before.digest, null);
-    assert.equal(outcome.records.mutationReceipts[0]!.before.size, null);
-    assert.equal(outcome.records.mutationReceipts[0]!.before.mode, null);
+    assert.notEqual(outcome.records, undefined);
+    const records = outcome.records!;
+    assert.equal(records.toolResults.length, 0, "CREATE issued no preimage read");
+    assert.equal(records.mutationReceipts[0]!.before.digest, null);
+    assert.equal(records.mutationReceipts[0]!.before.size, null);
+    assert.equal(records.mutationReceipts[0]!.before.mode, null);
   });
 
-  await t.test("REPLACE and DELETE reacquire omitted preimages through one bounded read", async (nested) => {
+  await t.test("provider-only REPLACE and DELETE each reacquire one trusted 32-byte tuple", async (nested) => {
     for (const operation of ["REPLACE", "DELETE"] as const) await nested.test(operation, async () => {
-      const outcome = await exercise("verify/input.txt", [patch("verify/input.txt", operation), report]);
+      const outcome = await providerExercise("verify/input.txt", [patch("verify/input.txt", operation), report]);
       assert.equal(outcome.result.outcome, "PASS", outcome.result.reason);
       assert.equal(outcome.counters.patchToolExecutions, 1);
-      assert.equal(outcome.counters.readToolExecutions, 0, "the preimage read is internal, not provider-requested");
-      assert.equal(outcome.records.toolResults.length, 1, "exactly one internal read produced M4 evidence");
-      assert.equal(outcome.records.mutationReceipts[0]!.outcome, "APPLIED");
-      assert.equal(outcome.records.mutationReceipts[0]!.before.size, 6);
-      assert.equal(outcome.records.mutationReceipts[0]!.before.mode, 0o644);
+      assert.equal(outcome.counters.readToolExecutions, 0, "the trusted preimage read is internal, not provider-requested");
+      assert.notEqual(outcome.records, undefined);
+      const records = outcome.records!;
+      assert.equal(records.toolResults.length, 1, "exactly one internal bounded read produced M4 evidence");
+      assert.equal(records.mutationReceipts[0]!.outcome, "APPLIED");
+      assert.notEqual(records.mutationReceipts[0]!.before.digest, null);
+      assert.equal(records.mutationReceipts[0]!.before.size, 32, "the Slot-20-style invented size 29 cannot reach M4");
+      assert.equal(records.mutationReceipts[0]!.before.mode, 0o644);
     });
   });
 
-  await t.test("partial omission fills only absent fields and preserves explicit CAS assertions", async () => {
-    const outcome = await exercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_size: complete.expected_preimage_size }), report]);
-    assert.equal(outcome.result.outcome, "PASS", outcome.result.reason);
-    assert.equal(outcome.records.toolResults.length, 1);
-    assert.equal(outcome.records.mutationReceipts[0]!.before.size, complete.expected_preimage_size);
-    assert.notEqual(outcome.records.mutationReceipts[0]!.before.digest, null);
-    assert.notEqual(outcome.records.mutationReceipts[0]!.before.mode, null);
-  });
+  await t.test("internal explicit CAS assertions remain preserved, stale assertions fail, and explicit null remains invalid", async () => {
+    const exercise = async (write: (tools: Parameters<BoundedWorkerRuntime["execute"]>[0]["tools"]) => Promise<void>) => {
+      const root = await fixture();
+      await writeFile(join(root, "verify", "input.txt"), preimage); await chmod(join(root, "verify", "input.txt"), 0o644);
+      await execFileAsync("git", ["add", "verify/input.txt"], { cwd: root }); await execFileAsync("git", ["commit", "-qm", "set 32-byte preimage"], { cwd: root });
+      const retained = await mkdtemp(join(tmpdir(), "pre-m8-f01-internal-"));
+      try {
+        const result = await run(root, targetGoal("verify/input.txt"), {
+          async execute({ tools }) { await write(tools); tools.submitReport("bounded report"); return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 }; },
+        }, { retainedArtifactRoot: retained });
+        assert.ok(result.evidenceRoot !== undefined);
+        return { result, records: await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" }) };
+      } finally { await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+    };
 
-  await t.test("stale explicit CAS and explicit null remain M4 rejections", async () => {
-    const stale = await exercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_digest: complete.expected_preimage_digest })]);
+    const explicit = await exercise(async (tools) => {
+      const before = await tools.readPath("verify/input.txt");
+      await tools.writePath({ path: "verify/input.txt", operation: "REPLACE", replacementBytes: Buffer.from("changed\n"), expectedPreimageExists: true,
+        expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
+    });
+    assert.equal(explicit.result.outcome, "PASS", explicit.result.reason);
+    assert.equal(explicit.records.toolResults.length, 1, "complete internal CAS avoids a second F-01 read");
+    assert.equal(explicit.records.mutationReceipts[0]!.before.size, 32);
+
+    const stale = await exercise(async (tools) => {
+      await tools.writePath({ path: "verify/input.txt", operation: "REPLACE", replacementBytes: Buffer.from("changed\n"), expectedPreimageExists: true,
+        expectedPreimageDigest: `sha256:${"0".repeat(64)}` as Sha256Digest });
+    });
     assert.equal(stale.result.outcome, "BLOCKED");
-    assert.equal(stale.records.toolResults.length, 1, "only absent fields were internally filled");
-    assert.equal(stale.records.mutationReceipts[0]!.outcome, "PREIMAGE_MISMATCH", "the stale explicit digest reached M4 unchanged");
+    assert.equal(stale.records.toolResults.length, 1, "only omitted internal CAS siblings were reacquired");
+    assert.equal(stale.records.mutationReceipts[0]!.outcome, "PREIMAGE_MISMATCH");
 
-    const explicitNull = await exercise("verify/input.txt", [patch("verify/input.txt", "REPLACE", { expected_preimage_digest: null })]);
+    const explicitNull = await exercise(async (tools) => {
+      await tools.writePath({ path: "verify/input.txt", operation: "REPLACE", replacementBytes: Buffer.from("changed\n"), expectedPreimageExists: true,
+        expectedPreimageDigest: null });
+    });
     assert.equal(explicitNull.result.outcome, "BLOCKED");
-    assert.equal(explicitNull.records.toolResults.length, 1, "explicit null was not replaced, although absent siblings were filled");
-    assert.equal(explicitNull.records.mutationReceipts.length, 0, "M4 rejected the explicit null before mutation admission");
+    assert.equal(explicitNull.records.toolResults.length, 1);
+    assert.equal(explicitNull.records.mutationReceipts.length, 0, "explicit internal null was not replaced and remained invalid");
   });
 
   await t.test("provider-visible reads remain text-only", async () => {
