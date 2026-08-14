@@ -252,6 +252,13 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
   let acceptedMutationAdmissions = 0;
   let advisoryReport: string | null = null;
   let terminalRefusal: { readonly code: string; readonly stage: typeof BOUNDED_WORKER_TRUSTED_REFUSAL_STAGE } | null = null;
+  /** Accepted mutation receipts are the sole current-path authority retained by this worker. */
+  const trustedCurrentPathMetadata = new Map<string, {
+    readonly stateTokenContentSha256: Sha256Digest;
+    readonly digest: Sha256Digest;
+    readonly size: number;
+    readonly mode: number;
+  }>();
   let productiveAuthorityClosed = false;
   const start = performance.now();
   const assertProductiveAuthorityOpen = (): void => {
@@ -270,6 +277,21 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     }
     if (performance.now() - start > input.deadlineMs) throw Object.assign(new Error("bounded worker deadline exceeded"), { code: "WORKER_DEADLINE_EXCEEDED" });
   };
+  const refusalAttemptedMutation = (request: Parameters<BoundedWorkerTools["writePath"]>[0]) => {
+    const trusted = trustedCurrentPathMetadata.get(request.path);
+    const currentTrustedPath = request.operation !== "CREATE" && request.expectedPreimageExists === true &&
+      trusted?.stateTokenContentSha256 === input.gateway.acceptedState.content_sha256 ? trusted : undefined;
+    return {
+      ...request,
+      // Early admission happens before normal F-01 normalization. For a
+      // same-path non-CREATE retry, only an accepted mutation receipt bound to
+      // the current successor state can complete omitted provider CAS facts.
+      // Otherwise preserve fail-closed nulls; never invent or newly read facts.
+      expectedPreimageDigest: request.expectedPreimageDigest === undefined ? currentTrustedPath?.digest ?? null : request.expectedPreimageDigest,
+      expectedPreimageSize: request.expectedPreimageSize === undefined ? currentTrustedPath?.size ?? null : request.expectedPreimageSize,
+      expectedPreimageMode: request.expectedPreimageMode === undefined ? currentTrustedPath?.mode ?? null : request.expectedPreimageMode,
+    };
+  };
   const refuseMutationAdmission = async (
     request: Parameters<BoundedWorkerTools["writePath"]>[0],
     code: M4AdmissionRefusalCode,
@@ -281,12 +303,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     const refusal = await publishBoundedWorkerM4AdmissionRefusal({ stateRoot: input.stateRoot, runId: input.runId }, {
       boundedWorkerInvocationContentSha256: invocation.content_sha256 as Sha256Digest,
       admissionStateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest,
-      attemptedMutation: {
-        ...request,
-        expectedPreimageDigest: request.expectedPreimageDigest ?? null,
-        expectedPreimageSize: request.expectedPreimageSize ?? null,
-        expectedPreimageMode: request.expectedPreimageMode ?? null,
-      },
+      attemptedMutation: refusalAttemptedMutation(request),
       refusalCode: code,
     });
     addM4Evidence(refusal.content_sha256 as Sha256Digest, false);
@@ -340,6 +357,16 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
       addM4Evidence(result.receipt.content_sha256 as Sha256Digest, true);
       acceptedMutationAdmissions += 1;
       m3Evidence.add(result.acceptedState.content_sha256 as Sha256Digest);
+      const after = result.receipt.after;
+      if (result.receipt.outcome === "APPLIED" && result.receipt.successor_state_token_content_sha256 === result.acceptedState.content_sha256 &&
+          after.digest !== null && after.size !== null && after.mode !== null) {
+        trustedCurrentPathMetadata.set(normalizedRequest.path, {
+          stateTokenContentSha256: result.acceptedState.content_sha256 as Sha256Digest,
+          digest: after.digest as Sha256Digest,
+          size: after.size,
+          mode: after.mode,
+        });
+      } else trustedCurrentPathMetadata.delete(normalizedRequest.path);
       return result.receipt.content_sha256 as Sha256Digest;
     },
     async readEvidence(kind, contentSha256) {

@@ -212,13 +212,13 @@ async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DI
         }
         if (input.profile !== "MUTATION_EXECUTOR") return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
         mutationPrompts.push(input.userPrompt);
-        const replace = async (path: string, replacement: string): Promise<void> => {
+        const replace = async (path: string, replacement: string, providerShaped = false): Promise<void> => {
           const before = arm.scenario.initial_files.find((file) => file.path === path)!; const bytes = Buffer.from(before.bytes_base64, "base64");
           await input.tools.writePath({ path, operation: "REPLACE", replacementBytes: Buffer.from(replacement), expectedPreimageExists: true,
-            expectedPreimageDigest: sha256Bytes(bytes), expectedPreimageSize: bytes.byteLength, expectedPreimageMode: before.mode });
+            ...(providerShaped ? {} : { expectedPreimageDigest: sha256Bytes(bytes), expectedPreimageSize: bytes.byteLength, expectedPreimageMode: before.mode }) });
         };
         try {
-          if (id === "M8-S09") { await input.tools.readPath("src/first.txt"); await replace("src/first.txt", "changed:first\n"); await replace("src/first.txt", "changed:again\n"); }
+          if (id === "M8-S09") { await replace("src/first.txt", "changed:first\n", true); await replace("src/first.txt", "changed:again\n", true); }
           else await replace("registry/plugins.json", "changed:registry/plugins.json\n");
         } catch {
           return { completed: false, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
@@ -792,6 +792,14 @@ test("Routed S09 publishes the canonical productive-mutation budget block", asyn
     assert.equal(applied[0]!.path, "src/first.txt");
     assert.equal(refusals.length, 1);
     assert.equal(refusals[0]!.attempted_operation.target_path, "src/first.txt", "the second productive request remains task-owned by leaf-1");
+    assert.equal(applied[0]!.after.size, 14);
+    assert.equal(applied[0]!.after.mode, 0o644);
+    assert.equal(refusals[0]!.attempted_operation.expected_preimage.exists, true);
+    assert.equal(refusals[0]!.attempted_operation.expected_preimage.content_sha256, applied[0]!.after.digest, "the provider-shaped refusal projects the current accepted after-image");
+    assert.equal(refusals[0]!.attempted_operation.expected_preimage.byte_length, applied[0]!.after.size);
+    assert.equal(refusals[0]!.attempted_operation.expected_preimage.mode, applied[0]!.after.mode);
+    assert.equal(refusals[0]!.admission_state_token_content_sha256, applied[0]!.successor_state_token_content_sha256, "the refusal uses the accepted mutation successor state");
+    assert.equal(records.toolResults.length, 1, "the provider-shaped refusal introduced no second F-01 read");
     assert.equal(refusals[0]!.bounded_worker_invocation_content_sha256, refusal.invocation_content_sha256);
     assert.ok(refusal.m4_evidence_content_sha256.includes(refusals[0]!.content_sha256));
     assert.equal(records.boundedWorkerInvocations.some((invocation) => invocation.task_content_sha256 === leafTwo.content_sha256), false, "leaf-2 never receives productive continuation after the refusal");
