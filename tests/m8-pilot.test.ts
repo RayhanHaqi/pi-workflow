@@ -50,6 +50,7 @@ import type { BoundedExecutionAuthority } from "../src/workflow-controller.js";
 const fixturePath = join(process.cwd(), "fixtures", "m8", "scenarios.json");
 type ExpectedFileFact = Extract<M8AcceptanceFact, { readonly type: "expected_final_file" }>;
 const digest = (character: string): Sha256Digest => `sha256:${character.repeat(64)}`;
+const S09_LEAF_ONE_OBJECTIVE = "Execute this exact deterministic two-step productive mutation sequence for src/first.txt:\n1. REPLACE initial bytes `first\\n` (base64 `Zmlyc3QK`) with `changed:first\\n` (base64 `Y2hhbmdlZDpmaXJzdAo=`). This first request must produce the one allowed productive mutation.\n2. After the first mutation succeeds, issue a second REPLACE on src/first.txt requesting `changed:again\\n` (base64 `Y2hhbmdlZDphZ2Fpbgo=`). The existing hard productive-mutation limit of 1 must evaluate this second request and produce `M4_TOOL_BUDGET_EXHAUSTED`.";
 async function bundle() { return loadM8FixtureBundle(fixturePath); }
 function scenario(all: Awaited<ReturnType<typeof bundle>>, id: string): M8Scenario { return all.scenarios.find((item) => item.scenario_id === id)!; }
 function alternateGitObjectId(value: string): string { return `${value[0] === "0" ? "1" : "0"}${value.slice(1)}`; }
@@ -772,12 +773,21 @@ test("Routed S09 publishes the canonical productive-mutation budget block", asyn
       controllerRecords(actual),
     ]);
     assert.equal(actual.mutationPrompts?.length, 1, "only the first routed leaf reaches mutation execution");
-    assert.match(actual.mutationPrompts?.[0] ?? "", /first productive mutation request a genuine observable byte-changing edit/u);
-    assert.match(actual.mutationPrompts?.[0] ?? "", /second genuinely productive mutation request on that same task-owned editable path/u);
+    const mutationPrompt = actual.mutationPrompts?.[0] ?? "";
+    const firstMutation = "1. REPLACE initial bytes `first\\n` (base64 `Zmlyc3QK`) with `changed:first\\n` (base64 `Y2hhbmdlZDpmaXJzdAo=`). This first request must produce the one allowed productive mutation.";
+    const secondMutation = "2. After the first mutation succeeds, issue a second REPLACE on src/first.txt requesting `changed:again\\n` (base64 `Y2hhbmdlZDphZ2Fpbgo=`). The existing hard productive-mutation limit of 1 must evaluate this second request and produce `M4_TOOL_BUDGET_EXHAUSTED`.";
+    assert.ok(mutationPrompt.includes(S09_LEAF_ONE_OBJECTIVE), "the frozen provider task contains the exact leaf-1 objective");
+    assert.ok(mutationPrompt.includes(firstMutation), "the frozen provider task contains the exact initial and first target payloads");
+    assert.ok(mutationPrompt.includes(secondMutation), "the frozen provider task contains the exact second target and budget boundary");
+    assert.ok(mutationPrompt.indexOf(firstMutation) < mutationPrompt.indexOf(secondMutation), "the frozen provider task sequences the successful first mutation before the second productive attempt");
+    assert.match(mutationPrompt, /first productive mutation request a genuine observable byte-changing edit/u);
+    assert.match(mutationPrompt, /second genuinely productive mutation request on that same task-owned editable path/u);
     const applied = records.mutationReceipts.filter((receipt) => receipt.outcome === "APPLIED");
     const refusals = records.admissionRefusals.filter((refusal) => refusal.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED");
     const refusal = one(records.boundedWorkerResults.filter((result) => result.first_failure_code === "M4_TOOL_BUDGET_EXHAUSTED" && result.first_failure_stage === "M4_TOOL_ADMISSION"), "one authoritative S09 refusal result");
+    const leafOne = one(records.tasks.filter((task) => task.task_id === "leaf-1"), "S09 leaf-1 task");
     const leafTwo = one(records.tasks.filter((task) => task.task_id === "leaf-2"), "S09 leaf-2 task");
+    assert.equal(leafOne.objective, S09_LEAF_ONE_OBJECTIVE, "the frozen Routed S09 leaf-1 task is the exact deterministic mutation sequence");
     assert.equal(applied.length, 1);
     assert.equal(applied[0]!.path, "src/first.txt");
     assert.equal(refusals.length, 1);

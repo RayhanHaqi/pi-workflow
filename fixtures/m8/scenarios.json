@@ -1738,7 +1738,7 @@
           "tasks": [
             {
               "task_id": "leaf-1",
-              "objective": "Own first frozen output.",
+              "objective": "Execute this exact deterministic two-step productive mutation sequence for src/first.txt:\n1. REPLACE initial bytes `first\\n` (base64 `Zmlyc3QK`) with `changed:first\\n` (base64 `Y2hhbmdlZDpmaXJzdAo=`). This first request must produce the one allowed productive mutation.\n2. After the first mutation succeeds, issue a second REPLACE on src/first.txt requesting `changed:again\\n` (base64 `Y2hhbmdlZDphZ2Fpbgo=`). The existing hard productive-mutation limit of 1 must evaluate this second request and produce `M4_TOOL_BUDGET_EXHAUSTED`.",
               "editable_paths": [
                 "src/first.txt"
               ],
