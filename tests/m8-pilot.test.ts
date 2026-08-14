@@ -139,6 +139,7 @@ interface ActualRun {
   readonly freeze: Awaited<ReturnType<typeof freezeM8Scenario>>;
   readonly arm: Awaited<ReturnType<typeof freezeM8Scenario>>["arms"][number];
   readonly handle: M8AuthoritativeRun;
+  readonly mutationPrompts?: readonly string[];
 }
 function approvalFor(freeze: Awaited<ReturnType<typeof freezeM8Scenario>>) {
   return createM8ApprovalManifest(freeze, freeze.arms.map((arm) => arm.static_slot));
@@ -199,18 +200,25 @@ async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DI
   let freeze: Awaited<ReturnType<typeof freezeM8Scenario>> | undefined; let invocation: Awaited<ReturnType<typeof createM8InvocationRoot>> | undefined;
   try {
     freeze = await freezeM8Scenario(all, scenario(all, id), [mode], (await staticPlanBaselineFixture()).options); const retainedBefore = await retainedRuntimeRoots(); invocation = await createM8InvocationRoot(parent); const runtimeRetained = await newlyAllocatedRetainedRuntimeRoot(retainedBefore);
-    const arm = freeze.arms[0]!; const approval = approvalFor(freeze);
+    const arm = freeze.arms[0]!; const approval = approvalFor(freeze); const mutationPrompts: string[] = [];
     configureBoundedWorkerFauxRuntimeForTests(() => ({
       async execute(input) {
+        if (input.profile === "SOL_PLANNER") {
+          const plan = /candidate_plan_sha256:(sha256:[0-9a-f]{64})/u.exec(input.userPrompt)?.[1];
+          assert.notEqual(plan, undefined, "Routed S09 planner receives its frozen plan identity");
+          input.tools.submitReport(`candidate_plan_sha256:${plan}`);
+          return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        }
         if (input.profile !== "MUTATION_EXECUTOR") return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
-        const replace = async (path: string): Promise<void> => {
+        mutationPrompts.push(input.userPrompt);
+        const replace = async (path: string, replacement: string): Promise<void> => {
           const before = arm.scenario.initial_files.find((file) => file.path === path)!; const bytes = Buffer.from(before.bytes_base64, "base64");
-          await input.tools.writePath({ path, operation: "REPLACE", replacementBytes: Buffer.from(`changed:${path}\n`), expectedPreimageExists: true,
+          await input.tools.writePath({ path, operation: "REPLACE", replacementBytes: Buffer.from(replacement), expectedPreimageExists: true,
             expectedPreimageDigest: sha256Bytes(bytes), expectedPreimageSize: bytes.byteLength, expectedPreimageMode: before.mode });
         };
         try {
-          if (id === "M8-S09") { await input.tools.readPath("src/first.txt"); await replace("src/first.txt"); await replace("src/second.txt"); }
-          else await replace("registry/plugins.json");
+          if (id === "M8-S09") { await input.tools.readPath("src/first.txt"); await replace("src/first.txt", "changed:first\n"); await replace("src/first.txt", "changed:again\n"); }
+          else await replace("registry/plugins.json", "changed:registry/plugins.json\n");
         } catch {
           return { completed: false, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
         }
@@ -220,7 +228,7 @@ async function createSafetyActualRun(id: "M8-S09" | "M8-S10", mode: M8Mode = "DI
     const handle = await runOneM8ArmForTests(invocation, freeze, arm, approval, options);
     configureBoundedWorkerFauxRuntimeForTests();
     const roots = (await readdir(parent)).filter((entry) => entry.startsWith("m8-invocation-"));
-    assert.equal(roots.length, 1); return { parent, root: join(parent, roots[0]!), invocation, freeze, arm, handle };
+    assert.equal(roots.length, 1); return { parent, root: join(parent, roots[0]!), invocation, freeze, arm, handle, mutationPrompts };
   } catch (error: unknown) {
     configureBoundedWorkerFauxRuntimeForTests();
     if (freeze !== undefined) await disposeM8Freeze(freeze).catch(() => undefined);
@@ -752,6 +760,39 @@ test("negative Single safety arms do not request a final owner acceptance", asyn
       assert.equal(records.boundedWorkerResults.some((result) => result.first_failure_code === failureCode), true, "the safety refusal reached its native authoritative block");
     } finally { await disposeActual(actual); }
   });
+});
+
+test("Routed S09 publishes the canonical productive-mutation budget block", async () => {
+  const actual = await createSafetyActualRun("M8-S09", "ROUTED_DAG");
+  try {
+    await writeM8Evidence(actual.invocation, [actual.handle]);
+    const [canonical, inspection, records] = await Promise.all([
+      publishedResult(actual),
+      inspectRunStorage({ stateRoot: await controllerStateRoot(actual), runId: await controllerRunId(actual) }),
+      controllerRecords(actual),
+    ]);
+    assert.equal(actual.mutationPrompts?.length, 1, "only the first routed leaf reaches mutation execution");
+    assert.match(actual.mutationPrompts?.[0] ?? "", /first productive mutation request a genuine observable byte-changing edit/u);
+    assert.match(actual.mutationPrompts?.[0] ?? "", /second genuinely productive mutation request on that same task-owned editable path/u);
+    const applied = records.mutationReceipts.filter((receipt) => receipt.outcome === "APPLIED");
+    const refusals = records.admissionRefusals.filter((refusal) => refusal.refusal_code === "M4_TOOL_BUDGET_EXHAUSTED");
+    const refusal = one(records.boundedWorkerResults.filter((result) => result.first_failure_code === "M4_TOOL_BUDGET_EXHAUSTED" && result.first_failure_stage === "M4_TOOL_ADMISSION"), "one authoritative S09 refusal result");
+    const leafTwo = one(records.tasks.filter((task) => task.task_id === "leaf-2"), "S09 leaf-2 task");
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0]!.path, "src/first.txt");
+    assert.equal(refusals.length, 1);
+    assert.equal(refusals[0]!.attempted_operation.target_path, "src/first.txt", "the second productive request remains task-owned by leaf-1");
+    assert.equal(refusals[0]!.bounded_worker_invocation_content_sha256, refusal.invocation_content_sha256);
+    assert.ok(refusal.m4_evidence_content_sha256.includes(refusals[0]!.content_sha256));
+    assert.equal(records.boundedWorkerInvocations.some((invocation) => invocation.task_content_sha256 === leafTwo.content_sha256), false, "leaf-2 never receives productive continuation after the refusal");
+    assert.equal(records.boundedWorkerInvocations.filter((invocation) => invocation.task_content_sha256 === null).length, 1, "the routed planner is the only non-leaf worker; no closeout worker runs");
+    assert.equal(records.boundedWorkerResults.every((result) => result.content_sha256 === refusal.content_sha256 || result.completed_at <= refusal.completed_at), true, "no productive worker result follows the authoritative refusal");
+    assert.equal(records.decisions.some((decision) => decision.outcome === "PASS"), false, "no inappropriate productive closeout occurs");
+    assert.equal(inspection.workflowState?.phase, "BLOCKED");
+    assert.equal(actual.arm.scenario.expected_behavior.terminal, "BLOCKED");
+    assert.deepEqual([canonical["terminal_workflow_result"], canonical["task_success"], canonical["workflow_correctness"], canonical["pilot_validity"]], ["BLOCKED", false, true, true]);
+    assert.equal(canonical["failure_classification"], null, "durable M4 admission refusal evidence, not HARNESS_DEFECT, supports publication");
+  } finally { await disposeActual(actual); }
 });
 
 test("actual S09/S10 settled refusals use the sole resolver, exact usage, M5 BLOCK, and canonical publication", async (t) => {

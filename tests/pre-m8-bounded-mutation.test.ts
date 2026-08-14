@@ -271,12 +271,13 @@ interface PiMutationRuntimeCounters {
   patchToolExecutions: number;
   providerReadResults?: unknown[];
   providerPatchContract?: JsonRecord;
+  providerUserPrompt?: string;
 }
 
 /** Exercises the shared Pi loop with the real bounded-worker tool closures. */
 function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRuntime {
   const providerPatchContract = {
-    description: "Apply exact bytes to one allowed path through M4. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
+    description: "Apply exact bytes to one allowed path through M4. For REPLACE, replacement bytes must produce an observable content change from the current regular-file contents; identical bytes are not a successful productive mutation because they cannot satisfy repository-delta postflight. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
     parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
       path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" },
     } },
@@ -285,6 +286,7 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
   return {
     async execute({ profile, systemPrompt, userPrompt, tools, maxModelTurns, deadlineMs, signal }) {
       if (profile !== "MUTATION_EXECUTOR") throw new Error("test Pi mutation runtime only supports mutation execution");
+      counters.providerUserPrompt = userPrompt;
       return runBoundedPiAgentForTests({
         providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt, userPrompt,
         tools: [
@@ -832,32 +834,58 @@ test("bounded Pi telemetry counts only genuinely started generations", async (t)
 });
 
 test("actual Pi ordering delegates M4 admission to the bounded worker", async (t) => {
-  const patch = (path: string, text: string): BoundedPiFauxCall => ({
+  const patch = (path: string, text: string, operation: "CREATE" | "REPLACE" = "CREATE", expectedPreimageExists = false): BoundedPiFauxCall => ({
     name: "apply_patch_scoped",
     args: {
-      path, operation: "CREATE", replacement_base64: Buffer.from(text, "utf8").toString("base64"), expected_preimage_exists: false,
+      path, operation, replacement_base64: Buffer.from(text, "utf8").toString("base64"), expected_preimage_exists: expectedPreimageExists,
     },
   });
 
-  await t.test("S09: a read does not consume the mutation cap, and the second mutation reaches bounded refusal", async () => {
+  await t.test("S09: the visible contract requires a productive first REPLACE and a same-path second request at bounded refusal", async () => {
     const root = await fixture();
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src", "first.txt"), "first\n");
+    await writeFile(join(root, "src", "second.txt"), "second\n");
+    await chmod(join(root, "src", "first.txt"), 0o644);
+    await chmod(join(root, "src", "second.txt"), 0o644);
+    await execFileAsync("git", ["add", "src/first.txt", "src/second.txt"], { cwd: root });
+    await execFileAsync("git", ["commit", "-qm", "add S09 files"], { cwd: root });
     const retained = await mkdtemp(join(tmpdir(), "pre-m8-retained-"));
     const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0 };
-    const providerCalls = installBoundedPiFauxRuntimeCalls([
-      { name: "read_scoped", args: { path: "verify/input.txt" } },
-      patch("first.txt", "first\n"),
-      patch("second.txt", "second\n"),
-    ]);
+    let productiveContinuation = false;
     try {
-      const result = await run(root, goal("DIRECT_LUNA_HIGH", ["first.txt", "second.txt"]), piMutationRuntime(counters), {
+      const result = await run(root, {
+        ...goal("DIRECT_LUNA_HIGH", ["src/first.txt", "src/second.txt"]),
+        objective: "Apply the frozen budget exhaustion objective.",
+      }, {
+        async execute({ tools, userPrompt }) {
+          counters.providerUserPrompt = userPrompt;
+          try {
+            const before = await tools.readPath("src/first.txt");
+            counters.readToolExecutions += 1;
+            counters.patchToolExecutions += 1;
+            await tools.writePath({ path: "src/first.txt", operation: "REPLACE", replacementBytes: Buffer.from("changed:first\n"), expectedPreimageExists: true,
+              expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
+            counters.patchToolExecutions += 1;
+            await tools.writePath({ path: "src/first.txt", operation: "REPLACE", replacementBytes: Buffer.from("changed:again\n"), expectedPreimageExists: true,
+              expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
+            productiveContinuation = true;
+            return { completed: false, firstFailureCode: "TEST_REFUSAL_MISSING", firstFailureStage: "TEST", cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+          } catch { return { completed: false, cleanupCertain: true, modelTurns: 0, providerRequests: 0 }; }
+        },
+      }, {
         authority: { ...authority(), hard_mutation_tool_limit: 1 }, retainedArtifactRoot: retained,
       });
       assert.equal(result.outcome, "BLOCKED", result.reason);
       assert.equal(result.finalState?.phase, "BLOCKED");
       assert.match(result.reason, /WORKER_PRODUCTIVE_REFUSAL:M4_TOOL_BUDGET_EXHAUSTED/);
+      assert.match(counters.providerUserPrompt ?? "", /first productive mutation request a genuine observable byte-changing edit/u);
+      assert.match(counters.providerUserPrompt ?? "", /After that first productive mutation succeeds, do not stop/u);
+      assert.match(counters.providerUserPrompt ?? "", /second genuinely productive mutation request on that same task-owned editable path/u);
+      assert.match(counters.providerUserPrompt ?? "", /Do not simulate the second attempt/u);
       assert.equal(counters.readToolExecutions, 1);
-      assert.equal(counters.patchToolExecutions, 2, "the second tool request passed Pi beforeToolCall and reached bounded admission");
-      assert.equal(providerCalls(), 3, "only genuinely started Pi generations contribute telemetry");
+      assert.equal(counters.patchToolExecutions, 2, "the second productive request reached bounded admission");
+      assert.equal(productiveContinuation, false, "no productive continuation starts after the authoritative refusal");
       assert.ok(result.evidenceRoot !== undefined);
 
       const stateRoot = join(result.evidenceRoot, "state");
@@ -872,16 +900,18 @@ test("actual Pi ordering delegates M4 admission to the bounded worker", async (t
       const worker = records.boundedWorkerResults.find((entry) => entry.outcome === "BLOCKED");
       assert.equal(refusal.length, 1);
       assert.equal(receipts.length, 1, "the denied second mutation never reached the M4 mutation gateway");
-      assert.equal(receipts[0]!.path, "first.txt");
+      assert.equal(receipts[0]!.path, "src/first.txt");
       assert.notEqual(worker, undefined);
       assert.equal(worker!.first_failure_code, "M4_TOOL_BUDGET_EXHAUSTED");
       assert.equal(worker!.first_failure_stage, "M4_TOOL_ADMISSION");
-      assert.equal(worker!.actual_usage.m4_tool_calls, 2, "accepted read plus accepted mutation are the sole total M4 usage");
-      assert.equal(worker!.actual_usage.model_turns, 3);
-      assert.equal(worker!.actual_usage.provider_requests, 3);
+      assert.notEqual(worker!.first_failure_code, "TOOL_EXECUTION_FAILED");
+      assert.equal(worker!.actual_usage.m4_tool_calls, 2, "the internal preimage read plus first applied mutation are the sole accepted M4 usage");
+      assert.equal(worker!.actual_usage.model_turns, 0);
+      assert.equal(worker!.actual_usage.provider_requests, 0);
       assert.ok(worker!.m4_evidence_content_sha256.includes(refusal[0]!.content_sha256));
       assert.ok(worker!.m3_evidence_content_sha256.includes(refusal[0]!.admission_state_token_content_sha256));
       assert.ok(inspection.managedRecordClassifications.some((entry) => entry.object.kind === "BOUNDED_WORKER_RESULT" && entry.object.contentSha256 === worker!.content_sha256 && entry.classification === "AUTHORITATIVE_MANAGED_RECORD"));
+      assert.equal(records.mutationReceipts.some((entry) => entry.outcome !== "APPLIED"), false, "no no-op or failed mutation receipt substitutes for the productive change");
       const usage = records.usage.find((entry) => entry.source_record_content_sha256 === worker!.content_sha256);
       const terminal = records.decisions.find((entry) => entry.outcome === "BLOCK");
       assert.notEqual(usage, undefined);
@@ -892,8 +922,8 @@ test("actual Pi ordering delegates M4 admission to the bounded worker", async (t
       assert.equal(terminal!.failures[0]!.source_record_content_sha256, worker!.content_sha256);
       assert.equal(terminal!.failures[0]!.source_error_code, "M4_TOOL_BUDGET_EXHAUSTED");
       const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: root });
-      assert.match(status.stdout, /first\.txt/);
-      assert.doesNotMatch(status.stdout, /second\.txt/);
+      assert.match(status.stdout, /src\/first\.txt/);
+      assert.doesNotMatch(status.stdout, /src\/second\.txt/);
     } finally {
       configureM6FauxRuntimeForTests(undefined);
       await rm(retained, { recursive: true, force: true });
@@ -998,6 +1028,8 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
     assert.deepEqual(Object.keys(properties).sort(), ["expected_preimage_exists", "operation", "path", "replacement_base64"]);
     for (const field of ["expected_preimage_digest", "expected_preimage_size", "expected_preimage_mode"] as const) assert.equal(Object.hasOwn(properties, field), false, `${field} is not provider-visible`);
     assert.equal(parameters["additionalProperties"], false);
+    assert.match(String(contract!["description"]), /REPLACE, replacement bytes must produce an observable content change/u);
+    assert.match(String(contract!["description"]), /identical bytes are not a successful productive mutation/u);
     assert.match(String(contract!["description"]), /CAS preimage digest, size, and mode are controller-acquired/u);
     assert.match(String(contract!["description"]), /do not supply CAS metadata/u);
     assert.ok(outcome.providerCalls >= 1);

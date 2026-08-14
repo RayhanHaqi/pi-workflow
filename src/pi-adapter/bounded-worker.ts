@@ -166,7 +166,7 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
       async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
     };
     const patchTool = {
-      name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
+      name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4. For REPLACE, replacement bytes must produce an observable content change from the current regular-file contents; identical bytes are not a successful productive mutation because they cannot satisfy repository-delta postflight. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
       parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
         path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" },
       } },
