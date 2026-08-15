@@ -250,6 +250,10 @@ function assertRouteSemantics(routes: RouteMapDocument["routes"] | PlanApprovalD
     if (route.logical_role === "LUNA_EXECUTOR" && route.effort !== "high") {
       throw new ContractValidationError("INVALID_LUNA_EFFORT", "LUNA_EXECUTOR must use high effort");
     }
+    if (route.logical_role === "TERRA_EXECUTOR" &&
+        (route.provider_id !== "openai-codex" || route.model_id !== "gpt-5.6-terra" || route.effort !== "high")) {
+      throw new ContractValidationError("INVALID_TERRA_ROUTE", "TERRA_EXECUTOR must use openai-codex / gpt-5.6-terra / high");
+    }
     if (route.logical_role.startsWith("SOL_") && route.effort !== "max") {
       throw new ContractValidationError("INVALID_SOL_EFFORT", `${route.logical_role} must use max effort`);
     }
@@ -412,8 +416,8 @@ export function assertTaskGraphSemantics(taskGraph: TaskGraphDocument, configure
 export function assertTaskSemantics(task: TaskDocument): void {
   assertNoScopeOverlap(task.scope);
   assertAcceptanceSemantics(task.acceptance_criteria, task.owner_acceptance_criteria);
-  if (task.assigned_role === "LUNA_EXECUTOR" && task.owner_acceptance_criteria.length > 0) {
-    throw new ContractValidationError("LUNA_OWNER_ACCEPTANCE_FORBIDDEN", "Luna leaf acceptance must be machine-checkable");
+  if ((task.assigned_role === "LUNA_EXECUTOR" || task.assigned_role === "TERRA_EXECUTOR") && task.owner_acceptance_criteria.length > 0) {
+    throw new ContractValidationError("EXECUTOR_OWNER_ACCEPTANCE_FORBIDDEN", "Executor leaf acceptance must be machine-checkable");
   }
 }
 
@@ -439,10 +443,14 @@ export function assertPlanApprovalSemantics(plan: PlanApprovalDocument): void {
   if (taskCount > plan.bindings.limits.max_leaves) {
     throw new ContractValidationError("TASK_GRAPH_ABOVE_LEAF_CAP", `${taskCount} tasks exceeds plan cap`);
   }
-  if (plan.bindings.execution_mode === "ROUTED_DAG" && taskCount < 2) {
-    throw new ContractValidationError("ROUTED_DAG_TOO_SMALL", "ROUTED_DAG requires at least two leaves");
+  if ((plan.bindings.execution_mode === "ROUTED_DAG" || plan.bindings.execution_mode === "STATIC_APPROVED_DAG") && taskCount < 2) {
+    throw new ContractValidationError(plan.bindings.execution_mode === "ROUTED_DAG" ? "ROUTED_DAG_TOO_SMALL" : "DAG_TOO_SMALL", `${plan.bindings.execution_mode} requires at least two leaves`);
   }
-  if (plan.bindings.execution_mode !== "ROUTED_DAG" && taskCount !== 1) {
+  if (plan.bindings.execution_mode === "STATIC_APPROVED_DAG" &&
+      (plan.bindings.logical_routes.length !== 1 || plan.bindings.logical_routes[0]?.logical_role !== "TERRA_EXECUTOR")) {
+    throw new ContractValidationError("STATIC_DAG_ROUTE_RESTRICTED", "STATIC_APPROVED_DAG permits only TERRA_EXECUTOR");
+  }
+  if (plan.bindings.execution_mode !== "ROUTED_DAG" && plan.bindings.execution_mode !== "STATIC_APPROVED_DAG" && taskCount !== 1) {
     throw new ContractValidationError("ONE_TASK_REQUIRED", `${plan.bindings.execution_mode} requires exactly one task`);
   }
 }
@@ -510,7 +518,8 @@ function allInvocationCountersAreZero(state: WorkflowState): boolean {
     invocations.sol_planner === 0 &&
     invocations.sol_replan === 0 &&
     invocations.sol_closeout === 0 &&
-    invocations.luna_executor === 0
+    invocations.luna_executor === 0 &&
+    invocations.terra_executor === 0
   );
 }
 
@@ -715,6 +724,33 @@ function assertRoutedPlannerCounters(state: WorkflowState): void {
   phaseInvariant(state, !state.gates.owner_acceptance_completed, "routed execution cannot complete owner acceptance");
 }
 
+function assertStaticApprovedDagPhaseInvariants(state: WorkflowState): void {
+  const invocations = state.counters.worker_invocations;
+  assertPostBaseline(state);
+  phaseInvariant(state, !state.gates.planner_completed && !state.gates.owner_acceptance_completed && !state.gates.closeout_completed && !state.gates.closeout_verification_completed, "static DAG cannot invoke planner, owner acceptance, or closeout");
+  phaseInvariant(state, state.tasks.length >= 2 && state.route_frozen, "static DAG requires a frozen multi-node DAG");
+  phaseInvariant(state, invocations.sol_owner === 0 && invocations.sol_planner === 0 && invocations.sol_replan === 0 && invocations.sol_closeout === 0 && invocations.luna_executor === 0, "static DAG permits only Terra invocations");
+  if (state.phase === "DAG_FROZEN" || state.phase === "READY") {
+    phaseInvariant(state, state.active_task_id === null && state.tasks.every((task) => task.status === "PENDING" || (task.status === "PASS" && task.postflight_completed && task.verification_completed)), "static DAG settled nodes must be pending or verified");
+    return;
+  }
+  if (["LEAF_FAST_PREFLIGHT", "LEAF_RUNNING", "LEAF_POSTFLIGHT", "LEAF_VERIFYING", "LEAF_RETRY_READY"].includes(state.phase)) {
+    const active = state.tasks.find((task) => task.task_id === state.active_task_id);
+    phaseInvariant(state, active !== undefined, "static leaf phase requires an active task");
+    phaseInvariant(state, state.tasks.filter((task) => task.task_id !== state.active_task_id).every((task) => task.status === "PENDING" || (task.status === "PASS" && task.postflight_completed && task.verification_completed)), "static DAG retains one active writer");
+    if (active === undefined) return;
+    if (state.phase === "LEAF_FAST_PREFLIGHT") phaseInvariant(state, (active.attempts === 0 && active.status === "PENDING" && !active.retry_progress_admitted) || (active.attempts === 1 && active.status === "PENDING" && active.retry_progress_admitted), "static leaf preflight must be initial or its one admitted repair");
+    else if (["LEAF_RUNNING", "LEAF_POSTFLIGHT", "LEAF_VERIFYING"].includes(state.phase)) phaseInvariant(state, active.status === "RUNNING" && active.attempts >= 1 && active.attempts <= 2 && active.retry_progress_admitted === (active.attempts === 2) && active.postflight_completed === (state.phase === "LEAF_VERIFYING"), "static leaf attempt lifecycle is invalid");
+    else phaseInvariant(state, active.status === "PENDING" && active.attempts === 1 && !active.retry_progress_admitted, "static repair must await admission");
+    return;
+  }
+  if (state.phase === "STATIC_DAG_VERIFYING" || state.phase === "PASS") {
+    phaseInvariant(state, state.active_task_id === null && state.tasks.every((task) => task.status === "PASS" && task.attempts >= 1 && task.attempts <= 2), "static DAG completion requires every node to verify");
+    return;
+  }
+  throw new ContractValidationError("PHASE_INVARIANT_MISMATCH", `Unhandled static DAG phase ${state.phase}`);
+}
+
 function assertRoutedPhaseInvariants(state: WorkflowState): void {
   const invocations = state.counters.worker_invocations;
   assertPostBaseline(state);
@@ -826,6 +862,8 @@ function assertPhaseInvariants(state: WorkflowState): void {
     assertDirectPhaseInvariants(state);
   } else if (state.execution_mode === "SINGLE_OWNER_SOL") {
     assertSingleOwnerPhaseInvariants(state);
+  } else if (state.execution_mode === "STATIC_APPROVED_DAG") {
+    assertStaticApprovedDagPhaseInvariants(state);
   } else {
     assertRoutedPhaseInvariants(state);
   }
@@ -837,7 +875,9 @@ export function assertWorkflowStateSemantics(state: WorkflowState): void {
       ? directPhases
       : state.execution_mode === "SINGLE_OWNER_SOL"
         ? singleOwnerPhases
-        : routedPhases;
+        : state.execution_mode === "STATIC_APPROVED_DAG"
+          ? new Set([...routedPhases, "STATIC_DAG_VERIFYING"])
+          : routedPhases;
   if (!commonPhases.has(state.phase) && !modePhases.has(state.phase)) {
     throw new ContractValidationError("CROSS_MODE_STATE", `${state.phase} is invalid for ${state.execution_mode}`);
   }
@@ -867,7 +907,9 @@ export function assertWorkflowStateSemantics(state: WorkflowState): void {
       ? new Set(["DIRECT_TASK_FROZEN", "DIRECT_FAST_PREFLIGHT", "DIRECT_ATTEMPT_RUNNING", "DIRECT_POSTFLIGHT", "DIRECT_VERIFYING", "DIRECT_RETRY_READY"])
       : state.execution_mode === "SINGLE_OWNER_SOL"
         ? new Set(["SINGLE_OWNER_TASK_FROZEN", "SINGLE_OWNER_FAST_PREFLIGHT", "SINGLE_OWNER_RUNNING", "SINGLE_OWNER_POSTFLIGHT", "SINGLE_OWNER_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE"])
-        : new Set(["DAG_FROZEN", "READY", "LEAF_FAST_PREFLIGHT", "LEAF_RUNNING", "LEAF_POSTFLIGHT", "LEAF_VERIFYING", "LEAF_RETRY_READY", "REPLAN_REQUIRED", "CLOSEOUT_RUNNING", "CLOSEOUT_VERIFYING"]);
+        : state.execution_mode === "STATIC_APPROVED_DAG"
+          ? new Set(["DAG_FROZEN", "READY", "LEAF_FAST_PREFLIGHT", "LEAF_RUNNING", "LEAF_POSTFLIGHT", "LEAF_VERIFYING", "LEAF_RETRY_READY", "STATIC_DAG_VERIFYING"])
+          : new Set(["DAG_FROZEN", "READY", "LEAF_FAST_PREFLIGHT", "LEAF_RUNNING", "LEAF_POSTFLIGHT", "LEAF_VERIFYING", "LEAF_RETRY_READY", "REPLAN_REQUIRED", "CLOSEOUT_RUNNING", "CLOSEOUT_VERIFYING"]);
   if (!terminal && state.route_frozen !== frozenPhases.has(state.phase)) {
     throw new ContractValidationError("ROUTE_FREEZE_MISMATCH", "route_frozen does not match the workflow phase");
   }
@@ -875,7 +917,7 @@ export function assertWorkflowStateSemantics(state: WorkflowState): void {
   const invocations = state.counters.worker_invocations;
   if (
     invocations.total !==
-    invocations.sol_owner + invocations.sol_planner + invocations.sol_replan + invocations.sol_closeout + invocations.luna_executor
+    invocations.sol_owner + invocations.sol_planner + invocations.sol_replan + invocations.sol_closeout + invocations.luna_executor + invocations.terra_executor
   ) {
     throw new ContractValidationError("INVOCATION_COUNTER_MISMATCH", "Worker invocation dimensions do not sum to total");
   }
@@ -886,6 +928,7 @@ export function assertWorkflowStateSemantics(state: WorkflowState): void {
       invocations.sol_planner !== 0 ||
       invocations.sol_replan !== 0 ||
       invocations.sol_closeout !== 0 ||
+      invocations.terra_executor !== 0 ||
       state.counters.single_owner_mutation_cycles !== 0 ||
       state.counters.constrained_replans !== 0 ||
       invocations.luna_executor !== state.counters.direct_attempts
@@ -898,14 +941,19 @@ export function assertWorkflowStateSemantics(state: WorkflowState): void {
       invocations.sol_replan !== 0 ||
       invocations.sol_closeout !== 0 ||
       invocations.luna_executor !== 0 ||
+      invocations.terra_executor !== 0 ||
       state.counters.direct_attempts !== 0 ||
       state.counters.constrained_replans !== 0 ||
       (state.counters.single_owner_mutation_cycles > 0 && invocations.sol_owner !== 1)
     ) {
       throw new ContractValidationError("CROSS_MODE_COUNTER", "Single-owner mode contains non-owner counters");
     }
+  } else if (state.execution_mode === "STATIC_APPROVED_DAG") {
+    if (invocations.sol_owner !== 0 || invocations.sol_planner !== 0 || invocations.sol_replan !== 0 || invocations.sol_closeout !== 0 || invocations.luna_executor !== 0 || state.counters.direct_attempts !== 0 || state.counters.single_owner_mutation_cycles !== 0 || state.counters.constrained_replans !== 0) {
+      throw new ContractValidationError("CROSS_MODE_COUNTER", "Static DAG contains non-Terra counters");
+    }
   } else if (
-    invocations.sol_owner !== 0 ||
+    invocations.sol_owner !== 0 || invocations.terra_executor !== 0 ||
     state.counters.direct_attempts !== 0 ||
     state.counters.single_owner_mutation_cycles !== 0 ||
     state.counters.constrained_replans !== invocations.sol_replan
@@ -930,7 +978,8 @@ export function assertWorkflowStateSemantics(state: WorkflowState): void {
   if (
     (state.execution_mode === "DIRECT_LUNA_HIGH" && state.tasks.length > 0 && taskAttemptTotal !== state.counters.direct_attempts) ||
     (state.execution_mode === "SINGLE_OWNER_SOL" && taskAttemptTotal !== 0) ||
-    (state.execution_mode === "ROUTED_DAG" && taskAttemptTotal !== invocations.luna_executor)
+    (state.execution_mode === "ROUTED_DAG" && taskAttemptTotal !== invocations.luna_executor) ||
+    (state.execution_mode === "STATIC_APPROVED_DAG" && taskAttemptTotal !== invocations.terra_executor)
   ) {
     throw new ContractValidationError("ATTEMPT_COUNTER_MISMATCH", "Task attempts do not match mode counters");
   }
@@ -948,9 +997,12 @@ export function assertReducerPolicySemantics(policy: ReducerPolicy): void {
     throw new ContractValidationError("OWNER_ACCEPTANCE_MODE_MISMATCH", `${policy.execution_mode} has no owner-acceptance state`);
   }
   assertTaskScopesDoNotOverlap(policy.tasks);
-  if (policy.execution_mode === "ROUTED_DAG") {
+  if (policy.execution_mode === "ROUTED_DAG" || policy.execution_mode === "STATIC_APPROVED_DAG") {
     if (policy.tasks.length < 2) {
-      throw new ContractValidationError("ROUTED_DAG_TOO_SMALL", "ROUTED_DAG requires at least two leaves");
+      throw new ContractValidationError(policy.execution_mode === "ROUTED_DAG" ? "ROUTED_DAG_TOO_SMALL" : "DAG_TOO_SMALL", `${policy.execution_mode} requires at least two leaves`);
+    }
+    if (policy.execution_mode === "STATIC_APPROVED_DAG" && (policy.owner_acceptance_required || policy.limits.max_replans !== 0)) {
+      throw new ContractValidationError("STATIC_DAG_TOPOLOGY_INVALID", "STATIC_APPROVED_DAG cannot require owner acceptance or replanning");
     }
     const edges = policy.tasks.flatMap((task) => task.dependencies.map((dependency) => ({ from: dependency, to: task.task_id })));
     assertGraphSemantics(policy.tasks, edges, policy.limits.max_leaves);
@@ -1005,7 +1057,7 @@ export function assertStatePolicyConsistency(state: WorkflowState, policy: Reduc
   for (const task of state.tasks) {
     const attemptCap = state.execution_mode === "DIRECT_LUNA_HIGH"
       ? policy.limits.max_direct_attempts
-      : state.execution_mode === "ROUTED_DAG"
+      : state.execution_mode === "ROUTED_DAG" || state.execution_mode === "STATIC_APPROVED_DAG"
         ? policy.limits.max_attempts_per_leaf
         : 0;
     if (task.attempts > attemptCap) {

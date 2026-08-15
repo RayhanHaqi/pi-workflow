@@ -77,7 +77,8 @@
           "enum": [
             "DIRECT_LUNA_HIGH",
             "SINGLE_OWNER_SOL",
-            "ROUTED_DAG"
+            "ROUTED_DAG",
+            "STATIC_APPROVED_DAG"
           ]
         },
         "baseline_approval_sha256": {
@@ -383,7 +384,7 @@
         },
         "logical_routes": {
           "minItems": 1,
-          "maxItems": 7,
+          "maxItems": 8,
           "uniqueItems": true,
           "type": "array",
           "items": {
@@ -398,6 +399,7 @@
                   "SOL_REPLAN",
                   "SOL_CLOSEOUT",
                   "LUNA_EXECUTOR",
+                  "TERRA_EXECUTOR",
                   "BENCHMARK_VERIFIER",
                   "BENCHMARK_SELECTOR"
                 ]

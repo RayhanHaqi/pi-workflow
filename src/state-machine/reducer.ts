@@ -20,7 +20,7 @@ export class TransitionError extends Error {
   }
 }
 
-type InvocationRole = "sol_owner" | "sol_planner" | "sol_replan" | "sol_closeout" | "luna_executor";
+type InvocationRole = "sol_owner" | "sol_planner" | "sol_replan" | "sol_closeout" | "luna_executor" | "terra_executor";
 
 type StateIdentities = WorkflowState["identities"];
 type DeepMutable<T> = T extends readonly (infer Item)[]
@@ -66,6 +66,7 @@ function incrementInvocation(state: MutableState, role: InvocationRole, policy: 
     sol_replan: 2,
     sol_closeout: 1,
     luna_executor: state.execution_mode === "ROUTED_DAG" ? policy.tasks.length * policy.limits.max_attempts_per_leaf : 2,
+    terra_executor: state.execution_mode === "STATIC_APPROVED_DAG" ? policy.tasks.length * policy.limits.max_attempts_per_leaf : 0,
   };
   if (counters[role] >= fixedCaps[role]) {
     throw new TransitionError("ROLE_INVOCATION_CAP_EXCEEDED", `${role} invocation cap reached`);
@@ -187,6 +188,7 @@ export function createInitialState(policy: ReducerPolicy, identities: StateIdent
         sol_replan: 0,
         sol_closeout: 0,
         luna_executor: 0,
+        terra_executor: 0,
       },
       direct_attempts: 0,
       single_owner_mutation_cycles: 0,
@@ -455,6 +457,81 @@ function reduceSingleOwner(state: MutableState, event: TransitionEvent, policy: 
   }
 }
 
+function reduceStaticApprovedDag(state: MutableState, event: TransitionEvent, policy: ReducerPolicy): void {
+  requireMode(state, "STATIC_APPROVED_DAG", event);
+  switch (event.event_type) {
+    case "FREEZE_STATIC_DAG":
+      requirePhase(state, "ROUTE_SELECTED", event);
+      initializeTasks(state, policy);
+      state.route_frozen = true;
+      state.phase = "DAG_FROZEN";
+      return;
+    case "ACTIVATE_DAG":
+      requirePhase(state, "DAG_FROZEN", event);
+      state.phase = "READY";
+      return;
+    case "SELECT_READY_LEAF": {
+      requirePhase(state, "READY", event);
+      if (state.active_task_id !== null) throw new TransitionError("CONCURRENT_WRITER", "An active leaf already exists");
+      const taskId = selectReadyLeafUnchecked(state, policy);
+      if (taskId === null) throw new TransitionError("NO_READY_LEAF", "No dependency-satisfied leaf is ready");
+      state.active_task_id = taskId;
+      state.phase = "LEAF_FAST_PREFLIGHT";
+      return;
+    }
+    case "START_LEAF_ATTEMPT": {
+      requirePhase(state, "LEAF_FAST_PREFLIGHT", event);
+      if (state.active_task_id === null) throw new TransitionError("NO_ACTIVE_TASK", "Leaf start requires selection");
+      const runtime = runtimeTask(state, state.active_task_id);
+      if (runtime.attempts >= policy.limits.max_attempts_per_leaf) throw new TransitionError("ATTEMPT_CAP_EXCEEDED", "A third leaf attempt is impossible");
+      if (runtime.attempts > 0 && !runtime.retry_progress_admitted) throw new TransitionError("PROGRESS_DELTA_REQUIRED", "A repair attempt requires admitted progress");
+      incrementInvocation(state, "terra_executor", policy);
+      runtime.attempts += 1;
+      runtime.status = "RUNNING";
+      state.phase = "LEAF_RUNNING";
+      return;
+    }
+    case "COMPLETE_LEAF_ATTEMPT":
+      requirePhase(state, "LEAF_RUNNING", event);
+      state.phase = "LEAF_POSTFLIGHT";
+      return;
+    case "PASS_LEAF_POSTFLIGHT":
+      requirePhase(state, "LEAF_POSTFLIGHT", event);
+      markActivePostflightComplete(state);
+      state.phase = "LEAF_VERIFYING";
+      return;
+    case "LEAF_VERIFICATION_PASSED":
+      requirePhase(state, "LEAF_VERIFYING", event);
+      passTask(state);
+      if (state.tasks.every((task) => task.status === "PASS")) state.phase = "STATIC_DAG_VERIFYING";
+      else state.phase = "READY";
+      return;
+    case "STATIC_DAG_VERIFICATION_PASSED":
+      requirePhase(state, "STATIC_DAG_VERIFYING", event);
+      state.phase = "PASS";
+      state.terminal_reason = "PASS";
+      return;
+    case "LEAF_VERIFICATION_FAILED": {
+      requirePhase(state, "LEAF_VERIFYING", event);
+      if (state.active_task_id === null) throw new TransitionError("NO_ACTIVE_TASK", "Leaf failure requires an active task");
+      const active = runtimeTask(state, state.active_task_id);
+      if (event.payload.failure_class === "LOCAL_IMPLEMENTATION_DEFECT" && active.attempts < policy.limits.max_attempts_per_leaf) {
+        resetActiveTaskForRetry(state);
+        state.phase = "LEAF_RETRY_READY";
+      } else block(state, `BLOCKED_${event.payload.failure_class}`);
+      return;
+    }
+    case "ADMIT_LEAF_RETRY":
+      requirePhase(state, "LEAF_RETRY_READY", event);
+      assertProgressDelta(event.payload.progress_delta);
+      admitActiveRetryProgress(state);
+      state.phase = "LEAF_FAST_PREFLIGHT";
+      return;
+    default:
+      invalidTransition(state, event);
+  }
+}
+
 function reduceRouted(state: MutableState, event: TransitionEvent, policy: ReducerPolicy): void {
   requireMode(state, "ROUTED_DAG", event);
   switch (event.event_type) {
@@ -649,6 +726,9 @@ export function reduceState(current: WorkflowState, event: TransitionEvent, poli
       break;
     case "ROUTED_DAG":
       reduceRouted(next, event, policy);
+      break;
+    case "STATIC_APPROVED_DAG":
+      reduceStaticApprovedDag(next, event, policy);
       break;
   }
   return sealState(next, policy);

@@ -59,6 +59,7 @@ const CONTINUATIONS = ["CONTINUE_ADMITTED_OPERATION", "RETRY_TRANSIENT_TOOL_ONCE
 function architectureWorkerLimit(policy: M5ControlPolicyDocument, state: WorkflowState): number {
   if (state.execution_mode === "DIRECT_LUNA_HIGH") return 2;
   if (state.execution_mode === "SINGLE_OWNER_SOL") return 1;
+  if (state.execution_mode === "STATIC_APPROVED_DAG") return Math.min(20, policy.route_facts.leaf_count * 2);
   return Math.min(20, 2 * policy.route_facts.leaf_count + 4);
 }
 
@@ -96,7 +97,8 @@ function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5Contr
     if (!Number.isSafeInteger(entry.validated_amount + entry.observed_reported_amount + entry.active_reservation_amount)) return "Budget charged arithmetic overflows";
   }
   if (value.decision_kind === "INITIAL_MODE") {
-    if (value.intent !== "SELECT_ROUTE" || canonicalize(value.routes.map((entry) => entry.route).sort()) !== canonicalize(["DIRECT_LUNA_HIGH", "ROUTED_DAG", "SINGLE_OWNER_SOL"])) return "Initial route inventory or intent is invalid";
+    const expectedInitialRoutes = policy.requested_mode === "STATIC_APPROVED_DAG" ? ["STATIC_APPROVED_DAG"] : ["DIRECT_LUNA_HIGH", "ROUTED_DAG", "SINGLE_OWNER_SOL"];
+    if (value.intent !== "SELECT_ROUTE" || canonicalize(value.routes.map((entry) => entry.route).sort()) !== canonicalize(expectedInitialRoutes)) return "Initial route inventory or intent is invalid";
   } else if (canonicalize(value.routes.map((entry) => entry.route).sort()) !== canonicalize([...CONTINUATIONS].sort())) return "Continuation route inventory is invalid";
   if (value.outcome === "BLOCK" && value.reservation !== null) return "Blocked decision retains an active reservation";
   if (value.reservation !== null) {
@@ -108,8 +110,8 @@ function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5Contr
     if (envelope.logical_role !== value.reservation.logical_role || envelope.purpose !== value.reservation.purpose || canonicalize(envelope.amounts) !== canonicalize(value.reservation.amounts)) return "Reservation envelope is false";
     const expectedRole = value.current_state_content_sha256 === state.content_sha256
       ? state.phase === "READY" ? "SOL_CLOSEOUT" : state.phase === "REPLAN_REQUIRED" ? "SOL_REPLAN" : state.phase === "SINGLE_OWNER_FAST_PREFLIGHT" ? "SOL_OWNER"
-        : state.phase === "ROUTE_SELECTED" ? state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : "LUNA_EXECUTOR"
-          : "LUNA_EXECUTOR"
+        : state.phase === "ROUTE_SELECTED" ? state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : state.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR"
+          : state.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR"
       : null;
     if (expectedRole !== null && value.reservation.logical_role !== expectedRole) return "Reservation role is false for the current phase";
   }

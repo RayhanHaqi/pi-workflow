@@ -1151,7 +1151,7 @@ export function m8RuntimeStaticSlotProjection(input: {
     scenario: Object.freeze({ scenario_id: materialization.scenarioId, scenario_class: arm.scenario.scenario_class }),
     mode: authority.mode,
     direct_eligible: directEligibleScenario(arm.scenario),
-    logical_route: runtimeLogicalRoutes(authority, authority.mode),
+    logical_route: runtimeLogicalRoutes(authority, authority.mode as M8Mode),
     baseline_mode: authority.baseline.baseline_mode,
     static_scope: Object.freeze({ readable_paths: Object.freeze([...authority.contract.scope.readable_paths]), editable_paths: Object.freeze([...authority.contract.scope.editable_paths]),
       frozen_paths: Object.freeze([...authority.contract.scope.frozen_paths]), required_outputs: Object.freeze([...authority.contract.required_outputs]), stopping_conditions: Object.freeze([...authority.contract.stopping_conditions]) }),
@@ -1159,7 +1159,7 @@ export function m8RuntimeStaticSlotProjection(input: {
       required_outputs: Object.freeze([...task.required_outputs]), dependencies: Object.freeze([...task.dependencies]), topological_rank: task.topological_rank,
       assigned_role: task.assigned_role, write_owner: task.write_owner }))),
     static_budgets: Object.freeze({ hard_m4_mutation_tool_limit: authority.controller_limits.hard_m4_mutation_tool_limit, max_replans: authority.controller_limits.max_replans,
-      route_maximum_tool_calls: authority.route_map.routes.find((entry) => entry.logical_role === logicalRoles(authority.mode)[0])!.tool_policy.maximum_tool_calls,
+      route_maximum_tool_calls: authority.route_map.routes.find((entry) => entry.logical_role === logicalRoles(authority.mode as M8Mode)[0])!.tool_policy.maximum_tool_calls,
       max_leaves: authority.budget.limits.max_leaves, max_attempts_per_leaf: authority.budget.limits.max_attempts_per_leaf, max_worker_invocations: authority.budget.limits.max_worker_invocations,
       max_model_turns: authority.budget.limits.max_model_turns, max_tool_calls: authority.budget.limits.max_tool_calls, max_input_tokens: authority.budget.limits.max_input_tokens,
       max_output_tokens: authority.budget.limits.max_output_tokens, max_cost_microusd: authority.budget.limits.max_cost_microusd, max_wall_time_ms: authority.budget.limits.max_wall_time_ms }),
@@ -1281,7 +1281,7 @@ export function assertM8ArmApproved(arm: FrozenM8Arm, manifest: M8ApprovalManife
   return approved[0]!;
 }
 function captureActualControllerAuthority(arm: FrozenM8Arm, approved: M8StaticSlotSpecification, materialization: MaterializedM8Fixture, input: {
-  readonly mode: M8Mode;
+  readonly mode: BoundedExecutionAuthority["mode"];
   readonly contract: BoundedExecutionAuthority["contract"];
   readonly tasks: readonly BoundedExecutionAuthority["tasks"][number][];
   readonly plan: BoundedExecutionAuthority["plan"];

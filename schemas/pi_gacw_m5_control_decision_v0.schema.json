@@ -589,7 +589,7 @@
     },
     "available_logical_roles": {
       "uniqueItems": true,
-      "maxItems": 7,
+      "maxItems": 8,
       "type": "array",
       "items": {
         "type": "string",
@@ -599,6 +599,7 @@
           "SOL_REPLAN",
           "SOL_CLOSEOUT",
           "LUNA_EXECUTOR",
+          "TERRA_EXECUTOR",
           "BENCHMARK_VERIFIER",
           "BENCHMARK_SELECTOR"
         ]
@@ -651,6 +652,7 @@
               "DIRECT_LUNA_HIGH",
               "SINGLE_OWNER_SOL",
               "ROUTED_DAG",
+              "STATIC_APPROVED_DAG",
               "CONTINUE_ADMITTED_OPERATION",
               "RETRY_TRANSIENT_TOOL_ONCE",
               "SECOND_LUNA_ATTEMPT",
@@ -696,6 +698,7 @@
             "DIRECT_LUNA_HIGH",
             "SINGLE_OWNER_SOL",
             "ROUTED_DAG",
+            "STATIC_APPROVED_DAG",
             "CONTINUE_ADMITTED_OPERATION",
             "RETRY_TRANSIENT_TOOL_ONCE",
             "SECOND_LUNA_ATTEMPT",
@@ -726,6 +729,7 @@
                 "SOL_REPLAN",
                 "SOL_CLOSEOUT",
                 "LUNA_EXECUTOR",
+                "TERRA_EXECUTOR",
                 "BENCHMARK_VERIFIER",
                 "BENCHMARK_SELECTOR"
               ]
@@ -759,6 +763,7 @@
                 "DIRECT_LUNA_HIGH",
                 "SINGLE_OWNER_SOL",
                 "ROUTED_DAG",
+                "STATIC_APPROVED_DAG",
                 "CONTINUE_ADMITTED_OPERATION",
                 "RETRY_TRANSIENT_TOOL_ONCE",
                 "SECOND_LUNA_ATTEMPT",

@@ -245,7 +245,8 @@
       "type": "string",
       "enum": [
         "SOL_OWNER",
-        "LUNA_EXECUTOR"
+        "LUNA_EXECUTOR",
+        "TERRA_EXECUTOR"
       ]
     },
     "write_owner": {

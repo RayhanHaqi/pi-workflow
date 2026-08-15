@@ -164,9 +164,10 @@ test("schema snapshots expose the frozen execution, role, event, and phase value
   const routeMap = getSchemaSnapshot("pi_gacw_route_map_v0") as MutableJson;
   const event = getSchemaSnapshot("pi_gacw_transition_event_v0") as MutableJson;
   const state = getSchemaSnapshot("pi_gacw_state_v0") as MutableJson;
-  assert.deepEqual(objective.properties.requested_mode.enum, ["AUTO", "DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"]);
-  assert.deepEqual(policy.properties.execution_mode.enum, ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"]);
+  assert.deepEqual(objective.properties.requested_mode.enum, ["AUTO", "DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"]);
+  assert.deepEqual(policy.properties.execution_mode.enum, ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"]);
   assert.equal(routeMap.properties.routes.items.properties.logical_role.enum.includes("LUNA_EXECUTOR"), true);
+  assert.equal(routeMap.properties.routes.items.properties.logical_role.enum.includes("TERRA_EXECUTOR"), true);
   assert.equal(routeMap.properties.routes.items.properties.logical_role.enum.includes("LUNA_MEDIUM"), false);
   const eventTypes = event.anyOf.map((variant: MutableJson) => variant.properties.event_type.const);
   assert.equal(new Set(eventTypes).size, eventTypes.length);

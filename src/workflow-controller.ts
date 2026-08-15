@@ -68,7 +68,7 @@ const RUN_ID = "pre-m8-bounded";
 const CONTROLLER_VERSION = "0.1.0";
 const MAX_TOOL_CALLS_PER_WORKER = 32;
 const MAX_WALL_TIME_MS = 120_000;
-const PRODUCT_ROLES = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
+const PRODUCT_ROLES = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
 
 type GoalMode = ConcreteExecutionMode;
 type GoalScope = { readonly readable_paths: readonly string[]; readonly editable_paths: readonly string[]; readonly frozen_paths: readonly string[] };
@@ -103,6 +103,8 @@ export interface BoundedMutationAuthority {
   readonly dirty_baseline_decisions?: readonly BaselinePathDecision[];
   /** Narrow controller-owned accepted-mutation admission cap; goals and workers cannot set it. */
   readonly hard_mutation_tool_limit?: 1;
+  /** Frozen STATIC_APPROVED_DAG repair edge cap; absent means no repair edge. */
+  readonly static_max_attempts_per_leaf?: 1 | 2;
 }
 
 export interface BaselineApprovalRequest {
@@ -539,7 +541,7 @@ function ids(value: unknown, label: string): readonly string[] {
 }
 function within(pathValue: string, roots: readonly string[]): boolean { return roots.some((root) => pathValue === root || pathValue.startsWith(`${root}/`)); }
 function mode(value: unknown): GoalMode {
-  if (value === "DIRECT_LUNA_HIGH" || value === "SINGLE_OWNER_SOL" || value === "ROUTED_DAG") return value;
+  if (value === "DIRECT_LUNA_HIGH" || value === "SINGLE_OWNER_SOL" || value === "ROUTED_DAG" || value === "STATIC_APPROVED_DAG") return value;
   return fail("INVALID_GOAL", "execution_mode is unsupported");
 }
 
@@ -566,8 +568,8 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
         editable_paths: paths(taskInput["editable_paths"], `Goal.tasks[${index}].editable_paths`), required_outputs: paths(taskInput["required_outputs"], `Goal.tasks[${index}].required_outputs`), dependencies: ids(taskInput["dependencies"], `Goal.tasks[${index}].dependencies`) };
     });
   }
-  if (selectedMode === "ROUTED_DAG") {
-    if (candidate.length < 2 || candidate.length > 8) fail("INVALID_GOAL", "Routed DAG requires 2–8 leaves");
+  if (selectedMode === "ROUTED_DAG" || selectedMode === "STATIC_APPROVED_DAG") {
+    if (candidate.length < 2 || candidate.length > 8) fail("INVALID_GOAL", `${selectedMode} requires 2–8 leaves`);
     const seen = new Set<string>();
     for (let index = 0; index < candidate.length; index += 1) {
       const task = candidate[index]!;
@@ -575,7 +577,7 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
       seen.add(task.task_id);
       if (task.editable_paths.length === 0 || task.required_outputs.length === 0 || task.editable_paths.some((entry) => !within(entry, scope.editable_paths)) || task.required_outputs.some((entry) => !required.includes(entry))) fail("INVALID_GOAL", "routed task scope or output is invalid");
       const expected = index === 0 ? [] : [candidate[index - 1]!.task_id];
-      if (canonicalize(task.dependencies) !== canonicalize(expected)) fail("INVALID_GOAL", "Routed DAG must be static sequential leaves");
+      if (selectedMode === "ROUTED_DAG" && canonicalize(task.dependencies) !== canonicalize(expected)) fail("INVALID_GOAL", "Routed DAG must be static sequential leaves");
     }
     if (canonicalize([...candidate.flatMap((task) => task.required_outputs)].sort()) !== canonicalize(required)) fail("INVALID_GOAL", "each expected output must have exactly one routed task owner");
   } else {
@@ -624,8 +626,9 @@ function target(repository: M3RepositoryIdentityDocument): ContractDocument["tar
 function routeMap(maxToolCalls: number): RouteMapDocument {
   const routes = PRODUCT_ROLES.map((logical_role) => {
     const luna = logical_role === "LUNA_EXECUTOR";
-    const mutates = logical_role === "LUNA_EXECUTOR" || logical_role === "SOL_OWNER";
-    return { logical_role, provider_id: "openai-codex", model_id: luna ? "gpt-5.6-luna" : "gpt-5.6-sol", effort: luna ? "high" as const : "max" as const,
+    const terra = logical_role === "TERRA_EXECUTOR";
+    const mutates = luna || terra || logical_role === "SOL_OWNER";
+    return { logical_role, provider_id: "openai-codex", model_id: terra ? "gpt-5.6-terra" : luna ? "gpt-5.6-luna" : "gpt-5.6-sol", effort: luna || terra ? "high" as const : "max" as const,
       tool_policy: { policy_id: `pre-m8-${logical_role.toLowerCase()}`, built_in_tools_disabled: true as const, mutation_tool: mutates ? "APPLY_PATCH_SCOPED" as const : "NONE" as const,
         command_gateway: logical_role === "SOL_CLOSEOUT" ? "VERIFICATION_ONLY" as const : logical_role === "SOL_PLANNER" ? "INSPECTION_ONLY" as const : "TASK_AND_VERIFICATION" as const,
         maximum_tool_calls: maxToolCalls } };
@@ -656,10 +659,11 @@ function controllerMutationLimit(authority: BoundedMutationAuthority): number {
   return 1;
 }
 
-function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number): BudgetDocument {
-  const workers = goal.execution_mode === "ROUTED_DAG" ? goal.tasks.length + 2 : 1;
+function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, staticAttemptsPerLeaf = 1): BudgetDocument {
+  if (staticAttemptsPerLeaf !== 1 && staticAttemptsPerLeaf !== 2) fail("INVALID_STATIC_REPAIR_EDGE", "STATIC_APPROVED_DAG permits at most one frozen repair edge per node");
+  const workers = goal.execution_mode === "STATIC_APPROVED_DAG" ? goal.tasks.length * staticAttemptsPerLeaf : goal.execution_mode === "ROUTED_DAG" ? goal.tasks.length + 2 : 1;
   return identifyContractDocument("pi_gacw_budget_v0", { schema_id: "pi_gacw_budget_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", budget_projection_id: "budget-freeze-v1", budget_sha256: fixed(`budget:${workers}`),
-    limits: { max_leaves: goal.execution_mode === "ROUTED_DAG" ? 8 : 1, max_attempts_per_leaf: 1, max_replans: 0, max_worker_invocations: workers, max_model_turns: workers * 32,
+    limits: { max_leaves: goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? 8 : 1, max_attempts_per_leaf: goal.execution_mode === "STATIC_APPROVED_DAG" ? staticAttemptsPerLeaf : 1, max_replans: 0, max_worker_invocations: workers, max_model_turns: workers * 32,
       max_tool_calls: workers * maxToolCalls, max_input_tokens: 1_000_000, max_output_tokens: 100_000, max_cost_microusd: 5_000_000, max_wall_time_ms: workers * MAX_WALL_TIME_MS },
     usage: { worker_invocation: { value: 0, enforcement_class: "HARD_ENFORCEABLE" }, model_turn: { value: 0, enforcement_class: "SOFT_ENFORCEABLE" }, provider_request: { value: null, enforcement_class: "UNAVAILABLE" }, tool_call: { value: 0, enforcement_class: "HARD_ENFORCEABLE" } } }) as BudgetDocument;
 }
@@ -668,10 +672,10 @@ function taskDocument(goal: ReturnType<typeof normalizeGoal>, candidate: Candida
     task_id: candidate.task_id, topological_rank: index, priority: index, dependencies: candidate.dependencies, objective: candidate.objective,
     scope: { readable_paths: goal.scope.readable_paths, editable_paths: candidate.editable_paths, frozen_paths: goal.scope.frozen_paths }, required_inputs: goal.scope.readable_paths,
     required_outputs: candidate.required_outputs, acceptance_criteria: acceptance({ ...goal, required_outputs: candidate.required_outputs }, []) , owner_acceptance_criteria: ownerAcceptance(goal), verification_commands: verification,
-    assigned_role: goal.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : "LUNA_EXECUTOR", write_owner: candidate.task_id }) as unknown as TaskDocument;
+    assigned_role: goal.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : goal.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR", write_owner: candidate.task_id }) as unknown as TaskDocument;
 }
 function taskGraph(goal: ReturnType<typeof normalizeGoal>, tasks: readonly TaskDocument[]): TaskGraphDocument | null {
-  if (goal.execution_mode !== "ROUTED_DAG") return null;
+  if (goal.execution_mode !== "ROUTED_DAG" && goal.execution_mode !== "STATIC_APPROVED_DAG") return null;
   return identifyContractDocument("pi_gacw_task_graph_v0", { schema_id: "pi_gacw_task_graph_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", task_graph_projection_id: "task-graph-freeze-v1",
     task_graph_sha256: fixed("task-graph"), tasks: tasks.map((task) => ({ task_id: task.task_id, task_sha256: task.task_sha256, topological_rank: task.topological_rank, priority: task.priority, dependencies: task.dependencies, editable_paths: task.scope.editable_paths, write_owner: task.write_owner })),
     edges: tasks.flatMap((task) => task.dependencies.map((dependency) => ({ from: dependency, to: task.task_id }))), configured_max_leaves: 8, write_ownership: "ONE_ACTIVE_WRITER" }) as TaskGraphDocument;
@@ -691,11 +695,11 @@ function plan(goal: ReturnType<typeof normalizeGoal>, repository: M3RepositoryId
     bindings: { objective_sha256: contractDocument.objective_sha256, target_repository: target(repository), execution_mode: goal.execution_mode, baseline_approval_sha256: contractDocument.baseline_approval_sha256, authority_lock_sha256: contractDocument.authority_lock_sha256, contract_sha256: contractDocument.contract_sha256,
       dag: { task_graph_sha256: graph.task_graph_sha256, edges: graph.edges, ordered_task_packet_identities: tasks.map((task) => task.task_sha256) }, scope: goal.scope, required_inputs: goal.scope.readable_paths, required_outputs: goal.required_outputs,
       acceptance_criteria: contractDocument.acceptance_criteria, owner_acceptance_criteria: ownerAcceptance(goal), verification_commands: verification, command_policy: contractDocument.command_policy,
-      logical_routes: route.routes.filter((entry) => ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"].includes(entry.logical_role)), limits: budgetDocument.limits, stopping_conditions: [goal.stop_condition] }, approved_by: "owner-confirmation-required" }) as unknown as PlanApprovalDocument;
+      logical_routes: route.routes.filter((entry) => goal.execution_mode === "STATIC_APPROVED_DAG" ? entry.logical_role === "TERRA_EXECUTOR" : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"].includes(entry.logical_role)), limits: budgetDocument.limits, stopping_conditions: [goal.stop_condition] }, approved_by: "owner-confirmation-required" }) as unknown as PlanApprovalDocument;
 }
 function reducer(goal: ReturnType<typeof normalizeGoal>, tasks: readonly TaskDocument[], graph: TaskGraphDocument | null, planDocument: PlanApprovalDocument | null, budgetDocument: BudgetDocument, scopeSha: Sha256Digest, acceptanceSha: Sha256Digest): ReducerPolicy {
   return identifyContractDocument("pi_gacw_reducer_policy_v0", { schema_id: "pi_gacw_reducer_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID, execution_mode: goal.execution_mode,
-    owner_acceptance_required: goal.execution_mode === "SINGLE_OWNER_SOL", limits: { max_direct_attempts: 1, max_single_owner_mutation_cycles: 1, max_attempts_per_leaf: 1, max_replans: 0, max_leaves: goal.execution_mode === "ROUTED_DAG" ? 8 : 1, max_worker_invocations: budgetDocument.limits.max_worker_invocations },
+    owner_acceptance_required: goal.execution_mode === "SINGLE_OWNER_SOL", limits: { max_direct_attempts: 1, max_single_owner_mutation_cycles: 1, max_attempts_per_leaf: budgetDocument.limits.max_attempts_per_leaf, max_replans: 0, max_leaves: goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? 8 : 1, max_worker_invocations: budgetDocument.limits.max_worker_invocations },
     tasks: tasks.map((task) => ({ task_id: task.task_id, task_sha256: task.task_sha256, topological_rank: task.topological_rank, priority: task.priority, dependencies: task.dependencies, editable_paths: task.scope.editable_paths })),
     frozen_bindings: { plan_approval_sha256: planDocument?.plan_approval_sha256 ?? null, task_graph_sha256: graph?.task_graph_sha256 ?? null, scope_sha256: scopeSha, acceptance_sha256: acceptanceSha, budget_sha256: budgetDocument.budget_sha256 } }) as ReducerPolicy;
 }
@@ -755,7 +759,7 @@ function executionAuthority(input: {
 
 function baselineStagingPolicy(goal: ReturnType<typeof normalizeGoal>, tasks: readonly TaskDocument[], graph: TaskGraphDocument | null, budgetDocument: BudgetDocument, scopeSha: Sha256Digest, acceptanceSha: Sha256Digest): ReducerPolicy {
   return identifyContractDocument("pi_gacw_reducer_policy_v0", { schema_id: "pi_gacw_reducer_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID, execution_mode: goal.execution_mode,
-    owner_acceptance_required: goal.execution_mode === "SINGLE_OWNER_SOL", limits: { max_direct_attempts: 1, max_single_owner_mutation_cycles: 1, max_attempts_per_leaf: 1, max_replans: 0, max_leaves: goal.execution_mode === "ROUTED_DAG" ? 8 : 1, max_worker_invocations: budgetDocument.limits.max_worker_invocations },
+    owner_acceptance_required: goal.execution_mode === "SINGLE_OWNER_SOL", limits: { max_direct_attempts: 1, max_single_owner_mutation_cycles: 1, max_attempts_per_leaf: 1, max_replans: 0, max_leaves: goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? 8 : 1, max_worker_invocations: budgetDocument.limits.max_worker_invocations },
     tasks: tasks.map((task) => ({ task_id: task.task_id, task_sha256: task.task_sha256, topological_rank: task.topological_rank, priority: task.priority, dependencies: task.dependencies, editable_paths: task.scope.editable_paths })),
     // This graph is M3 capture-only: it has no Contract, M4, M5, or worker path.
     frozen_bindings: { plan_approval_sha256: graph?.task_graph_sha256 ?? null, task_graph_sha256: graph?.task_graph_sha256 ?? null, scope_sha256: scopeSha, acceptance_sha256: acceptanceSha, budget_sha256: budgetDocument.budget_sha256 } }) as ReducerPolicy;
@@ -815,8 +819,8 @@ function m5Policy(repository: M3RepositoryIdentityDocument, state: WorkflowState
     ...catalog.commands.map((entry) => ({ declaration: `command:${entry.command_id}`, direction: "OUTPUT" as const, stage: 1, producer: goal.tasks.at(-1)!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "COMMAND" as const, literal: entry.command_id, prefix: null })),
     ...(goal.execution_mode === "SINGLE_OWNER_SOL" ? [{ declaration: "owner-acceptance", direction: "OUTPUT" as const, stage: 1, producer: goal.tasks[0]!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "OWNER_ACCEPTANCE" as const, literal: "ACCEPTED", prefix: null }] : []),
   ].map((entry) => ({ descriptor_sha256: sha256Canonical(entry), ...entry }));
-  const roles = goal.execution_mode === "DIRECT_LUNA_HIGH" ? ["LUNA_EXECUTOR"] as const : goal.execution_mode === "SINGLE_OWNER_SOL" ? ["SOL_OWNER"] as const : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"] as const;
-  const leaves = goal.execution_mode === "ROUTED_DAG" ? goal.tasks.length : 1;
+  const roles = goal.execution_mode === "DIRECT_LUNA_HIGH" ? ["LUNA_EXECUTOR"] as const : goal.execution_mode === "SINGLE_OWNER_SOL" ? ["SOL_OWNER"] as const : goal.execution_mode === "STATIC_APPROVED_DAG" ? ["TERRA_EXECUTOR"] as const : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"] as const;
+  const leaves = goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? goal.tasks.length : 1;
   return identifyContractDocument("pi_gacw_m5_control_policy_v0", { schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID,
     repository_identity_content_sha256: repository.content_sha256, worktree_key: repository.worktree_key, starting_state_content_sha256: state.content_sha256, objective_sha256: contractDocument.objective_sha256, contract_sha256: contractDocument.contract_sha256, budget_sha256: budgetDocument.budget_sha256,
     route_map_sha256: routes.route_map_sha256, route_map_approval_sha256: approval.route_map_approval_sha256, reducer_policy_content_sha256: reducerPolicy.content_sha256, authority_lock_sha256: contractDocument.authority_lock_sha256, baseline_approval_sha256: contractDocument.baseline_approval_sha256,
@@ -1009,7 +1013,8 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     // owner cap is a distinct bounded mutation-admission limit.
     const maxM4ToolCalls = MAX_TOOL_CALLS_PER_WORKER;
     const maxM4MutationCalls = controllerMutationLimit(options.authority);
-    const route = routeMap(maxM4ToolCalls); const routeApprovalDocument = routeApproval(route); const budgetDocument = budget(goal, maxM4ToolCalls); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification));
+    const route = routeMap(maxM4ToolCalls); const routeApprovalDocument = routeApproval(route); const staticAttemptsPerLeaf = options.authority.static_max_attempts_per_leaf ?? 1;
+    const budgetDocument = budget(goal, maxM4ToolCalls, staticAttemptsPerLeaf); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification));
     const graph = taskGraph(goal, tasks); const scopeSha = m3ScopeIdentity(goal.scope.editable_paths, goal.scope.frozen_paths);
     const acceptanceSha = sha256Canonical(acceptance(goal, verification as unknown as readonly M4CommandSpecification[]));
     // The staging graph has no M4/M5/worker path. It obtains the exact M3
@@ -1089,7 +1094,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       assertNotCancelled("execution approval");
       const approved = await options.approveTasks?.({ mode: goal.execution_mode, contract: contractDocument, tasks, plan: planDocument, executionAuthority: approvedExecutionAuthority }) ?? null;
       assertNotCancelled("worker reservation");
-      const expectedApproval = goal.execution_mode === "ROUTED_DAG" ? planDocument!.content_sha256 : contractDocument.content_sha256;
+      const expectedApproval = goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? planDocument!.content_sha256 : contractDocument.content_sha256;
       if (approved === null || approved !== expectedApproval) throw new BoundedWorkflowError("EXECUTION_APPROVAL_MISMATCH", "exact final Contract-bound execution authority or PlanApproval was not supplied");
       return approved;
     };
@@ -1146,6 +1151,20 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       await commit("APPROVE_SINGLE_OWNER_TASK", 22, {}, [contractDocument, ...tasks]); await commit("PASS_SINGLE_OWNER_FAST_PREFLIGHT", 23);
       const worker = await invoke("single-owner-worker", tasks[0]!, null, "MUTATION_EXECUTOR", "SOL_OWNER");
       if (!closeProductiveAuthority(worker)) { await commit("ADMIT_SINGLE_OWNER_MUTATION_CYCLE", 24); await commit("COMPLETE_SINGLE_OWNER", 25); await commit("PASS_SINGLE_OWNER_POSTFLIGHT", 26); }
+    } else if (goal.execution_mode === "STATIC_APPROVED_DAG") {
+      await commit("FREEZE_STATIC_DAG", 30, {}, [planDocument!, graph!, ...tasks]);
+      await commit("ACTIVATE_DAG", 31);
+      for (let index = 0; index < tasks.length; index += 1) {
+        await commit("SELECT_READY_LEAF", 40 + index * 4);
+        const taskId = (await expected()).inspection.workflowState!.active_task_id;
+        const task = tasks.find((candidate) => candidate.task_id === taskId);
+        if (task === undefined) throw new BoundedWorkflowError("STATIC_DAG_READY_NODE_MISSING", "ready-node selection did not identify a frozen task");
+        const worker = await invoke(`static-leaf-${task.task_id}`, task, planDocument, "MUTATION_EXECUTOR", "TERRA_EXECUTOR");
+        if (closeProductiveAuthority(worker)) break;
+        await commit("COMPLETE_LEAF_ATTEMPT", 41 + index * 4);
+        await commit("PASS_LEAF_POSTFLIGHT", 42 + index * 4);
+        await commit("LEAF_VERIFICATION_PASSED", 43 + index * 4);
+      }
     } else {
       const plannerResult = await invoke("planner", null, planDocument, "SOL_PLANNER", "SOL_PLANNER");
       if (!closeProductiveAuthority(plannerResult)) {

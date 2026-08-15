@@ -28,7 +28,8 @@
       "enum": [
         "DIRECT_LUNA_HIGH",
         "SINGLE_OWNER_SOL",
-        "ROUTED_DAG"
+        "ROUTED_DAG",
+        "STATIC_APPROVED_DAG"
       ]
     },
     "phase": {
@@ -72,6 +73,7 @@
         "REPLAN_REQUIRED",
         "CLOSEOUT_RUNNING",
         "CLOSEOUT_VERIFYING",
+        "STATIC_DAG_VERIFYING",
         "PASS",
         "BLOCKED"
       ]
@@ -184,6 +186,11 @@
               "minimum": 0,
               "maximum": 16,
               "type": "integer"
+            },
+            "terra_executor": {
+              "minimum": 0,
+              "maximum": 16,
+              "type": "integer"
             }
           },
           "required": [
@@ -192,7 +199,8 @@
             "sol_planner",
             "sol_replan",
             "sol_closeout",
-            "luna_executor"
+            "luna_executor",
+            "terra_executor"
           ]
         },
         "direct_attempts": {

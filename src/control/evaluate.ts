@@ -941,7 +941,7 @@ function contractGate(
   const desired = selectInitialRoute(policy, state, routeAvailable).selected;
   if (desired === null) add("ROUTE_UNAVAILABLE", policy.route_map_approval_sha256 as Sha256Digest);
   const boundedStaticRouted = isBoundedStaticPreM8(policy) && policy.requested_mode === "ROUTED_DAG";
-  const requiredInvocations = desired === "ROUTED_DAG" ? boundedStaticRouted ? policy.route_facts.leaf_count + 2 : 2 * policy.route_facts.leaf_count + 4 : 1;
+  const requiredInvocations = desired === "STATIC_APPROVED_DAG" ? policy.route_facts.leaf_count * reducer.limits.max_attempts_per_leaf : desired === "ROUTED_DAG" ? boundedStaticRouted ? policy.route_facts.leaf_count + 2 : 2 * policy.route_facts.leaf_count + 4 : 1;
   const requiredByDimension: Readonly<Record<(typeof DIMENSIONS)[number], number>> = {
     WORKER_INVOCATION: requiredInvocations, MODEL_TURN: desired === null ? 1 : 1, PROVIDER_REQUEST: 0, TOOL_CALL: desired === "ROUTED_DAG" ? policy.route_facts.leaf_count : 0,
     INPUT_TOKEN: 0, OUTPUT_TOKEN: 0, COST_MICROUSD: 0, WALL_TIME_MS: 0,
@@ -971,7 +971,7 @@ function contractGate(
 }
 
 function stateIsTerminalPhase(state: WorkflowState): boolean {
-  return ["DIRECT_VERIFYING", "SINGLE_OWNER_VERIFYING", "CLOSEOUT_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE", "PASS", "BLOCKED"].includes(state.phase);
+  return ["DIRECT_VERIFYING", "SINGLE_OWNER_VERIFYING", "CLOSEOUT_VERIFYING", "STATIC_DAG_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE", "PASS", "BLOCKED"].includes(state.phase);
 }
 
 function initialRoutes(policy: M5ControlPolicyDocument, available: ReadonlySet<string>): M5ControlDecisionDocument["routes"] {
@@ -979,10 +979,13 @@ function initialRoutes(policy: M5ControlPolicyDocument, available: ReadonlySet<s
   const direct = !hard && f.task_count === 1 && f.coherent_single_task && f.failure_domain_count === 1 && f.deterministic_acceptance && !f.ownership_ambiguous;
   const routed = !hard && f.task_count >= 2 && f.leaf_count >= 2 && f.leaf_count <= 8 && f.dag_valid && f.leaves_separable && f.unique_write_ownership && f.leaf_acceptance_machine_checkable;
   const requirements: Readonly<Record<string, readonly LogicalModelRole[]>> = {
-    DIRECT_LUNA_HIGH: ["LUNA_EXECUTOR"], SINGLE_OWNER_SOL: ["SOL_OWNER"], ROUTED_DAG: ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"],
+    DIRECT_LUNA_HIGH: ["LUNA_EXECUTOR"], SINGLE_OWNER_SOL: ["SOL_OWNER"], ROUTED_DAG: ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"], STATIC_APPROVED_DAG: ["TERRA_EXECUTOR"],
   };
-  return (["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const).map((route) => {
-    const factEligible = route === "DIRECT_LUNA_HIGH" ? direct : route === "ROUTED_DAG" ? routed
+  const inventory = policy.requested_mode === "STATIC_APPROVED_DAG"
+    ? ["STATIC_APPROVED_DAG"] as const
+    : ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const;
+  return inventory.map((route) => {
+    const factEligible = route === "DIRECT_LUNA_HIGH" ? direct : route === "ROUTED_DAG" || route === "STATIC_APPROVED_DAG" ? routed
       : hard || policy.requested_mode === "SINGLE_OWNER_SOL" || policy.insufficient_routing_evidence === "SINGLE_OWNER_SOL";
     const missing = requirements[route]!.filter((role) => !available.has(role));
     return { route, eligibility: missing.length > 0 ? "MISSING_AUTHORITY" as const : factEligible ? "ELIGIBLE" as const : "INELIGIBLE" as const,
@@ -990,14 +993,14 @@ function initialRoutes(policy: M5ControlPolicyDocument, available: ReadonlySet<s
   });
 }
 
-function preferredInitialRoute(policy: M5ControlPolicyDocument): "DIRECT_LUNA_HIGH" | "SINGLE_OWNER_SOL" | "ROUTED_DAG" | null {
+function preferredInitialRoute(policy: M5ControlPolicyDocument): "DIRECT_LUNA_HIGH" | "SINGLE_OWNER_SOL" | "ROUTED_DAG" | "STATIC_APPROVED_DAG" | null {
   if (policy.requested_mode !== "AUTO") return policy.requested_mode;
   if (policy.route_facts.hard_sol_conditions.length > 0) return "SINGLE_OWNER_SOL";
   if (policy.route_facts.task_count === 1) return "DIRECT_LUNA_HIGH";
   if (policy.route_facts.leaf_count >= 2) return "ROUTED_DAG";
   return null;
 }
-function selectInitialRoute(policy: M5ControlPolicyDocument, state: WorkflowState, available: ReadonlySet<string>): { readonly routes: M5ControlDecisionDocument["routes"]; readonly selected: "DIRECT_LUNA_HIGH" | "SINGLE_OWNER_SOL" | "ROUTED_DAG" | null; readonly preferred: string | null } {
+function selectInitialRoute(policy: M5ControlPolicyDocument, state: WorkflowState, available: ReadonlySet<string>): { readonly routes: M5ControlDecisionDocument["routes"]; readonly selected: "DIRECT_LUNA_HIGH" | "SINGLE_OWNER_SOL" | "ROUTED_DAG" | "STATIC_APPROVED_DAG" | null; readonly preferred: string | null } {
   const routes = initialRoutes(policy, available); const preferred = preferredInitialRoute(policy);
   const eligible = (route: string): boolean => route === state.execution_mode && routes.some((entry) => entry.route === route && entry.eligibility === "ELIGIBLE");
   if (preferred !== null && eligible(preferred)) return { routes, selected: preferred, preferred };
@@ -1034,9 +1037,9 @@ function continuationAllowed(action: ContinuationRoute, state: WorkflowState, in
 
 function requiredRole(state: WorkflowState, input: EvaluateControlDecisionInput): LogicalModelRole | null {
   if (input.requiredLogicalRole !== undefined) return input.requiredLogicalRole;
-  if (state.phase === "DIRECT_FAST_PREFLIGHT" || state.phase === "LEAF_FAST_PREFLIGHT") return "LUNA_EXECUTOR";
+  if (state.phase === "DIRECT_FAST_PREFLIGHT" || state.phase === "LEAF_FAST_PREFLIGHT") return state.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR";
   if (state.phase === "SINGLE_OWNER_FAST_PREFLIGHT") return "SOL_OWNER";
-  if (state.phase === "ROUTE_SELECTED") return state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : "LUNA_EXECUTOR";
+  if (state.phase === "ROUTE_SELECTED") return state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : state.execution_mode === "STATIC_APPROVED_DAG" ? null : "LUNA_EXECUTOR";
   if (state.phase === "REPLAN_REQUIRED") return "SOL_REPLAN";
   if (state.phase === "READY") return "SOL_CLOSEOUT";
   return null;
@@ -1059,7 +1062,7 @@ function transitionFor(
   const seed = { state: state.content_sha256, intent: input.intent, transitionId: input.transitionId ?? null, selected, outcome, blockingReason, evidence: progress.evidence_set_sha256 };
   if (outcome === "BLOCK") return createEvent("BLOCK", { reason: blockingReason ?? "BLOCKED_M5_AUTHORITY_INCOMPLETE" }, seed);
   if (input.intent === "VALIDATE_CONTRACT") return createEvent("VALIDATE_CONTRACT", {}, seed);
-  if (input.intent === "SELECT_ROUTE" && selected !== null && ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"].includes(selected)) return createEvent("SELECT_ROUTE", { execution_mode: selected }, seed);
+  if (input.intent === "SELECT_ROUTE" && selected !== null && ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"].includes(selected)) return createEvent("SELECT_ROUTE", { execution_mode: selected }, seed);
   if (input.intent === "AUTHORIZE_WORK") {
     const byPhase: Partial<Record<WorkflowState["phase"], TransitionEvent["event_type"]>> = {
       DIRECT_FAST_PREFLIGHT: "START_DIRECT_ATTEMPT", SINGLE_OWNER_FAST_PREFLIGHT: "START_SINGLE_OWNER", ROUTE_SELECTED: "START_PLAN",
@@ -1075,7 +1078,7 @@ function transitionFor(
   }
   if (input.intent === "EVALUATE_TERMINAL") {
     const byPhase: Partial<Record<WorkflowState["phase"], TransitionEvent["event_type"]>> = {
-      DIRECT_VERIFYING: "DIRECT_VERIFICATION_PASSED", SINGLE_OWNER_VERIFYING: "SINGLE_OWNER_VERIFICATION_PASSED", CLOSEOUT_VERIFYING: "CLOSEOUT_PASSED",
+      DIRECT_VERIFYING: "DIRECT_VERIFICATION_PASSED", SINGLE_OWNER_VERIFYING: "SINGLE_OWNER_VERIFICATION_PASSED", CLOSEOUT_VERIFYING: "CLOSEOUT_PASSED", STATIC_DAG_VERIFYING: "STATIC_DAG_VERIFICATION_PASSED",
       AWAITING_DECLARED_OWNER_ACCEPTANCE: "OWNER_ACCEPTED",
     };
     const type = byPhase[state.phase]; return type === undefined ? null : createEvent(type, {}, seed);
@@ -1154,12 +1157,12 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
   let reservation: M5ControlDecisionDocument["reservation"] = null;
   if (request.intent === "AUTHORIZE_WORK" && selected !== "BLOCK" && role !== null) {
     const roleToCounter: Readonly<Record<LogicalModelRole, keyof WorkflowState["counters"]["worker_invocations"]>> = {
-      SOL_OWNER: "sol_owner", SOL_PLANNER: "sol_planner", SOL_REPLAN: "sol_replan", SOL_CLOSEOUT: "sol_closeout", LUNA_EXECUTOR: "luna_executor",
+      SOL_OWNER: "sol_owner", SOL_PLANNER: "sol_planner", SOL_REPLAN: "sol_replan", SOL_CLOSEOUT: "sol_closeout", LUNA_EXECUTOR: "luna_executor", TERRA_EXECUTOR: "terra_executor",
       BENCHMARK_VERIFIER: "luna_executor", BENCHMARK_SELECTOR: "sol_owner",
     };
     const counter = roleToCounter[role];
     const fixedCap = role === "SOL_OWNER" ? 1 : role === "SOL_PLANNER" ? 1 : role === "SOL_REPLAN" ? reducerPolicy.limits.max_replans
-      : role === "SOL_CLOSEOUT" ? 1 : state.execution_mode === "ROUTED_DAG" ? reducerPolicy.tasks.length * reducerPolicy.limits.max_attempts_per_leaf : reducerPolicy.limits.max_direct_attempts;
+      : role === "SOL_CLOSEOUT" ? 1 : state.execution_mode === "ROUTED_DAG" || state.execution_mode === "STATIC_APPROVED_DAG" ? reducerPolicy.tasks.length * reducerPolicy.limits.max_attempts_per_leaf : reducerPolicy.limits.max_direct_attempts;
     if (!(request.availableLogicalRoles ?? []).includes(role) || state.counters.worker_invocations[counter] >= fixedCap) {
       selected = "BLOCK"; blockingReason = "BLOCKED_BUDGET_EXHAUSTED"; routes = continuationRoutes("BLOCK", true);
     }
@@ -1205,7 +1208,7 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
   }
   const unresolvedReservation = priorDecisions.some((decision) => decision.reservation !== null &&
     !usage.some((entry) => entry.reservation_decision_content_sha256 === decision.content_sha256 && entry.disposition !== "OUTCOME_UNCERTAIN"));
-  const terminalPhase = ["DIRECT_VERIFYING", "SINGLE_OWNER_VERIFYING", "CLOSEOUT_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE"].includes(state.phase);
+  const terminalPhase = ["DIRECT_VERIFYING", "SINGLE_OWNER_VERIFYING", "CLOSEOUT_VERIFYING", "STATIC_DAG_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE"].includes(state.phase);
   let pass = request.intent === "EVALUATE_TERMINAL" && terminalPhase && gate.status === "SATISFIED" && failures.length === 0 && !unresolvedReservation && !openingSoftReached;
   if (request.intent === "EVALUATE_TERMINAL" && !pass) {
     selected = "BLOCK"; blockingReason ??= unresolvedReservation ? "BLOCKED_UNRECONCILED_RESERVATION" : openingSoftReached ? "BLOCKED_BUDGET_EXHAUSTED" : "BLOCKED_TERMINAL_PRECONDITION"; routes = continuationRoutes("BLOCK", true);

@@ -28,7 +28,8 @@
       "enum": [
         "DIRECT_LUNA_HIGH",
         "SINGLE_OWNER_SOL",
-        "ROUTED_DAG"
+        "ROUTED_DAG",
+        "STATIC_APPROVED_DAG"
       ]
     },
     "owner_acceptance_required": {

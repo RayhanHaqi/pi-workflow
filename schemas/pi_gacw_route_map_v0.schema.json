@@ -28,8 +28,8 @@
       "type": "string"
     },
     "routes": {
-      "minItems": 7,
-      "maxItems": 7,
+      "minItems": 8,
+      "maxItems": 8,
       "uniqueItems": true,
       "type": "array",
       "items": {
@@ -44,6 +44,7 @@
               "SOL_REPLAN",
               "SOL_CLOSEOUT",
               "LUNA_EXECUTOR",
+              "TERRA_EXECUTOR",
               "BENCHMARK_VERIFIER",
               "BENCHMARK_SELECTOR"
             ]

@@ -109,8 +109,8 @@ export function assertControlPolicyAuthority(
   if (policy.requested_mode !== "AUTO" && policy.requested_mode !== state.execution_mode) {
     throw controlError("M5_POLICY_INVALID", "Explicit requested mode differs from the committed concrete mode");
   }
-  if (policy.route_facts.task_count !== reducerPolicy.tasks.length || (state.execution_mode === "ROUTED_DAG" && policy.route_facts.leaf_count !== reducerPolicy.tasks.length) ||
-      (state.execution_mode !== "ROUTED_DAG" && policy.route_facts.leaf_count !== 1)) {
+  if (policy.route_facts.task_count !== reducerPolicy.tasks.length || ((state.execution_mode === "ROUTED_DAG" || state.execution_mode === "STATIC_APPROVED_DAG") && policy.route_facts.leaf_count !== reducerPolicy.tasks.length) ||
+      (state.execution_mode !== "ROUTED_DAG" && state.execution_mode !== "STATIC_APPROVED_DAG" && policy.route_facts.leaf_count !== 1)) {
     throw controlError("M5_POLICY_INVALID", "M5 route facts differ from the accepted reducer task authority");
   }
   if (policy.limits.find((entry) => entry.dimension === "WORKER_INVOCATION")?.hard_limit! > reducerPolicy.limits.max_worker_invocations) {

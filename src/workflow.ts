@@ -454,12 +454,12 @@ function fixedIdentity(label: string): Sha256Digest {
 }
 
 function routeMap(): RouteMapDocument {
-  const roles = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
+  const roles = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
   const routes = roles.map((logical_role) => ({
     logical_role,
     provider_id: "openai-codex",
-    model_id: "gpt-5.6-luna",
-    effort: logical_role === "LUNA_EXECUTOR" ? "high" as const : "max" as const,
+    model_id: logical_role === "TERRA_EXECUTOR" ? "gpt-5.6-terra" : "gpt-5.6-luna",
+    effort: logical_role === "LUNA_EXECUTOR" || logical_role === "TERRA_EXECUTOR" ? "high" as const : "max" as const,
     tool_policy: {
       policy_id: `m7-${logical_role.toLowerCase()}`,
       built_in_tools_disabled: true as const,

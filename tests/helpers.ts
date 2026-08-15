@@ -77,9 +77,9 @@ export function route(logicalRole: LogicalModelRole): MutableJson {
   const closeout = logicalRole === "SOL_CLOSEOUT";
   return {
     logical_role: logicalRole,
-    provider_id: "provider-primary",
-    model_id: logicalRole === "LUNA_EXECUTOR" ? "luna-high" : "sol-max",
-    effort: logicalRole === "LUNA_EXECUTOR" ? "high" : "max",
+    provider_id: logicalRole === "TERRA_EXECUTOR" ? "openai-codex" : "provider-primary",
+    model_id: logicalRole === "LUNA_EXECUTOR" ? "luna-high" : logicalRole === "TERRA_EXECUTOR" ? "gpt-5.6-terra" : "sol-max",
+    effort: logicalRole === "LUNA_EXECUTOR" || logicalRole === "TERRA_EXECUTOR" ? "high" : "max",
     tool_policy: {
       policy_id: `tools-${logicalRole.toLowerCase()}`,
       built_in_tools_disabled: true,
@@ -97,6 +97,7 @@ export function allRoutes(): MutableJson[] {
     "SOL_REPLAN",
     "SOL_CLOSEOUT",
     "LUNA_EXECUTOR",
+    "TERRA_EXECUTOR",
     "BENCHMARK_VERIFIER",
     "BENCHMARK_SELECTOR",
   ];
@@ -177,7 +178,7 @@ export function taskGraphDocument(taskCount = 2, configuredMaxLeaves = 8, overla
   }) as MutableJson;
 }
 
-export function planApprovalDocument(mode: ConcreteExecutionMode = "DIRECT_LUNA_HIGH", taskCount = mode === "ROUTED_DAG" ? 2 : 1): MutableJson {
+export function planApprovalDocument(mode: ConcreteExecutionMode = "DIRECT_LUNA_HIGH", taskCount = mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG" ? 2 : 1): MutableJson {
   const edges = Array.from({ length: Math.max(0, taskCount - 1) }, (_, index) => ({
     from: `task-${index + 1}`,
     to: `task-${index + 2}`,
@@ -208,7 +209,9 @@ export function planApprovalDocument(mode: ConcreteExecutionMode = "DIRECT_LUNA_
       command_policy: commandPolicy,
       logical_routes: mode === "ROUTED_DAG"
         ? [route("SOL_PLANNER"), route("SOL_REPLAN"), route("SOL_CLOSEOUT"), route("LUNA_EXECUTOR")]
-        : [route(mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : "LUNA_EXECUTOR")],
+        : mode === "STATIC_APPROVED_DAG"
+          ? [route("TERRA_EXECUTOR")]
+          : [route(mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : "LUNA_EXECUTOR")],
       limits: limitEnvelope,
       stopping_conditions: ["Stop on scope expansion"],
     },
@@ -392,7 +395,7 @@ export interface PolicyOptions {
 }
 
 export function makePolicy(mode: ConcreteExecutionMode, options: PolicyOptions = {}): ReducerPolicy {
-  const defaultTasks: readonly TestPolicyTask[] = mode === "ROUTED_DAG"
+  const defaultTasks: readonly TestPolicyTask[] = mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG"
     ? [
         {
           task_id: "task-a",
@@ -427,7 +430,7 @@ export function makePolicy(mode: ConcreteExecutionMode, options: PolicyOptions =
     max_single_owner_mutation_cycles: 2,
     max_attempts_per_leaf: 2,
     max_replans: mode === "ROUTED_DAG" ? 2 : 0,
-    max_leaves: mode === "ROUTED_DAG" ? 8 : 1,
+    max_leaves: mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG" ? 8 : 1,
     max_worker_invocations: mode === "SINGLE_OWNER_SOL" ? 1 : mode === "DIRECT_LUNA_HIGH" ? 2 : 20,
   };
   const policy = identifyContractDocument("pi_gacw_reducer_policy_v0", {
@@ -441,7 +444,7 @@ export function makePolicy(mode: ConcreteExecutionMode, options: PolicyOptions =
     tasks,
     frozen_bindings: {
       plan_approval_sha256: digest(40),
-      task_graph_sha256: mode === "ROUTED_DAG" ? digest(41) : null,
+      task_graph_sha256: mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG" ? digest(41) : null,
       scope_sha256: digest(42),
       acceptance_sha256: digest(43),
       budget_sha256: digest(44),

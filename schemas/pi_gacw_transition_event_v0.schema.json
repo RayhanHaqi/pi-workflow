@@ -397,7 +397,8 @@
               "enum": [
                 "DIRECT_LUNA_HIGH",
                 "SINGLE_OWNER_SOL",
-                "ROUTED_DAG"
+                "ROUTED_DAG",
+                "STATIC_APPROVED_DAG"
               ]
             }
           },
@@ -1673,6 +1674,50 @@
           "type": "string"
         },
         "event_type": {
+          "const": "FREEZE_STATIC_DAG",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
           "const": "ACTIVATE_DAG",
           "type": "string"
         },
@@ -2413,6 +2458,50 @@
           "required": [
             "reason"
           ]
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "event_id",
+        "event_type",
+        "payload"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_transition_event_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "STATIC_DAG_VERIFICATION_PASSED",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {}
         }
       },
       "required": [

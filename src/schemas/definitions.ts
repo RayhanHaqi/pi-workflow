@@ -18,14 +18,15 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   return value;
 }
 
-export const EXECUTION_MODES = ["AUTO", "DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const;
-export const CONCRETE_EXECUTION_MODES = ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const;
+export const EXECUTION_MODES = ["AUTO", "DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"] as const;
+export const CONCRETE_EXECUTION_MODES = ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"] as const;
 export const LOGICAL_MODEL_ROLES = [
   "SOL_OWNER",
   "SOL_PLANNER",
   "SOL_REPLAN",
   "SOL_CLOSEOUT",
   "LUNA_EXECUTOR",
+  "TERRA_EXECUTOR",
   "BENCHMARK_VERIFIER",
   "BENCHMARK_SELECTOR",
 ] as const;
@@ -75,6 +76,7 @@ export const WORKFLOW_PHASES = [
   "REPLAN_REQUIRED",
   "CLOSEOUT_RUNNING",
   "CLOSEOUT_VERIFYING",
+  "STATIC_DAG_VERIFYING",
   "PASS",
   "BLOCKED",
 ] as const;
@@ -115,6 +117,7 @@ export const EVENT_TYPES = [
   "COMPLETE_PLAN",
   "REQUEST_PLAN_APPROVAL",
   "APPROVE_PLAN",
+  "FREEZE_STATIC_DAG",
   "ACTIVATE_DAG",
   "SELECT_READY_LEAF",
   "START_LEAF_ATTEMPT",
@@ -129,6 +132,7 @@ export const EVENT_TYPES = [
   "COMPLETE_CLOSEOUT",
   "CLOSEOUT_PASSED",
   "CLOSEOUT_DEFECT",
+  "STATIC_DAG_VERIFICATION_PASSED",
   "BLOCK",
 ] as const;
 
@@ -325,7 +329,7 @@ export const RouteMapSchema = StrictObject(
     ...DocumentFields("pi_gacw_route_map_v0"),
     route_map_projection_id: Type.Literal("route-map-v1"),
     route_map_sha256: Digest(),
-    routes: Type.Array(RouteSchema, { minItems: 7, maxItems: 7, uniqueItems: true }),
+    routes: Type.Array(RouteSchema, { minItems: 8, maxItems: 8, uniqueItems: true }),
     fallback: Type.Literal(false),
     provider_managed_multi_agent: Type.Literal(false),
   },
@@ -476,7 +480,7 @@ export const TaskSchema = StrictObject(
     acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { minItems: 1, maxItems: 10_000 }),
     owner_acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { maxItems: 10_000 }),
     verification_commands: Type.Array(VerificationCommandSchema, { minItems: 0, maxItems: 10_000 }),
-    assigned_role: StringEnum(["SOL_OWNER", "LUNA_EXECUTOR"] as const),
+    assigned_role: StringEnum(["SOL_OWNER", "LUNA_EXECUTOR", "TERRA_EXECUTOR"] as const),
     write_owner: Identifier(),
   },
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_task_v0.schema.json" },
@@ -524,7 +528,7 @@ export const PlanBindingsSchema = StrictObject({
   owner_acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { maxItems: 10_000 }),
   verification_commands: Type.Array(VerificationCommandSchema, { minItems: 1, maxItems: 10_000 }),
   command_policy: CommandPolicySchema,
-  logical_routes: Type.Array(RouteSchema, { minItems: 1, maxItems: 7, uniqueItems: true }),
+  logical_routes: Type.Array(RouteSchema, { minItems: 1, maxItems: 8, uniqueItems: true }),
   limits: LimitEnvelopeSchema,
   stopping_conditions: Type.Array(NonEmptyString(), { minItems: 1, maxItems: 10_000 }),
 });
@@ -547,6 +551,7 @@ export const WorkerInvocationCountersSchema = StrictObject({
   sol_replan: Type.Integer({ minimum: 0, maximum: 2 }),
   sol_closeout: Type.Integer({ minimum: 0, maximum: 1 }),
   luna_executor: Type.Integer({ minimum: 0, maximum: 16 }),
+  terra_executor: Type.Integer({ minimum: 0, maximum: 16 }),
 });
 
 export const StateCountersSchema = StrictObject({
@@ -712,6 +717,7 @@ const eventVariants = [
   EventVariant("COMPLETE_PLAN", EmptyPayload),
   EventVariant("REQUEST_PLAN_APPROVAL", EmptyPayload),
   EventVariant("APPROVE_PLAN", { plan_approval_sha256: Digest(), task_graph_sha256: Digest() }),
+  EventVariant("FREEZE_STATIC_DAG", EmptyPayload),
   EventVariant("ACTIVATE_DAG", EmptyPayload),
   EventVariant("SELECT_READY_LEAF", EmptyPayload),
   EventVariant("START_LEAF_ATTEMPT", EmptyPayload),
@@ -737,6 +743,7 @@ const eventVariants = [
   EventVariant("COMPLETE_CLOSEOUT", EmptyPayload),
   EventVariant("CLOSEOUT_PASSED", EmptyPayload),
   EventVariant("CLOSEOUT_DEFECT", { reason: NonEmptyString(4096) }),
+  EventVariant("STATIC_DAG_VERIFICATION_PASSED", EmptyPayload),
   EventVariant("BLOCK", { reason: NonEmptyString(4096) }),
 ] as const;
 
@@ -1904,7 +1911,7 @@ export const M5ControlDecisionSchema = StrictObject(
       pending_obligation_descriptor_sha256: M5DigestListSchema,
     }),
     obligation_evidence: Type.Array(StrictObject({ descriptor_sha256: Digest(), value: NonEmptyString(), evidence_content_sha256: Digest() }), { maxItems: 20_000, uniqueItems: true }),
-    available_logical_roles: Type.Array(LogicalModelRoleSchema, { uniqueItems: true, maxItems: 7 }),
+    available_logical_roles: Type.Array(LogicalModelRoleSchema, { uniqueItems: true, maxItems: 8 }),
     operation_id: Type.Union([Identifier(), Type.Null()]),
     transition_id: Type.Optional(Identifier()),
     decision_kind: StringEnum(["INITIAL_MODE", "CONTINUATION"] as const),

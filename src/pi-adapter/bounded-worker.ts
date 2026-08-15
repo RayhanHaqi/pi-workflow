@@ -34,7 +34,7 @@ function boundedFailureMessage(message: string | undefined): string | undefined 
 }
 
 export interface BoundedWorkerRoute {
-  readonly logicalRole: "LUNA_EXECUTOR" | "SOL_OWNER" | "SOL_PLANNER" | "SOL_CLOSEOUT";
+  readonly logicalRole: "LUNA_EXECUTOR" | "TERRA_EXECUTOR" | "SOL_OWNER" | "SOL_PLANNER" | "SOL_CLOSEOUT";
   readonly providerId: string;
   readonly modelId: string;
   readonly effort: "high" | "max";
