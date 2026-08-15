@@ -80,6 +80,25 @@ function selectionRuntime(): BoundedWorkerRuntime {
   };
 }
 
+async function assertNonStaticSelectionRejectedBeforeAdmission(execution_mode: "DIRECT_LUNA_HIGH" | "SINGLE_OWNER_SOL" | "ROUTED_DAG"): Promise<void> {
+  const root = await selectionFixture(); let workerProviderEntries = 0; let taskApprovals = 0;
+  const goal = execution_mode === "ROUTED_DAG"
+    ? { ...selectionGoal(["verify-a"]), execution_mode }
+    : { ...selectionGoal(["verify-a"]), execution_mode, required_outputs: ["a.txt"], tasks: [{ task_id: "single", objective: "single", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: ["verify-a"] }] };
+  configureBoundedWorkerFauxRuntimeForTests(() => ({ async execute() { workerProviderEntries += 1; return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 }; } }));
+  try {
+    const result = await runBoundedMutationWorkflowForTests(goal, {
+      cwd: root, authority: selectionAuthority(), approveTasks: async () => { taskApprovals += 1; return null; },
+    });
+    assert.equal(result.outcome, "BLOCKED"); assert.match(result.reason, /verification_command_ids is restricted to STATIC_APPROVED_DAG/);
+    assert.equal(taskApprovals, 0); assert.equal(workerProviderEntries, 0);
+    const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: root });
+    assert.equal(status.stdout, "");
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined); await rm(root, { recursive: true, force: true });
+  }
+}
+
 function staticReady(policy = makePolicy("STATIC_APPROVED_DAG")): { readonly policy: ReducerPolicy; readonly state: WorkflowState } {
   let state = (awaitCommon(policy));
   state = applyEvent(state, policy, "FREEZE_STATIC_DAG");
@@ -239,11 +258,9 @@ test("STATIC_APPROVED_DAG binds optional selected verifiers fail-closed and pres
     const result = await runBoundedMutationWorkflowForTests(goal, { authority: selectionAuthority() });
     assert.equal(result.outcome, "BLOCKED"); assert.match(result.reason, new RegExp(expectedReason));
   };
-  await t.test("malformed, duplicate, and non-static selections reject deterministically", async () => {
+  await t.test("malformed and duplicate selections reject deterministically", async () => {
     await invalid(selectionGoal(["not valid"]), "invalid identifiers");
     await invalid(selectionGoal(["verify-a", "verify-a"]), "invalid identifiers");
-    const nonStatic = { ...selectionGoal(["verify-a"]), execution_mode: "DIRECT_LUNA_HIGH", tasks: [{ task_id: "direct", objective: "direct", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: ["verify-a"] }] };
-    await invalid(nonStatic, "restricted to STATIC_APPROVED_DAG");
   });
   await t.test("unknown selection blocks before Terra worker admission", async () => {
     const root = await selectionFixture(); let calls = 0;
@@ -255,4 +272,10 @@ test("STATIC_APPROVED_DAG binds optional selected verifiers fail-closed and pres
       configureBoundedWorkerFauxRuntimeForTests(undefined); await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+test("verification selection rejects DIRECT_LUNA_HIGH, SINGLE_OWNER_SOL, and ROUTED_DAG before worker/provider admission or mutation", async (t) => {
+  for (const execution_mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const) {
+    await t.test(execution_mode, async () => { await assertNonStaticSelectionRejectedBeforeAdmission(execution_mode); });
+  }
 });

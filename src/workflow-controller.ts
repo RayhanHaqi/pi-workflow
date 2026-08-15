@@ -574,6 +574,7 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
         ...(verificationCommandIds === undefined ? {} : { verification_command_ids: verificationCommandIds }) };
     });
   }
+  if (selectedMode !== "STATIC_APPROVED_DAG" && candidate.some((task) => task.verification_command_ids !== undefined)) fail("INVALID_GOAL", "verification_command_ids is restricted to STATIC_APPROVED_DAG");
   if (selectedMode === "ROUTED_DAG" || selectedMode === "STATIC_APPROVED_DAG") {
     if (candidate.length < 2 || candidate.length > 8) fail("INVALID_GOAL", `${selectedMode} requires 2–8 leaves`);
     const seen = new Set<string>();
@@ -587,7 +588,6 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
     }
     if (canonicalize([...candidate.flatMap((task) => task.required_outputs)].sort()) !== canonicalize(required)) fail("INVALID_GOAL", "each expected output must have exactly one routed task owner");
   } else {
-    if (candidate.some((task) => task.verification_command_ids !== undefined)) fail("INVALID_GOAL", "verification_command_ids is restricted to STATIC_APPROVED_DAG");
     if (candidate.length > 1) fail("INVALID_GOAL", "Direct and Single Owner support exactly one task");
     candidate = candidate.length === 1 ? candidate : [{ task_id: "mutation-task", objective: text(input["objective"], "Goal.objective"), editable_paths: scope.editable_paths, required_outputs: required, dependencies: [] }];
     const only = candidate[0]!;
