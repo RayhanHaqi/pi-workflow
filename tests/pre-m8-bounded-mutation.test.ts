@@ -270,18 +270,26 @@ interface PiMutationRuntimeCounters {
   readToolExecutions: number;
   patchToolExecutions: number;
   providerReadResults?: unknown[];
+  providerReadContract?: JsonRecord;
   providerPatchContract?: JsonRecord;
   providerUserPrompt?: string;
 }
 
 /** Exercises the shared Pi loop with the real bounded-worker tool closures. */
 function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRuntime {
+  const providerReadContract = {
+    description: "Read one bounded TEXT window from an allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; offset defaults to 0 and must be a non-negative integer; length defaults to 65536 and must be an integer from 1 through 65536. No mode or metadata arguments are accepted.",
+    parameters: { type: "object", additionalProperties: false, required: ["path"], properties: {
+      path: { type: "string" }, offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, length: { type: "integer", minimum: 1, maximum: 65_536 },
+    } },
+  };
   const providerPatchContract = {
     description: "Apply exact bytes to one allowed path through M4. For REPLACE, replacement bytes must produce an observable content change from the current regular-file contents; identical bytes are not a successful productive mutation because they cannot satisfy repository-delta postflight. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
     parameters: { type: "object", additionalProperties: false, required: ["path", "operation", "replacement_base64", "expected_preimage_exists"], properties: {
       path: { type: "string" }, operation: { type: "string", enum: ["CREATE", "REPLACE", "DELETE"] }, replacement_base64: { type: ["string", "null"] }, expected_preimage_exists: { type: "boolean" },
     } },
   };
+  counters.providerReadContract = providerReadContract;
   counters.providerPatchContract = providerPatchContract;
   return {
     async execute({ profile, systemPrompt, userPrompt, tools, maxModelTurns, deadlineMs, signal }) {
@@ -291,13 +299,17 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
         providerId: "bounded-faux", modelId: "bounded-faux-model", effort: "high", systemPrompt, userPrompt,
         tools: [
           {
-            name: "read_scoped", label: "Scoped read", description: "Read one allowed repository path through M4.",
-            parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" } } },
+            name: "read_scoped", label: "Scoped read", ...providerReadContract,
             async execute(_id, params) {
               const value = record(params, "Pi read parameters"); const path = value["path"];
-              if (typeof path !== "string" || path.length === 0) throw new Error("Pi read path is invalid");
+              const offset = value["offset"] === undefined ? 0 : value["offset"];
+              const length = value["length"] === undefined ? 65_536 : value["length"];
+              if (typeof path !== "string" || path.length === 0 || typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+                  typeof length !== "number" || !Number.isSafeInteger(length) || length < 1 || length > 65_536) {
+                throw new Error("Pi read parameters are invalid");
+              }
               counters.readToolExecutions += 1;
-              const result = await tools.readPath(path);
+              const result = await tools.readPath(path, offset, length);
               const providerResult = { content: [{ type: "text", text: result.content ?? "" }], details: {} };
               counters.providerReadResults?.push(providerResult);
               return providerResult;
@@ -1220,6 +1232,125 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
       assert.equal(counters.readToolExecutions, 1);
       assert.deepEqual(providerReadResults, [{ content: [{ type: "text", text: "input\n" }], details: {} }]);
       assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode/u);
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("bounded-worker provider read adapter exposes only bounded TEXT windows", async (t) => {
+  const report: BoundedPiFauxCall = { name: "submit_worker_report", args: { report: "bounded range report" } };
+  const patch: BoundedPiFauxCall = {
+    name: "apply_patch_scoped",
+    args: { path: "out.txt", operation: "CREATE", replacement_base64: Buffer.from("out\n", "utf8").toString("base64"), expected_preimage_exists: false },
+  };
+
+  await t.test("path-only reads default to the first 65536-byte TEXT window and a second window reconstructs a pilot-shaped file", async () => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-ranged-read-"));
+    const fixtureBytes = Buffer.from("0123456789abcdefghijklmnopqrstuvwxyz".repeat(Math.ceil(70_915 / 36)).slice(0, 70_915), "utf8");
+    await writeFile(join(root, "verify", "large-source.ts"), fixtureBytes);
+    await chmod(join(root, "verify", "large-source.ts"), 0o644);
+    await execFileAsync("git", ["add", "verify/large-source.ts"], { cwd: root });
+    await execFileAsync("git", ["commit", "-qm", "add deterministic 70915-byte source"], { cwd: root });
+    const providerReadResults: unknown[] = [];
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0, providerReadResults };
+    const providerCalls = installBoundedPiFauxRuntimeCalls([
+      { name: "read_scoped", args: { path: "verify/large-source.ts" } },
+      { name: "read_scoped", args: { path: "verify/large-source.ts", offset: 65_536, length: 65_536 } },
+      patch,
+      report,
+    ]);
+    try {
+      const rangedGoal: BoundedMutationGoal = {
+        ...goal("DIRECT_LUNA_HIGH"),
+        scope: { readable_paths: ["out.txt", "verify", "verify/input.txt", "verify/large-source.ts"], editable_paths: ["out.txt"], frozen_paths: [] },
+      };
+      const result = await run(root, rangedGoal, piMutationRuntime(counters), { retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "PASS", result.reason);
+      assert.equal(providerCalls(), 4);
+      assert.equal(counters.readToolExecutions, 2);
+      assert.equal(counters.patchToolExecutions, 1);
+      const reads = providerReadResults.map((result) => record(result, "provider read result")["content"]);
+      assert.equal(reads.length, 2);
+      assert.ok(Array.isArray(reads[0]));
+      assert.ok(Array.isArray(reads[1]));
+      const first = record(reads[0][0], "first provider read content")["text"];
+      const second = record(reads[1][0], "second provider read content")["text"];
+      if (typeof first !== "string" || typeof second !== "string") throw new Error("provider read content must be text");
+      assert.equal(Buffer.byteLength(first), 65_536, "path-only read preserves the legacy first-window length");
+      assert.equal(Buffer.byteLength(second), fixtureBytes.byteLength - 65_536, "the second bounded window receives only the remaining bytes");
+      assert.deepEqual(Buffer.concat([Buffer.from(first), Buffer.from(second)]), fixtureBytes, "two individually capped reads reconstruct the exact complete preimage");
+      const contract = counters.providerReadContract;
+      assert.notEqual(contract, undefined);
+      const parameters = record(contract!["parameters"], "provider read parameters");
+      const properties = record(parameters["properties"], "provider read properties");
+      assert.deepEqual(Object.keys(properties).sort(), ["length", "offset", "path"]);
+      assert.deepEqual(properties["offset"], { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
+      assert.deepEqual(properties["length"], { type: "integer", minimum: 1, maximum: 65_536 });
+      assert.equal(parameters["additionalProperties"], false);
+      for (const field of ["mode", "digest", "size", "state_token", "cas"] as const) assert.equal(Object.hasOwn(properties, field), false, `${field} is not provider-visible`);
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("invalid ranges and hidden BINARY/metadata fields are rejected before bounded-worker read admission", async (nested) => {
+    const parameters = { type: "object", additionalProperties: false, required: ["path"], properties: {
+      path: { type: "string" }, offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, length: { type: "integer", minimum: 1, maximum: 65_536 },
+    } };
+    const invalid = [
+      { label: "length above cap", args: { path: "verify/input.txt", length: 65_537 } },
+      { label: "zero length", args: { path: "verify/input.txt", length: 0 } },
+      { label: "negative length", args: { path: "verify/input.txt", length: -1 } },
+      { label: "negative offset", args: { path: "verify/input.txt", offset: -1 } },
+      { label: "fractional offset", args: { path: "verify/input.txt", offset: 0.5 } },
+      { label: "fractional length", args: { path: "verify/input.txt", length: 1.5 } },
+      { label: "BINARY mode", args: { path: "verify/input.txt", mode: "BINARY" } },
+      { label: "hidden digest", args: { path: "verify/input.txt", digest: `sha256:${"0".repeat(64)}` } },
+      { label: "hidden state token", args: { path: "verify/input.txt", state_token: `sha256:${"0".repeat(64)}` } },
+    ] as const;
+    for (const entry of invalid) await nested.test(entry.label, async () => {
+      let executions = 0;
+      installBoundedPiFauxRuntimeCalls([{ name: "read_scoped", args: entry.args }]);
+      try {
+        await runBoundedPiAgentForTests({
+          ...boundedPiAgentInput(2),
+          tools: [{ name: "read_scoped", label: "Scoped read", description: "Bounded TEXT read", parameters,
+            async execute(_id, value) {
+              const input = record(value, "provider bounded read arguments");
+              const path = input["path"]; const offset = input["offset"] === undefined ? 0 : input["offset"]; const length = input["length"] === undefined ? 65_536 : input["length"];
+              if (typeof path !== "string" || path.length === 0 || typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+                  typeof length !== "number" || !Number.isSafeInteger(length) || length < 1 || length > 65_536 || Object.keys(input).some((key) => !["path", "offset", "length"].includes(key))) {
+                throw Object.assign(new Error("tool parameter is invalid"), { code: "TOOL_REQUEST_INVALID" });
+              }
+              executions += 1;
+              return { content: [], details: {} };
+            } }],
+        });
+        assert.equal(executions, 0, "invalid provider arguments never reach the bounded-worker read closure");
+      } finally { configureM6FauxRuntimeForTests(undefined); }
+    });
+  });
+
+  await t.test("later-window reads preserve frozen readable scope and reject unreadable paths before M4", async () => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-ranged-authority-"));
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0 };
+    const providerCalls = installBoundedPiFauxRuntimeCalls([{ name: "read_scoped", args: { path: "unreadable.txt", offset: 65_536, length: 1 } }]);
+    try {
+      const result = await run(root, goal("DIRECT_LUNA_HIGH"), piMutationRuntime(counters), { retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "BLOCKED");
+      assert.equal(providerCalls(), 1);
+      assert.equal(counters.readToolExecutions, 1, "the provider-shaped call reaches bounded-worker scope admission");
+      assert.ok(result.evidenceRoot !== undefined);
+      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+      assert.equal(records.toolResults.length, 0, "the unreadable path is rejected before M4 despite a valid later-window range");
+      assert.equal(records.mutationReceipts.length, 0);
     } finally {
       configureM6FauxRuntimeForTests(undefined);
       await rm(retained, { recursive: true, force: true });

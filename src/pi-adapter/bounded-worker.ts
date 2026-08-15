@@ -23,6 +23,7 @@ export type BoundedWorkerToolProfile = "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SO
 type M4AdmissionRefusalCode = "M4_TOOL_BUDGET_EXHAUSTED" | "OUT_OF_SCOPE_WRITE";
 
 const MAX_FIRST_FAILURE_MESSAGE_LENGTH = 512;
+const MAX_SCOPED_READ_LENGTH = 65_536;
 
 /** Retain only a compact, log-safe M6 diagnostic; never retain an Error object or stack. */
 function boundedFailureMessage(message: string | undefined): string | undefined {
@@ -42,7 +43,7 @@ export interface BoundedWorkerRoute {
 
 export interface BoundedWorkerTools {
   /** Trusted metadata is internal to this adapter; provider-visible reads remain text-only. */
-  readonly readPath: (path: string) => Promise<{
+  readonly readPath: (path: string, offset?: number, length?: number) => Promise<{
     readonly content: string | null;
     readonly resultContentSha256: Sha256Digest;
     readonly metadata: { readonly digest: Sha256Digest; readonly size: number; readonly mode: number };
@@ -153,6 +154,19 @@ function stringParam(value: Record<string, unknown>, key: string): string {
   if (typeof result !== "string" || result.length === 0) throw Object.assign(new Error(`tool parameter ${key} is invalid`), { code: "TOOL_REQUEST_INVALID" });
   return result;
 }
+function boundedIntegerParam(value: Record<string, unknown>, key: string, minimum: number, maximum: number, fallback: number): number {
+  const result = value[key];
+  if (result === undefined) return fallback;
+  if (typeof result !== "number" || !Number.isSafeInteger(result) || result < minimum || result > maximum) {
+    throw Object.assign(new Error(`tool parameter ${key} is invalid`), { code: "TOOL_REQUEST_INVALID" });
+  }
+  return result;
+}
+function boundedReadRange(offset: number, length: number): void {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > MAX_SCOPED_READ_LENGTH) {
+    throw Object.assign(new Error("bounded read range is invalid"), { code: "TOOL_REQUEST_INVALID" });
+  }
+}
 
 /** The production default is the accepted guarded Pi runtime, not a provider shim. */
 const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
@@ -161,9 +175,20 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
       if (cancelled(input.signal)) throw abortError("PRE_TOOL_ADMISSION");
     };
     const readTool = {
-      name: "read_scoped", label: "Scoped read", description: "Read one allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; ., an empty path, ./..., root aliases, .. or traversal, and absolute paths are invalid.",
-      parameters: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" } } },
-      async execute(_id: string, params: unknown) { rejectCancelledToolAdmission(); const value = toolParams(params); const result = await input.tools.readPath(stringParam(value, "path")); return toolResult(result.content ?? ""); },
+      name: "read_scoped", label: "Scoped read", description: "Read one bounded TEXT window from an allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; offset defaults to 0 and must be a non-negative integer; length defaults to 65536 and must be an integer from 1 through 65536. No mode or metadata arguments are accepted.",
+      parameters: { type: "object", additionalProperties: false, required: ["path"], properties: {
+        path: { type: "string" }, offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, length: { type: "integer", minimum: 1, maximum: MAX_SCOPED_READ_LENGTH },
+      } },
+      async execute(_id: string, params: unknown) {
+        rejectCancelledToolAdmission();
+        const value = toolParams(params);
+        const result = await input.tools.readPath(
+          stringParam(value, "path"),
+          boundedIntegerParam(value, "offset", 0, Number.MAX_SAFE_INTEGER, 0),
+          boundedIntegerParam(value, "length", 1, MAX_SCOPED_READ_LENGTH, MAX_SCOPED_READ_LENGTH),
+        );
+        return toolResult(result.content ?? "");
+      },
     };
     const patchTool = {
       name: "apply_patch_scoped", label: "Scoped patch", description: "Apply exact bytes to one allowed path through M4. For REPLACE, replacement bytes must produce an observable content change from the current regular-file contents; identical bytes are not a successful productive mutation because they cannot satisfy repository-delta postflight. Trusted CAS preimage digest, size, and mode are controller-acquired; do not supply CAS metadata.",
@@ -311,12 +336,13 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
     throw new M4ToolAdmissionRefusalError(code, message);
   };
   const tools: BoundedWorkerTools = {
-    async readPath(path) {
+    async readPath(path, offset = 0, length = MAX_SCOPED_READ_LENGTH) {
       assertProductiveAuthorityOpen();
+      boundedReadRange(offset, length);
       if (!canonicalPathAllowed(path, input.allowedReadPaths)) throw Object.assign(new Error("path is outside task read scope"), { code: "OUT_OF_SCOPE_READ" });
       if (input.profile === "SOL_CLOSEOUT") throw Object.assign(new Error("closeout can read evidence only"), { code: "PROFILE_TOOL_DENIED" });
       requireAcceptedM4ToolBudget();
-      const result = await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path, offset: 0, length: 65_536, mode: "TEXT" });
+      const result = await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path, offset, length, mode: "TEXT" });
       addM4Evidence(result.resultRecord.content_sha256 as Sha256Digest, true);
       return {
         content: result.content,
