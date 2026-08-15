@@ -73,7 +73,7 @@ const PRODUCT_ROLES = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT",
 
 type GoalMode = ConcreteExecutionMode;
 type GoalScope = { readonly readable_paths: readonly string[]; readonly editable_paths: readonly string[]; readonly frozen_paths: readonly string[] };
-type CandidateTask = { readonly task_id: string; readonly objective: string; readonly editable_paths: readonly string[]; readonly required_outputs: readonly string[]; readonly dependencies: readonly string[] };
+type CandidateTask = { readonly task_id: string; readonly objective: string; readonly editable_paths: readonly string[]; readonly required_outputs: readonly string[]; readonly dependencies: readonly string[]; readonly verification_command_ids?: readonly string[] };
 
 export class BoundedWorkflowError extends Error {
   public constructor(public readonly code: string, message: string) { super(message); this.name = "BoundedWorkflowError"; }
@@ -564,9 +564,14 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
     if (!Array.isArray(input["tasks"]) || input["tasks"].length > 8) fail("INVALID_GOAL", "tasks must contain at most eight static leaves");
     candidate = input["tasks"].map((raw, index) => {
       const taskInput = asRecord(raw, `Goal.tasks[${index}]`);
-      exactKeys(taskInput, ["task_id", "objective", "editable_paths", "required_outputs", "dependencies"], `Goal.tasks[${index}]`);
+      const requiredTaskKeys = ["task_id", "objective", "editable_paths", "required_outputs", "dependencies"];
+      const allowedTaskKeys = [...requiredTaskKeys, "verification_command_ids"];
+      for (const key of Object.keys(taskInput)) if (!allowedTaskKeys.includes(key)) fail("INVALID_GOAL", `Goal.tasks[${index}] has unknown authority`);
+      for (const key of requiredTaskKeys) if (!(key in taskInput)) fail("INVALID_GOAL", `Goal.tasks[${index}].${key} is required`);
+      const verificationCommandIds = taskInput["verification_command_ids"] === undefined ? undefined : ids(taskInput["verification_command_ids"], `Goal.tasks[${index}].verification_command_ids`);
       return { task_id: text(taskInput["task_id"], `Goal.tasks[${index}].task_id`, 128), objective: text(taskInput["objective"], `Goal.tasks[${index}].objective`),
-        editable_paths: paths(taskInput["editable_paths"], `Goal.tasks[${index}].editable_paths`), required_outputs: paths(taskInput["required_outputs"], `Goal.tasks[${index}].required_outputs`), dependencies: ids(taskInput["dependencies"], `Goal.tasks[${index}].dependencies`) };
+        editable_paths: paths(taskInput["editable_paths"], `Goal.tasks[${index}].editable_paths`), required_outputs: paths(taskInput["required_outputs"], `Goal.tasks[${index}].required_outputs`), dependencies: ids(taskInput["dependencies"], `Goal.tasks[${index}].dependencies`),
+        ...(verificationCommandIds === undefined ? {} : { verification_command_ids: verificationCommandIds }) };
     });
   }
   if (selectedMode === "ROUTED_DAG" || selectedMode === "STATIC_APPROVED_DAG") {
@@ -582,6 +587,7 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
     }
     if (canonicalize([...candidate.flatMap((task) => task.required_outputs)].sort()) !== canonicalize(required)) fail("INVALID_GOAL", "each expected output must have exactly one routed task owner");
   } else {
+    if (candidate.some((task) => task.verification_command_ids !== undefined)) fail("INVALID_GOAL", "verification_command_ids is restricted to STATIC_APPROVED_DAG");
     if (candidate.length > 1) fail("INVALID_GOAL", "Direct and Single Owner support exactly one task");
     candidate = candidate.length === 1 ? candidate : [{ task_id: "mutation-task", objective: text(input["objective"], "Goal.objective"), editable_paths: scope.editable_paths, required_outputs: required, dependencies: [] }];
     const only = candidate[0]!;
@@ -668,11 +674,20 @@ function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, st
       max_tool_calls: workers * maxToolCalls, max_input_tokens: 1_000_000, max_output_tokens: 100_000, max_cost_microusd: 5_000_000, max_wall_time_ms: workers * MAX_WALL_TIME_MS },
     usage: { worker_invocation: { value: 0, enforcement_class: "HARD_ENFORCEABLE" }, model_turn: { value: 0, enforcement_class: "SOFT_ENFORCEABLE" }, provider_request: { value: null, enforcement_class: "UNAVAILABLE" }, tool_call: { value: 0, enforcement_class: "HARD_ENFORCEABLE" } } }) as BudgetDocument;
 }
+function selectedTaskVerificationCommands(goal: ReturnType<typeof normalizeGoal>, candidate: CandidateTask, verification: ContractDocument["verification_commands"]): ContractDocument["verification_commands"] {
+  if (goal.execution_mode !== "STATIC_APPROVED_DAG" || candidate.verification_command_ids === undefined) return verification;
+  const selected = new Set(candidate.verification_command_ids);
+  if (candidate.verification_command_ids.some((commandId) => !verification.some((command) => command.command_id === commandId))) {
+    fail("UNKNOWN_STATIC_VERIFICATION_COMMAND", "STATIC_APPROVED_DAG selected an unknown controller verification command");
+  }
+  return verification.filter((command) => selected.has(command.command_id));
+}
+
 function taskDocument(goal: ReturnType<typeof normalizeGoal>, candidate: CandidateTask, index: number, verification: ContractDocument["verification_commands"]): TaskDocument {
   return identifyContractDocument("pi_gacw_task_v0", { schema_id: "pi_gacw_task_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", task_projection_id: "task-packet-v1", task_sha256: fixed(`task:${candidate.task_id}`),
     task_id: candidate.task_id, topological_rank: index, priority: index, dependencies: candidate.dependencies, objective: candidate.objective,
     scope: { readable_paths: goal.scope.readable_paths, editable_paths: candidate.editable_paths, frozen_paths: goal.scope.frozen_paths }, required_inputs: goal.scope.readable_paths,
-    required_outputs: candidate.required_outputs, acceptance_criteria: acceptance({ ...goal, required_outputs: candidate.required_outputs }, []) , owner_acceptance_criteria: ownerAcceptance(goal), verification_commands: verification,
+    required_outputs: candidate.required_outputs, acceptance_criteria: acceptance({ ...goal, required_outputs: candidate.required_outputs }, []) , owner_acceptance_criteria: ownerAcceptance(goal), verification_commands: selectedTaskVerificationCommands(goal, candidate, verification),
     assigned_role: goal.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : goal.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR", write_owner: candidate.task_id }) as unknown as TaskDocument;
 }
 function taskGraph(goal: ReturnType<typeof normalizeGoal>, tasks: readonly TaskDocument[]): TaskGraphDocument | null {

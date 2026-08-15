@@ -4,6 +4,7 @@ import { DIGEST_PATTERN } from "../identity/digest.js";
 import { PROJECTION_IDS } from "../identity/projections.js";
 
 export const SCHEMA_VERSION = "0.1.0" as const;
+export const MAX_COMMAND_EXECUTABLE_BYTES = 134_217_728;
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
@@ -1459,7 +1460,7 @@ export const M4CommandSpecificationSchema = StrictObject({
   executable_device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   executable_inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   executable_mode: Type.Integer({ minimum: 0, maximum: 0o7777 }),
-  executable_size: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
+  executable_size: Type.Integer({ minimum: 0, maximum: MAX_COMMAND_EXECUTABLE_BYTES }),
   executable_sha256: Digest(),
   argv: Type.Array(NonEmptyString(4096), { minItems: 1, maxItems: 128 }),
   cwd: Type.Union([Type.Literal("REPOSITORY_ROOT"), PathString()]),

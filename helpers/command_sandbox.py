@@ -19,6 +19,8 @@ from typing import Any
 
 PROTOCOL = "pi-gacw-command-sandbox-v1"
 MAX_REQUEST = 1024 * 1024
+EXECUTABLE_IDENTITY_MAX_BYTES = 128 * 1024 * 1024
+EXECUTION_INPUT_MAX_BYTES = 64 * 1024 * 1024
 libc = ctypes.CDLL(None, use_errno=True)
 SYS_BY_ARCH = {
     "x86_64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 322, "audit": 0xC000003E,
@@ -192,7 +194,7 @@ def apply_seccomp(network_forbidden: bool) -> None:
         raise OSError(ctypes.get_errno(), "PR_SET_SECCOMP")
 
 
-def sha256_fd(fd: int, maximum: int = 64 * 1024 * 1024) -> tuple[str, os.stat_result]:
+def sha256_fd(fd: int, maximum: int) -> tuple[str, os.stat_result]:
     digest = hashlib.sha256();before = os.fstat(fd)
     if not stat.S_ISREG(before.st_mode) or before.st_size < 0 or before.st_size > maximum:
         raise SandboxError("COMMAND_SPEC_MISMATCH", "Executable exceeds its identity bound")
@@ -212,7 +214,7 @@ def verify_executable(request: dict[str, Any]) -> int:
     if not all(isinstance(x, str) for x in (invocation, physical, digest)) or not os.path.isabs(invocation) or not os.path.isabs(physical) or not isinstance(identity,dict) or set(identity)!={"device","inode","mode","size"}:
         raise SandboxError("COMMAND_SPEC_MISMATCH", "Executable authority is malformed")
     if any(not isinstance(identity[key],int) or isinstance(identity[key],bool) or identity[key]<0 for key in identity): raise SandboxError("COMMAND_SPEC_MISMATCH","Executable identity is malformed")
-    actual=os.path.realpath(invocation);path_st=os.lstat(actual);held_digest,held_st=sha256_fd(4)
+    actual=os.path.realpath(invocation);path_st=os.lstat(actual);held_digest,held_st=sha256_fd(4, EXECUTABLE_IDENTITY_MAX_BYTES)
     expected=(identity["device"],identity["inode"],identity["mode"],identity["size"])
     observed=(held_st.st_dev,held_st.st_ino,stat.S_IMODE(held_st.st_mode),held_st.st_size)
     if actual!=physical or not stat.S_ISREG(path_st.st_mode) or (path_st.st_dev,path_st.st_ino)!=(held_st.st_dev,held_st.st_ino) or observed!=expected or held_digest!=digest:
@@ -229,7 +231,7 @@ def verify_execution_inputs(value: Any) -> None:
         seen.add(item["path"])
         try:
             physical=os.path.realpath(item["path"]);fd=os.open(item["path"],os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
-            try: digest,st=sha256_fd(fd)
+            try: digest,st=sha256_fd(fd, EXECUTION_INPUT_MAX_BYTES)
             finally: os.close(fd)
         except OSError as error: raise SandboxError("EXECUTION_INPUT_DRIFT","Execution input is absent or replaced") from error
         if physical!=item["realpath"] or (st.st_dev,st.st_ino,stat.S_IMODE(st.st_mode),st.st_size,digest)!=(item["device"],item["inode"],item["mode"],item["size"],item["digest"]):
@@ -294,7 +296,7 @@ def execute(request: dict[str, Any]) -> None:
     finally: os.close(cwd_fd)
     apply_seccomp(True)
     # Re-resolve only as a drift detector; execution is bound to the retained FD.
-    current=os.lstat(os.path.realpath(request["executable_invocation_path"]));held_digest,held=sha256_fd(executable_fd)
+    current=os.lstat(os.path.realpath(request["executable_invocation_path"]));held_digest,held=sha256_fd(executable_fd, EXECUTABLE_IDENTITY_MAX_BYTES)
     if (current.st_dev,current.st_ino)!=(held.st_dev,held.st_ino) or held_digest!=request["executable_sha256"]: raise SandboxError("EXECUTION_INPUT_DRIFT","Executable path or retained bytes changed after validation")
     setup_status({"ok":True,"protocol":PROTOCOL,"landlock_abi":abi,"no_new_privs":True,"network_denied":True})
     os.set_inheritable(3,False)

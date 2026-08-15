@@ -85,7 +85,7 @@
           },
           "executable_size": {
             "minimum": 0,
-            "maximum": 67108864,
+            "maximum": 134217728,
             "type": "integer"
           },
           "executable_sha256": {

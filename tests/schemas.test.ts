@@ -5,6 +5,7 @@ import test from "node:test";
 import { sha256Canonical, type DomainProjectionId } from "../src/identity/index.js";
 import {
   CONCRETE_EXECUTION_MODES as internalConcreteExecutionModes,
+  MAX_COMMAND_EXECUTABLE_BYTES,
   ENFORCEMENT_CLASSES as internalEnforcementClasses,
   EVENT_TYPES as internalEventTypes,
   EXECUTION_MODES as internalExecutionModes,
@@ -70,6 +71,19 @@ function assertDeepFrozen(value: unknown, seen = new Set<object>()): void {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor !== undefined && "value" in descriptor) assertDeepFrozen(descriptor.value, seen);
   }
+}
+
+function commandCatalogDocument(executableSize: number): MutableJson {
+  return {
+    schema_id: "pi_gacw_command_catalog_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", content_sha256: digest(800),
+    run_id: "command-catalog", catalog_id: "catalog", repository_identity_content_sha256: digest(801), tool_policy_content_sha256: digest(802),
+    commands: [{
+      command_id: "verify", command_spec_sha256: digest(803), command_class: "VERIFICATION", executable_invocation_path: "/usr/bin/node", executable_realpath: "/usr/bin/node",
+      executable_device: 1, executable_inode: 1, executable_mode: 0o755, executable_size: executableSize, executable_sha256: digest(804), argv: ["/usr/bin/node"],
+      cwd: "REPOSITORY_ROOT", cwd_realpath: "/repository", cwd_device: 1, cwd_inode: 2, execution_inputs: [], environment: [], read_paths: [], write_paths: [], network_policy: "FORBIDDEN",
+      timeout_ms: 60_000, stdout_limit: 65_536, stderr_limit: 65_536, expected_exit_codes: [0], repository_side_effect: "NONE", claimed_paths: [], cleanup_paths: [],
+    }],
+  };
 }
 
 test("private canonical schema authority is deeply frozen", () => {
@@ -156,6 +170,12 @@ test("emitted schemas exactly match defensive snapshots derived from canonical a
     const text = await readFile(new URL(`../schemas/${entry.fileName}`, import.meta.url), "utf8");
     assert.equal(text, `${JSON.stringify(entry.schema, null, 2)}\n`, entry.fileName);
   }
+});
+
+test("command-catalog executable file-size capacity admits current Node binaries but remains bounded", () => {
+  assert.equal(MAX_COMMAND_EXECUTABLE_BYTES, 134_217_728);
+  assertSchema("pi_gacw_command_catalog_v0", commandCatalogDocument(MAX_COMMAND_EXECUTABLE_BYTES));
+  expectCode(() => assertSchema("pi_gacw_command_catalog_v0", commandCatalogDocument(MAX_COMMAND_EXECUTABLE_BYTES + 1)), "SCHEMA_INVALID");
 });
 
 test("schema snapshots expose the frozen execution, role, event, and phase values", () => {

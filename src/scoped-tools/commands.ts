@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
 
 import { sha256Bytes, sha256Canonical } from "../identity/index.js";
+import { MAX_COMMAND_EXECUTABLE_BYTES } from "../schemas/definitions.js";
 import { assertDocumentValid, type M3RepositoryIdentityDocument, type M4CommandCatalogDocument, type M4CommandSpecification } from "../schemas/index.js";
 import { resolveRepositoryIdentity } from "../repository/identity.js";
 import { detachedFrozen } from "../repository/utils.js";
@@ -35,7 +36,7 @@ async function frozenFileIdentity(path: string): Promise<FrozenFileIdentity> {
   const physical = await realpath(path); const handle = await open(physical, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = await handle.stat(); const bytes = await handle.readFile(); const after = await handle.stat(); const current = await lstat(physical);
-    if (!before.isFile() || before.size > 67_108_864 || before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode ||
+    if (!before.isFile() || before.size > MAX_COMMAND_EXECUTABLE_BYTES || before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode ||
         before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || before.dev !== current.dev || before.ino !== current.ino) {
       throw new ScopedToolGatewayError("COMMAND_SPEC_MISMATCH", "Executable changed while its authority was captured");
     }

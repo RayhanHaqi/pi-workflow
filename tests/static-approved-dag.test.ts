@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import {
@@ -10,6 +15,9 @@ import {
   type WorkflowState,
 } from "../src/schemas/index.js";
 import { TransitionError, createInitialState, reduceState } from "../src/state-machine/index.js";
+import { readM5ManagedRecords } from "../src/persistence/store.js";
+import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type BoundedMutationGoal } from "../src/workflow-controller.js";
+import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
 import {
   applyEvent,
   digest,
@@ -21,8 +29,55 @@ import {
   type MutableJson,
 } from "./helpers.js";
 
+const execFileAsync = promisify(execFile);
+
 function expectCode(action: () => unknown, code: string): void {
   assert.throws(action, (error: unknown) => error instanceof TransitionError && error.code === code);
+}
+
+async function selectionFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "static-dag-selection-"));
+  await execFileAsync("git", ["init", "-q"], { cwd: root });
+  await execFileAsync("git", ["config", "user.email", "static-dag@example.invalid"], { cwd: root });
+  await execFileAsync("git", ["config", "user.name", "static-dag"], { cwd: root });
+  await mkdir(join(root, "verify"));
+  await writeFile(join(root, "verify", "a.mjs"), "process.exit(0);\n");
+  await writeFile(join(root, "verify", "b.mjs"), "process.exit(0);\n");
+  await execFileAsync("git", ["add", "verify"], { cwd: root });
+  await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: root });
+  return root;
+}
+
+function selectionGoal(verificationCommandIds?: readonly string[]): BoundedMutationGoal {
+  const task = (taskId: string, output: string, dependencies: readonly string[]) => ({
+    task_id: taskId, objective: `Write ${output}.`, editable_paths: [output], required_outputs: [output], dependencies,
+    ...(verificationCommandIds === undefined ? {} : { verification_command_ids: verificationCommandIds }),
+  });
+  return {
+    objective: "Write the static selection outputs.", stop_condition: "Stop after deterministic verification.", execution_mode: "STATIC_APPROVED_DAG",
+    scope: { readable_paths: ["a.txt", "b.txt", "verify"], editable_paths: ["a.txt", "b.txt"], frozen_paths: ["verify"] }, required_outputs: ["a.txt", "b.txt"],
+    tasks: [task("selection-a", "a.txt", []), task("selection-b", "b.txt", ["selection-a"])],
+  };
+}
+
+function selectionAuthority(): BoundedMutationAuthority {
+  return { verification_commands: [
+    { command_id: "verify-a", executable: process.execPath, args: ["a.mjs"], cwd: "verify" },
+    { command_id: "verify-b", executable: process.execPath, args: ["b.mjs"], cwd: "verify" },
+  ] };
+}
+
+function selectionRuntime(): BoundedWorkerRuntime {
+  let index = 0;
+  return {
+    async execute({ route, tools }) {
+      assert.equal(route.logicalRole, "TERRA_EXECUTOR");
+      const path = ["a.txt", "b.txt"][index++]!;
+      await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      tools.submitReport("static selection mutation");
+      return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+    },
+  };
 }
 
 function staticReady(policy = makePolicy("STATIC_APPROVED_DAG")): { readonly policy: ReducerPolicy; readonly state: WorkflowState } {
@@ -141,4 +196,63 @@ test("STATIC_APPROVED_DAG cannot invoke replan/closeout or grow its frozen task 
   substituted.tasks.push({ task_id: "task-extra", task_sha256: digest(999), topological_rank: 2, priority: 0, dependencies: ["task-b"], editable_paths: ["src/extra"] });
   const grown = identifyContractDocument("pi_gacw_reducer_policy_v0", substituted) as ReducerPolicy;
   assert.throws(() => reduceState(state, transitionEvent("SELECT_READY_LEAF"), grown), (error: unknown) => error instanceof ContractValidationError && error.code === "FROZEN_POLICY_IDENTITY_MISMATCH");
+});
+
+test("STATIC_APPROVED_DAG binds optional selected verifiers fail-closed and preserves the Terra-only route", async (t) => {
+  const runSelection = async (verificationCommandIds: readonly string[] | undefined, expectedTaskCommands: readonly string[], expectedRecords: readonly string[]) => {
+    const root = await selectionFixture(); const retained = await mkdtemp(join(tmpdir(), "static-dag-selection-evidence-"));
+    const taskCommands: string[][][] = []; const runtime = selectionRuntime();
+    configureBoundedWorkerFauxRuntimeForTests(() => runtime);
+    try {
+      const result = await runBoundedMutationWorkflowForTests(selectionGoal(verificationCommandIds), {
+        cwd: root, authority: selectionAuthority(), retainedArtifactRoot: retained,
+        approveTasks: async ({ contract, plan, tasks }) => {
+          taskCommands.push(tasks.map((task) => task.verification_commands.map((command) => command.command_id)));
+          return (plan?.content_sha256 ?? contract.content_sha256) as `sha256:${string}`;
+        },
+      });
+      assert.equal(result.outcome, "PASS", result.reason);
+      assert.deepEqual(taskCommands, [[expectedTaskCommands, expectedTaskCommands]]);
+      assert.equal(result.finalState?.counters.worker_invocations.terra_executor, 2);
+      assert.equal(result.finalState?.counters.worker_invocations.sol_planner, 0);
+      assert.equal(result.finalState?.counters.worker_invocations.sol_closeout, 0);
+      assert.equal(result.finalState?.counters.worker_invocations.luna_executor, 0);
+      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot!, "state"), runId: "pre-m8-bounded" });
+      assert.deepEqual(records.commandResults.map((record) => record.command_id).sort(), [...expectedRecords].sort());
+    } finally {
+      configureBoundedWorkerFauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  await t.test("absence defaults every leaf to all frozen commands", async () => {
+    await runSelection(undefined, ["verify-a", "verify-b"], ["verify-a", "verify-b", "verify-a", "verify-b", "verify-a", "verify-b"]);
+  });
+  await t.test("selected-only leaves exclude unselected verifiers while final verification remains complete", async () => {
+    await runSelection(["verify-b"], ["verify-b"], ["verify-b", "verify-b", "verify-a", "verify-b"]);
+  });
+  await t.test("selected identifiers resolve in frozen controller-command order", async () => {
+    await runSelection(["verify-b", "verify-a"], ["verify-a", "verify-b"], ["verify-a", "verify-b", "verify-a", "verify-b", "verify-a", "verify-b"]);
+  });
+
+  const invalid = async (goal: unknown, expectedReason: string) => {
+    const result = await runBoundedMutationWorkflowForTests(goal, { authority: selectionAuthority() });
+    assert.equal(result.outcome, "BLOCKED"); assert.match(result.reason, new RegExp(expectedReason));
+  };
+  await t.test("malformed, duplicate, and non-static selections reject deterministically", async () => {
+    await invalid(selectionGoal(["not valid"]), "invalid identifiers");
+    await invalid(selectionGoal(["verify-a", "verify-a"]), "invalid identifiers");
+    const nonStatic = { ...selectionGoal(["verify-a"]), execution_mode: "DIRECT_LUNA_HIGH", tasks: [{ task_id: "direct", objective: "direct", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: ["verify-a"] }] };
+    await invalid(nonStatic, "restricted to STATIC_APPROVED_DAG");
+  });
+  await t.test("unknown selection blocks before Terra worker admission", async () => {
+    const root = await selectionFixture(); let calls = 0;
+    configureBoundedWorkerFauxRuntimeForTests(() => ({ async execute() { calls += 1; return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 }; } }));
+    try {
+      const result = await runBoundedMutationWorkflowForTests(selectionGoal(["unknown"]), { cwd: root, authority: selectionAuthority() });
+      assert.equal(result.outcome, "BLOCKED"); assert.match(result.reason, /UNKNOWN_STATIC_VERIFICATION_COMMAND/); assert.equal(calls, 0);
+    } finally {
+      configureBoundedWorkerFauxRuntimeForTests(undefined); await rm(root, { recursive: true, force: true });
+    }
+  });
 });
