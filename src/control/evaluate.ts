@@ -554,7 +554,10 @@ export function assertAuthoritativeSources(policy: M5ControlPolicyDocument, sour
 function isBoundedStaticPreM8(policy: M5ControlPolicyDocument): boolean {
   const worker = policy.limits.find((entry) => entry.dimension === "WORKER_INVOCATION");
   const model = policy.limits.find((entry) => entry.dimension === "MODEL_TURN");
-  return worker?.hard_limit === (policy.route_facts.leaf_count + (policy.requested_mode === "ROUTED_DAG" ? 2 : 0)) &&
+  const expectedWorkerLimit = policy.requested_mode === "STATIC_APPROVED_DAG"
+    ? [policy.route_facts.leaf_count, policy.route_facts.leaf_count * 2]
+    : [policy.route_facts.leaf_count + (policy.requested_mode === "ROUTED_DAG" ? 2 : 0)];
+  return expectedWorkerLimit.includes(worker?.hard_limit ?? -1) &&
     model?.enforcement_class === "SOFT_ENFORCEABLE" && model.hard_limit === null &&
     policy.role_reservation_envelopes.every((entry) => entry.logical_role !== "SOL_REPLAN");
 }
@@ -1027,7 +1030,14 @@ function continuationAllowed(action: ContinuationRoute, state: WorkflowState, in
   const repeatedWithoutProgress = last?.selected_route === action && last.progress.classification === "NO_PROGRESS";
   const activeOperation = RUNNING_OPERATION_PHASES.has(state.phase) && hasOperationAuthority(input, priorDecisions);
   if (action === "CONTINUE_ADMITTED_OPERATION" && input.intent === "AUTHORIZE_CONTINUATION") return activeOperation;
-  if (action === "SECOND_LUNA_ATTEMPT") return available.has("LUNA_EXECUTOR") && ["DIRECT_RETRY_READY", "LEAF_RETRY_READY"].includes(state.phase) && hasOperationAuthority(input, priorDecisions) && state.counters.direct_attempts < 2;
+  if (action === "SECOND_LUNA_ATTEMPT") {
+    if (state.execution_mode === "STATIC_APPROVED_DAG") {
+      const active = state.active_task_id === null ? undefined : state.tasks.find((task) => task.task_id === state.active_task_id);
+      return available.has("TERRA_EXECUTOR") && state.phase === "LEAF_RETRY_READY" && active !== undefined &&
+        active.attempts < 2 && hasOperationAuthority(input, priorDecisions);
+    }
+    return available.has("LUNA_EXECUTOR") && ["DIRECT_RETRY_READY", "LEAF_RETRY_READY"].includes(state.phase) && hasOperationAuthority(input, priorDecisions) && state.counters.direct_attempts < 2;
+  }
   if (action === "CONSTRAINED_REPLAN") return available.has("SOL_REPLAN") && state.phase === "REPLAN_REQUIRED" && !state.replan_in_progress && state.counters.constrained_replans < 2 && !repeatedWithoutProgress;
   if (action === "RUN_RESERVED_CLOSEOUT") return available.has("SOL_CLOSEOUT") && state.phase === "READY" && !repeatedWithoutProgress;
   if (action === "RETRY_TRANSIENT_TOOL_ONCE" || action === "CORRECT_COMMAND_ONCE" || action === "RESTORE_CONTEXT_ONCE") return activeOperation && !repeatedWithoutProgress;

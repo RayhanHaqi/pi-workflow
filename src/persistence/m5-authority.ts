@@ -136,7 +136,10 @@ function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5Contr
 function boundedStaticPreM8(policy: M5ControlPolicyDocument): boolean {
   const worker = policy.limits.find((entry) => entry.dimension === "WORKER_INVOCATION");
   const model = policy.limits.find((entry) => entry.dimension === "MODEL_TURN");
-  return worker?.hard_limit === policy.route_facts.leaf_count + (policy.requested_mode === "ROUTED_DAG" ? 2 : 0) &&
+  const expectedWorkerLimit = policy.requested_mode === "STATIC_APPROVED_DAG"
+    ? [policy.route_facts.leaf_count, policy.route_facts.leaf_count * 2]
+    : [policy.route_facts.leaf_count + (policy.requested_mode === "ROUTED_DAG" ? 2 : 0)];
+  return expectedWorkerLimit.includes(worker?.hard_limit ?? -1) &&
     model?.enforcement_class === "SOFT_ENFORCEABLE" && model.hard_limit === null &&
     policy.role_reservation_envelopes.every((entry) => entry.logical_role !== "SOL_REPLAN");
 }

@@ -639,7 +639,7 @@
       ]
     },
     "routes": {
-      "minItems": 3,
+      "minItems": 1,
       "maxItems": 9,
       "type": "array",
       "items": {

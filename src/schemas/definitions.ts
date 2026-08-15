@@ -1920,7 +1920,7 @@ export const M5ControlDecisionSchema = StrictObject(
       route: StringEnum([...CONCRETE_EXECUTION_MODES, ...M5_CONTINUATION_ROUTES] as const),
       eligibility: StringEnum(["ELIGIBLE", "INELIGIBLE", "MISSING_AUTHORITY"] as const),
       reasons: Type.Array(NonEmptyString(128), { uniqueItems: true, maxItems: 32 }),
-    }), { minItems: 3, maxItems: 9 }),
+    }), { minItems: 1, maxItems: 9 }),
     selected_route: Type.Union([StringEnum([...CONCRETE_EXECUTION_MODES, ...M5_CONTINUATION_ROUTES] as const), Type.Null()]),
     reservation: Type.Union([StrictObject({
       logical_role: LogicalModelRoleSchema,

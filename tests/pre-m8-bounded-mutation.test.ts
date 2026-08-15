@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -193,7 +193,7 @@ function goal(mode: BoundedMutationGoal["execution_mode"], outputs = ["out.txt"]
     scope: { readable_paths: [...new Set([...editable, "verify", "verify/input.txt"])], editable_paths: editable, frozen_paths: [] },
     required_outputs: outputs,
   } as const;
-  if (mode !== "ROUTED_DAG") return base;
+  if (mode !== "ROUTED_DAG" && mode !== "STATIC_APPROVED_DAG") return base;
   return {
     ...base,
     tasks: outputs.map((output, index) => ({
@@ -354,15 +354,117 @@ const productionRuntimeInjectionMustRemainRejected: Parameters<typeof runBounded
 };
 void productionRuntimeInjectionMustRemainRejected;
 
-test("pre-M8 Direct Luna, Single Owner Sol, and sequential Routed DAG pass through the same bounded controller", async (t) => {
-  for (const mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const) await t.test(mode, async () => {
+test("pre-M8 Direct Luna, Single Owner Sol, sequential Routed DAG, and static Terra DAG pass through the same bounded controller", async (t) => {
+  for (const mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"] as const) await t.test(mode, async () => {
     const root = await fixture();
     try {
-      const outputs = mode === "ROUTED_DAG" ? ["a.txt", "b.txt"] : ["out.txt"];
+      const outputs = mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG" ? ["a.txt", "b.txt"] : ["out.txt"];
       const result = await run(root, goal(mode, outputs), writer(outputs));
       assert.equal(result.outcome, "PASS", result.reason);
       assert.equal(result.finalState?.phase, "PASS");
-      assert.equal(result.finalState?.counters.worker_invocations.total, mode === "ROUTED_DAG" ? outputs.length + 2 : 1);
+      assert.equal(result.finalState?.counters.worker_invocations.total, mode === "ROUTED_DAG" ? outputs.length + 2 : outputs.length);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
+test("STATIC_APPROVED_DAG controller verifies every Terra leaf before advancing and reaches its frozen repair edge only for local verification defects", async (t) => {
+  await t.test("verify before advance across three leaves", async () => {
+    const root = await fixture(); const retained = await mkdtemp(join(tmpdir(), "pre-m8-static-order-"));
+    const observed: { readonly active: string | null; readonly passed: readonly string[]; readonly verificationCount: number; readonly postflightCount: number }[] = [];
+    let calls = 0;
+    try {
+      const result = await run(root, goal("STATIC_APPROVED_DAG", ["a.txt", "b.txt", "c.txt"]), {
+        async execute({ route, tools }) {
+          assert.equal(route.logicalRole, "TERRA_EXECUTOR");
+          if (calls > 0) {
+            const roots = await readdir(retained); assert.equal(roots.length, 1);
+            const stateRoot = join(retained, roots[0]!, "state");
+            const [inspection, records] = await Promise.all([
+              inspectRunStorage({ stateRoot, runId: "pre-m8-bounded" }),
+              readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" }),
+            ]);
+            observed.push({ active: inspection.workflowState?.active_task_id ?? null, passed: inspection.workflowState?.tasks.filter((task) => task.status === "PASS").map((task) => task.task_id) ?? [], verificationCount: records.commandResults.length, postflightCount: records.commandResults.filter((record) => record.postflight_content_sha256 !== null).length });
+          }
+          const path = ["a.txt", "b.txt", "c.txt"][calls++]!;
+          await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+          tools.submitReport("static Terra mutation");
+          return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        },
+      }, { retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "PASS", result.reason);
+      assert.equal(calls, 3);
+      assert.deepEqual(observed, [
+        { active: "leaf-2", passed: ["leaf-1"], verificationCount: 1, postflightCount: 1 },
+        { active: "leaf-3", passed: ["leaf-1", "leaf-2"], verificationCount: 2, postflightCount: 2 },
+      ]);
+      assert.equal(result.finalState?.tasks.every((task) => task.status === "PASS"), true);
+      assert.equal(result.finalState?.counters.worker_invocations.terra_executor, 3);
+      assert.equal(result.finalState?.counters.worker_invocations.luna_executor, 0);
+      assert.equal(result.finalState?.counters.worker_invocations.sol_planner, 0);
+      assert.equal(result.finalState?.counters.worker_invocations.sol_closeout, 0);
+    } finally { await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+  });
+
+  const localDefectRuntime = (mode: "repair" | "always-fail" | "no-repair") => {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      runtime: {
+        async execute({ route, tools }) {
+          assert.equal(route.logicalRole, "TERRA_EXECUTOR");
+          const sequence = calls++;
+          if (sequence === 0) {
+            await tools.writePath({ path: "a.txt", operation: "CREATE", replacementBytes: Buffer.from("bad\n"), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+          } else if (sequence === 1 && mode !== "no-repair") {
+            await tools.writePath({ path: "a.txt", operation: "REPLACE", replacementBytes: Buffer.from(mode === "repair" ? "good\n" : "bad-again\n"), expectedPreimageExists: true });
+          } else if (mode === "repair" && sequence === 2) {
+            await tools.writePath({ path: "b.txt", operation: "CREATE", replacementBytes: Buffer.from("b\n"), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+          }
+          tools.submitReport("static Terra mutation");
+          return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        },
+      } satisfies BoundedWorkerRuntime,
+    };
+  };
+  const localVerificationAuthority = (staticAttempts: 1 | 2 = 1): BoundedMutationAuthority => ({ verification_commands: [{ command_id: "verify", executable: "/usr/bin/node", args: ["check.mjs"], cwd: "verify" }], static_max_attempts_per_leaf: staticAttempts });
+  const withVerifier = async (script: string): Promise<string> => {
+    const root = await fixture(); await writeFile(join(root, "verify", "check.mjs"), script); await execFileAsync("git", ["add", "verify/check.mjs"], { cwd: root }); await execFileAsync("git", ["commit", "-qm", "static verifier"], { cwd: root }); return root;
+  };
+
+  await t.test("one frozen repair uses exactly two Terra attempts and then advances", async () => {
+    const root = await withVerifier("import { readFile, writeFile } from 'node:fs/promises'; const path = `${process.env.TMPDIR}/static-verifier-count`; const count = Number(await readFile(path, 'utf8').catch(() => '0')); await writeFile(path, String(count + 1)); process.exit(count === 0 ? 1 : 0);\n"); const retained = await mkdtemp(join(tmpdir(), "pre-m8-static-repair-")); const value = localDefectRuntime("repair");
+    try {
+      const result = await run(root, goal("STATIC_APPROVED_DAG", ["a.txt", "b.txt"]), value.runtime, { authority: localVerificationAuthority(2), retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "PASS", result.reason); assert.equal(value.calls(), 3);
+      assert.equal(result.finalState?.tasks[0]?.attempts, 2); assert.equal(result.finalState?.tasks[1]?.attempts, 1);
+      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot!, "state"), runId: "pre-m8-bounded" });
+      assert.equal(records.decisions.some((entry) => entry.intent === "AUTHORIZE_CONTINUATION" && entry.outcome === "AUTHORIZE"), true);
+    } finally { await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
+  });
+
+  await t.test("no frozen repair edge blocks without a next leaf or second Terra attempt", async () => {
+    const root = await withVerifier("process.exit(1);\n"); const value = localDefectRuntime("no-repair");
+    try {
+      const result = await run(root, goal("STATIC_APPROVED_DAG", ["a.txt", "b.txt"]), value.runtime, { authority: localVerificationAuthority() });
+      assert.equal(result.outcome, "BLOCKED"); assert.equal(result.finalState?.phase, "BLOCKED"); assert.equal(value.calls(), 1);
+      assert.equal(result.finalState?.tasks[1]?.attempts, 0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  await t.test("unsafe provider failure blocks without consuming a frozen repair edge", async () => {
+    const root = await fixture(); let calls = 0;
+    try {
+      const result = await run(root, goal("STATIC_APPROVED_DAG", ["a.txt", "b.txt"]), { async execute() { calls += 1; return { completed: false, firstFailureCode: "MODEL_UNAVAILABLE", firstFailureStage: "PROVIDER", cleanupCertain: true, modelTurns: 0, providerRequests: null }; } }, { authority: { ...authority(), static_max_attempts_per_leaf: 2 } });
+      assert.equal(result.outcome, "BLOCKED"); assert.equal(calls, 1); assert.equal(result.finalState?.tasks[1]?.attempts, 0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  await t.test("failed frozen repair blocks without a third Terra attempt or next leaf", async () => {
+    const root = await withVerifier("process.exit(1);\n"); const value = localDefectRuntime("always-fail");
+    try {
+      const result = await run(root, goal("STATIC_APPROVED_DAG", ["a.txt", "b.txt"]), value.runtime, { authority: localVerificationAuthority(2) });
+      assert.equal(result.outcome, "BLOCKED"); assert.equal(result.finalState?.phase, "BLOCKED"); assert.equal(value.calls(), 2);
+      assert.equal(result.finalState?.tasks[0]?.attempts, 2); assert.equal(result.finalState?.tasks[1]?.attempts, 0);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

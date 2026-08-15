@@ -43,6 +43,7 @@ import {
   type ContractDocument,
   type M3BaselineApprovalRuntimeDocument,
   type M3BaselineRuntimeDocument,
+  type M3PostflightDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
   type M4CommandSpecification,
@@ -1073,7 +1074,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       if (inspection.status !== "HEALTHY" || inspection.statePointer === null || inspection.workflowState === null || inspection.revision === null) throw new Error("committed controller state is unavailable");
       return { inspection, expectedRevision: inspection.revision, expectedStatePointerContentSha256: inspection.statePointer.content_sha256 as Sha256Digest, expectedWorkflowStateContentSha256: inspection.workflowState.content_sha256 as Sha256Digest };
     };
-    const decision = async (intent: "VALIDATE_CONTRACT" | "SELECT_ROUTE" | "AUTHORIZE_WORK" | "EVALUATE_TERMINAL" | "BLOCK", transitionId: string, extra: Record<string, unknown> = {}) => {
+    const decision = async (intent: "VALIDATE_CONTRACT" | "SELECT_ROUTE" | "AUTHORIZE_WORK" | "AUTHORIZE_CONTINUATION" | "EVALUATE_TERMINAL" | "BLOCK", transitionId: string, extra: Record<string, unknown> = {}) => {
       const current = await expected(); const result = await kernel.evaluateControlDecision({ intent, expectedRevision: current.expectedRevision, expectedStatePointerContentSha256: current.expectedStatePointerContentSha256, expectedWorkflowStateContentSha256: current.expectedWorkflowStateContentSha256, transitionId, processMetadata: processMetadata(), authoritativeSources: sources, availableLogicalRoles: PRODUCT_ROLES, ...extra } as Parameters<typeof kernel.evaluateControlDecision>[0]);
       finalState = result.workflowState; return result.decision;
     };
@@ -1154,16 +1155,85 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     } else if (goal.execution_mode === "STATIC_APPROVED_DAG") {
       await commit("FREEZE_STATIC_DAG", 30, {}, [planDocument!, graph!, ...tasks]);
       await commit("ACTIVATE_DAG", 31);
-      for (let index = 0; index < tasks.length; index += 1) {
-        await commit("SELECT_READY_LEAF", 40 + index * 4);
+      let staticTransitionIndex = 40;
+      let staticStopped = false;
+      const staticCommit = async (type: TransitionEvent["event_type"], payload: Record<string, unknown> = {}): Promise<void> => {
+        await commit(type, staticTransitionIndex, payload);
+        staticTransitionIndex += 1;
+      };
+      const staticVerification = async (task: TaskDocument) => {
+        const taskSpecs = task.verification_commands.map((command) => {
+          const spec = specs.find((candidate) => candidate.command_id === command.command_id);
+          if (spec === undefined) throw new BoundedWorkflowError("STATIC_LEAF_VERIFICATION_AUTHORITY_MISSING", "frozen task verification command is absent from controller authority");
+          return spec;
+        });
+        const results: Awaited<ReturnType<typeof gateway.run_verification_command>>["record"][] = [];
+        const postflights: M3PostflightDocument[] = [];
+        for (const spec of taskSpecs) {
+          const tokenBefore = gateway.acceptedState.content_sha256 as Sha256Digest;
+          let record: Awaited<ReturnType<typeof gateway.run_verification_command>>["record"] | undefined;
+          try {
+            record = (await gateway.run_verification_command({ commandId: spec.command_id, stateTokenContentSha256: tokenBefore })).record;
+          } catch {
+            const durable = await readM5ManagedRecords({ stateRoot, runId: RUN_ID });
+            record = durable.commandResults.find((candidate) => candidate.command_id === spec.command_id && candidate.state_token_before === tokenBefore);
+            if (record === undefined) throw new BoundedWorkflowError("STATIC_LEAF_VERIFICATION_EVIDENCE_MISSING", "failed frozen verification did not retain its command result");
+          }
+          const durable = await readM5ManagedRecords({ stateRoot, runId: RUN_ID });
+          const persisted = durable.commandResults.find((candidate) => candidate.content_sha256 === record.content_sha256);
+          const postflight = record.postflight_content_sha256 === null ? undefined : durable.postflights.find((candidate) => candidate.content_sha256 === record.postflight_content_sha256);
+          if (persisted === undefined || canonicalize(persisted) !== canonicalize(record) || postflight === undefined) {
+            throw new BoundedWorkflowError("STATIC_LEAF_POSTFLIGHT_EVIDENCE_MISSING", "frozen verification has no durable authoritative postflight");
+          }
+          results.push(record); postflights.push(postflight);
+          if (record.outcome !== "PASS") break;
+        }
+        sources = {
+          ...sources,
+          m3StateTokens: [gateway.acceptedState],
+          m3Postflights: [...(sources.m3Postflights ?? []), ...postflights],
+          m4CommandResults: [...(sources.m4CommandResults ?? []), ...results],
+        };
+        return { results, postflights };
+      };
+      for (let index = 0; index < tasks.length && !staticStopped; index += 1) {
+        await staticCommit("SELECT_READY_LEAF");
         const taskId = (await expected()).inspection.workflowState!.active_task_id;
         const task = tasks.find((candidate) => candidate.task_id === taskId);
         if (task === undefined) throw new BoundedWorkflowError("STATIC_DAG_READY_NODE_MISSING", "ready-node selection did not identify a frozen task");
-        const worker = await invoke(`static-leaf-${task.task_id}`, task, planDocument, "MUTATION_EXECUTOR", "TERRA_EXECUTOR");
-        if (closeProductiveAuthority(worker)) break;
-        await commit("COMPLETE_LEAF_ATTEMPT", 41 + index * 4);
-        await commit("PASS_LEAF_POSTFLIGHT", 42 + index * 4);
-        await commit("LEAF_VERIFICATION_PASSED", 43 + index * 4);
+        for (let attempt = 1; !staticStopped; attempt += 1) {
+          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", "TERRA_EXECUTOR");
+          if (closeProductiveAuthority(worker)) { staticStopped = true; break; }
+          await staticCommit("COMPLETE_LEAF_ATTEMPT");
+          const verified = await staticVerification(task);
+          const failure = verified.results.find((record) => record.outcome !== "PASS");
+          await staticCommit("PASS_LEAF_POSTFLIGHT");
+          if (failure === undefined) {
+            await staticCommit("LEAF_VERIFICATION_PASSED");
+            break;
+          }
+          // A completed verifier with only its frozen expected-exit assertion
+          // failing is the existing LOCAL_IMPLEMENTATION_DEFECT semantic. All
+          // gateway, authority, scope, and provider uncertainty retains its
+          // exact lower-layer code and therefore fails closed in the reducer.
+          const failureClass = failure.failure_code === "COMMAND_EXIT_CODE_UNEXPECTED" ? "LOCAL_IMPLEMENTATION_DEFECT" : failure.failure_code ?? "INTERNAL_CONTROL_ERROR";
+          await staticCommit("LEAF_VERIFICATION_FAILED", { failure_class: failureClass });
+          const afterFailure = (await expected()).inspection.workflowState!;
+          if (afterFailure.phase !== "LEAF_RETRY_READY") { staticStopped = true; break; }
+          const failureInput: M5FailureInput = {
+            sourceLayer: "M4", sourceErrorCode: failureClass, sourceRecordContentSha256: failure.content_sha256 as Sha256Digest,
+            normalizedSignature: sha256Canonical({ protocol: "static-leaf-verification-v1", task_id: task.task_id, failure_code: failureClass }),
+            operationId: worker.operationId, scopeIdentity: m5.scope_sha256 as Sha256Digest,
+            repositoryIdentity: m5.repository_identity_content_sha256 as Sha256Digest, worktreeKey: m5.worktree_key as Sha256Digest,
+          };
+          const continuation = await decision("AUTHORIZE_CONTINUATION", `pre-m8-static-repair-${task.task_id}-${attempt}`, {
+            operationId: worker.operationId,
+            progressEvidence: { claimedKind: "NEW_TEST_EVIDENCE", evidenceContentSha256: [failure.content_sha256 as Sha256Digest] },
+            failures: [failureInput],
+          });
+          if (continuation.outcome !== "AUTHORIZE") throw new BoundedWorkflowError("STATIC_LEAF_REPAIR_NOT_AUTHORIZED", continuation.blocking_reason ?? "M5 refused frozen Terra repair");
+          if ((await expected()).inspection.workflowState!.phase !== "LEAF_FAST_PREFLIGHT") throw new BoundedWorkflowError("STATIC_LEAF_REPAIR_TRANSITION_INVALID", "authorized static repair did not enter its existing fast-preflight state");
+        }
       }
     } else {
       const plannerResult = await invoke("planner", null, planDocument, "SOL_PLANNER", "SOL_PLANNER");
