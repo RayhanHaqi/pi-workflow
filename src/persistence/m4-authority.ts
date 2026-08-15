@@ -4,7 +4,7 @@ import { m3ScopeIdentity } from "../identity/m3-scope.js";
 import { currentM4CapabilityProducerAuthority, probeM4Capabilities } from "../secure-fs/capabilities.js";
 import { assertM4CanonicalPath } from "../secure-fs/path.js";
 import { validateCommandCatalog, commandSpecProjection, type ValidatedCommandCatalog } from "../scoped-tools/commands.js";
-import { assertMutationPermitted, validateToolPolicy, type ValidatedToolPolicy } from "../scoped-tools/policy.js";
+import { assertMutationPermitted, assertReadablePath, validateToolPolicy, type ValidatedToolPolicy } from "../scoped-tools/policy.js";
 import {
   assertDocumentValid,
   type BoundedWorkerInvocationDocument,
@@ -222,6 +222,21 @@ export async function classifyM4Authority(input: M4AuthorityInput): Promise<read
     const request = input.toolRequests.get(value.request_content_sha256);
     if (value.run_id !== input.runId || value.data_class === "SECRET") fail(node, "Tool result local authority or SECRET projection is invalid");
     if (request !== undefined && (request.request_kind !== value.result_kind || request.path !== value.path || request.state_token_content_sha256 !== value.state_token_content_sha256)) fail(node, "Tool result predecessor relationship is invalid");
+    if (value.outcome === "MISSING") {
+      if (request === undefined) fail(node, "Missing read result has no exact originating request");
+      if (value.result_kind !== "READ" || value.path === null || value.content_digest !== null || value.byte_count !== 0 || value.item_count !== 0 ||
+          value.output_digest !== sha256Canonical({ path: value.path, outcome: "MISSING" })) fail(node, "Missing read result has fabricated or inconsistent file facts");
+      if (request !== undefined) {
+        const policy = policies.get(request.tool_policy_content_sha256);
+        if (policy === undefined) missing(node, "Missing read result tool-policy authority is absent");
+        else {
+          try {
+            const authority = assertReadablePath(policy, value.path!);
+            if (value.data_class !== (authority?.data_class ?? "HASH_ONLY")) fail(node, "Missing read result data classification differs from its readable authority");
+          } catch { fail(node, "Missing read result path exceeds readable authority"); }
+        }
+      }
+    }
   }
   for (const [digest, value] of input.mutationReceipts) {
     const node = nodes.get(key("M4_MUTATION_RECEIPT", digest))!; add(node, "M4_PATCH_REQUEST", value.request_content_sha256); add(node, "M4_SECURE_FS_CAPABILITY", value.secure_fs_capability_content_sha256);

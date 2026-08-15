@@ -43,11 +43,20 @@ export interface BoundedWorkerRoute {
 
 export interface BoundedWorkerTools {
   /** Trusted metadata is internal to this adapter; provider-visible reads remain text-only. */
-  readonly readPath: (path: string, offset?: number, length?: number) => Promise<{
-    readonly content: string | null;
-    readonly resultContentSha256: Sha256Digest;
-    readonly metadata: { readonly digest: Sha256Digest; readonly size: number; readonly mode: number };
-  }>;
+  readonly readPath: (path: string, offset?: number, length?: number) => Promise<
+    | {
+      readonly content: string | null;
+      readonly outcome: "PRESENT";
+      readonly resultContentSha256: Sha256Digest;
+      readonly metadata: { readonly digest: Sha256Digest; readonly size: number; readonly mode: number };
+    }
+    | {
+      readonly content: null;
+      readonly outcome: "MISSING";
+      readonly resultContentSha256: Sha256Digest;
+      readonly metadata: null;
+    }
+  >;
   readonly writePath: (input: {
     readonly path: string;
     readonly operation: "CREATE" | "REPLACE" | "DELETE";
@@ -187,7 +196,7 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
           boundedIntegerParam(value, "offset", 0, Number.MAX_SAFE_INTEGER, 0),
           boundedIntegerParam(value, "length", 1, MAX_SCOPED_READ_LENGTH, MAX_SCOPED_READ_LENGTH),
         );
-        return toolResult(result.content ?? "");
+        return toolResult(result.outcome === "MISSING" ? `path: ${stringParam(value, "path")}\noutcome: MISSING` : result.content ?? "");
       },
     };
     const patchTool = {
@@ -344,8 +353,17 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
       requireAcceptedM4ToolBudget();
       const result = await input.gateway.read_scoped({ stateTokenContentSha256: input.gateway.acceptedState.content_sha256 as Sha256Digest, path, offset, length, mode: "TEXT" });
       addM4Evidence(result.resultRecord.content_sha256 as Sha256Digest, true);
+      if (result.resultRecord.outcome === "MISSING") {
+        return {
+          content: null,
+          outcome: "MISSING",
+          resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest,
+          metadata: null,
+        };
+      }
       return {
         content: result.content,
+        outcome: "PRESENT",
         resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest,
         metadata: { digest: result.metadata.digest as Sha256Digest, size: result.metadata.size, mode: result.metadata.mode },
       };
@@ -361,6 +379,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
       const needsPreimage = request.operation !== "CREATE" && request.expectedPreimageExists === true &&
         (request.expectedPreimageDigest === undefined || request.expectedPreimageSize === undefined || request.expectedPreimageMode === undefined);
       const preimage = needsPreimage ? await tools.readPath(request.path) : undefined;
+      if (preimage?.outcome === "MISSING") throw Object.assign(new Error("REPLACE and DELETE require an existing trusted preimage"), { code: "PREIMAGE_MISSING" });
       const expectedPreimageDigest = request.expectedPreimageDigest === undefined ? preimage?.metadata.digest ?? null : request.expectedPreimageDigest;
       const expectedPreimageSize = request.expectedPreimageSize === undefined ? preimage?.metadata.size ?? null : request.expectedPreimageSize;
       const expectedPreimageMode = request.expectedPreimageMode === undefined ? preimage?.metadata.mode ?? null : request.expectedPreimageMode;

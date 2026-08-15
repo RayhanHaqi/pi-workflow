@@ -10,7 +10,7 @@ import { resetSecureFilesystemTestHooks, setSecureFilesystemTestHooks } from "..
 import { ScopedToolGatewayError } from "../src/scoped-tools/index.js";
 import { createM4Fixture } from "./m4-helpers.js";
 import { releaseAdmission } from "./repository-matrix-helpers.js";
-import { removeRepositoryFixture } from "./repository-helpers.js";
+import { git, removeRepositoryFixture } from "./repository-helpers.js";
 
 function code(error: unknown): unknown { return error instanceof ScopedToolGatewayError ? error.code : (error as { code?: unknown })?.code; }
 async function cleanup(value: Awaited<ReturnType<typeof createM4Fixture>>) {
@@ -46,6 +46,72 @@ test("M4 read_scoped returns deterministic text and base64 records", async () =>
     const binary = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "src/a.txt", offset: 6, length: 6, mode: "BINARY" });
     assert.equal(Buffer.from(binary.content ?? "", "base64").toString(), "needle");
     assert.notEqual(text.resultRecord.request_content_sha256, binary.resultRecord.request_content_sha256);
+  } finally { await cleanup(value); }
+});
+
+test("M4 authorized missing read publishes nonfatal absence evidence without file metadata", async () => {
+  const value = await createM4Fixture();
+  try {
+    const result = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "src/absent.txt", offset: 0, length: 1_024, mode: "TEXT" });
+    assert.equal(result.resultRecord.outcome, "MISSING");
+    assert.equal(result.content, null); assert.equal(result.metadata as unknown, null); assert.equal(result.contentEncoding, "METADATA_ONLY");
+    assert.equal(result.resultRecord.content_digest, null); assert.equal(result.resultRecord.byte_count, 0); assert.equal(result.resultRecord.item_count, 0);
+    const records = join(value.fixture.stateRoot, "runs", value.fixture.runId, "records");
+    assert.equal((await readdir(join(records, "tool-requests"))).length, 1);
+    assert.equal((await readdir(join(records, "tool-results"))).length, 1);
+    assert.equal((await readdir(join(records, "m4-admission-refusals"))).length, 0);
+  } finally { await cleanup(value); }
+});
+
+test("M4 distinguishes existing empty files from authorized missing reads", async () => {
+  const value = await createM4Fixture([], null, async (fixture) => {
+    await writeFile(join(fixture.repository, "src", "empty.txt"), "", { mode: 0o644 });
+    await git(fixture.repository, "add", "src/empty.txt"); await git(fixture.repository, "commit", "-m", "add empty M4 read fixture");
+  });
+  try {
+    const result = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "src/empty.txt", offset: 0, length: 1_024, mode: "TEXT" });
+    assert.equal(result.resultRecord.outcome, "RAW");
+    assert.equal(result.content, ""); assert.equal(result.metadata.size, 0);
+  } finally { await cleanup(value); }
+});
+
+test("M4 missing-read handling preserves read scope and special-file failures", async (t) => {
+  await t.test("out-of-scope absent path remains fatal before M4 read admission", async () => {
+    const value = await createM4Fixture();
+    try {
+      await assert.rejects(value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "outside-absent.txt", offset: 0, length: 1, mode: "TEXT" }), (error: unknown) => code(error) === "PATH_NOT_READABLE");
+      assert.equal((await readdir(join(value.fixture.stateRoot, "runs", value.fixture.runId, "records", "tool-results"))).length, 0);
+    } finally { await cleanup(value); }
+  });
+  await t.test("symlink and special file remain fatal and never become MISSING", async () => {
+    for (const [name, setup] of [
+      ["link.txt", async (path: string) => symlink("a.txt", path)],
+      ["pipe", async (path: string) => {
+        const { execFile } = await import("node:child_process");
+        await new Promise<void>((resolve, reject) => execFile("mkfifo", [path], (error) => error === null ? resolve() : reject(error)));
+      }],
+    ] as const) {
+      const value = await createM4Fixture();
+      try {
+        await setup(join(value.fixture.repository, "src", name));
+        await assert.rejects(value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: `src/${name}`, offset: 0, length: 1, mode: "TEXT" }), (error: unknown) => code(error) === "FAST_PREFLIGHT_FAILED");
+        assert.equal((await readdir(join(value.fixture.stateRoot, "runs", value.fixture.runId, "records", "tool-results"))).length, 0);
+      } finally { await cleanup(value); }
+    }
+  });
+});
+
+test("M4 CREATE remains independently atomic after a missing read", async () => {
+  const value = await createM4Fixture();
+  try {
+    const path = "generated/after-missing.txt";
+    const missing = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path, offset: 0, length: 1, mode: "TEXT" });
+    assert.equal(missing.resultRecord.outcome, "MISSING"); assert.equal(token(value), missing.resultRecord.state_token_content_sha256, "absence does not advance the M3 token");
+    const patch = { ...basePatch(value), ownershipClass: "GENERATED_ACCEPTED_BASELINE" as const, dataClass: "PUBLIC_SOURCE" as const, operation: "CREATE" as const, path,
+      expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null, replacementBytes: Buffer.from("created\n"), requestedFinalMode: 0o644 };
+    await value.gateway.apply_patch_scoped(patch);
+    await assert.rejects(value.gateway.apply_patch_scoped({ ...patch, stateTokenContentSha256: token(value) }), (error: unknown) => code(error) === "TARGET_ALREADY_EXISTS");
+    assert.equal(await readFile(join(value.fixture.repository, path), "utf8"), "created\n");
   } finally { await cleanup(value); }
 });
 

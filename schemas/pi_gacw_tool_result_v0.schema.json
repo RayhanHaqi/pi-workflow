@@ -101,7 +101,8 @@
       "enum": [
         "RAW",
         "METADATA_ONLY",
-        "PASS"
+        "PASS",
+        "MISSING"
       ]
     },
     "completed_at": {

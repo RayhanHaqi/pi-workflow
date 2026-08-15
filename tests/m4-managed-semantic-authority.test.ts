@@ -33,7 +33,10 @@ test("M4-managed-semantic-authority: producer roots and complete chains become a
     const initialM4 = initial.managedRecordClassifications.filter((entry) => entry.object.kind.startsWith("M4_")); assert.ok(initialM4.length >= 4);
     assert.ok(initialM4.every((entry) => entry.classification === "UNREFERENCED_MANAGED_RECORD"));
     const read = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "tracked.txt", offset: 0, length: 7, mode: "TEXT" });
+    const missing = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "src/absent.txt", offset: 0, length: 7, mode: "TEXT" });
+    assert.equal(missing.resultRecord.outcome, "MISSING");
     assert.equal(await classification(value, read.resultRecord.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
+    assert.equal(await classification(value, missing.resultRecord.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     assert.equal(await classification(value, value.policy.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     const command = await value.gateway.run_inspection_command({ commandId: "pass", stateTokenContentSha256: token(value) });
     assert.equal(await classification(value, command.record.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
@@ -102,6 +105,7 @@ test("M4-managed-semantic-authority: coherent impossible records are INVALID, mi
   const value = await createM4Fixture(async (fixture) => [await commandSpecification("pass", "INSPECTION", "/usr/bin/printf", ["pass"], { repositoryRoot: fixture.repository })]);
   try {
     const read = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "tracked.txt", offset: 0, length: 7, mode: "TEXT" });
+    const missingRead = await value.gateway.read_scoped({ stateTokenContentSha256: token(value), path: "src/absent.txt", offset: 0, length: 7, mode: "TEXT" });
     const patch = await value.gateway.apply_patch_scoped({ stateTokenContentSha256: token(value), lockAcquisitionContentSha256: value.admission.lock.diagnostics.lock_acquisition_content_sha256 as Sha256Digest,
       operation: "CREATE", path: "created.txt", ownershipClass: "OWNER_ACCEPTED_MUTABLE", dataClass: "PUBLIC_SOURCE", expectedPreimageExists: false,
       expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null, replacementBytes: Buffer.from("created\n"), requestedFinalMode: 0o644 });
@@ -123,9 +127,13 @@ test("M4-managed-semantic-authority: coherent impossible records are INVALID, mi
     const incomplete = reidentify("pi_gacw_tool_result_v0", read.resultRecord, (draft) => { draft["request_content_sha256"] = absent; }) as M4ToolResultDocument;
     await persist(value, "tool-results", incomplete);
     const wrongKind = reidentify("pi_gacw_tool_result_v0", read.resultRecord, (draft) => { draft["request_content_sha256"] = secure.content_sha256; }) as M4ToolResultDocument;
-    await persist(value, "tool-results", wrongKind);
-    for (const record of [falseCapability, impossibleCreate, disallowedPass, wrongKind]) assert.equal(await classification(value, record.content_sha256), "INVALID_MANAGED_RECORD");
+    const malformedMissing = reidentify("pi_gacw_tool_result_v0", missingRead.resultRecord, (draft) => { draft["content_digest"] = read.resultRecord.content_digest; }) as M4ToolResultDocument;
+    const unboundMissing = reidentify("pi_gacw_tool_result_v0", missingRead.resultRecord, (draft) => { draft["request_content_sha256"] = absent; }) as M4ToolResultDocument;
+    const wrongBoundMissing = reidentify("pi_gacw_tool_result_v0", missingRead.resultRecord, (draft) => { draft["request_content_sha256"] = read.resultRecord.request_content_sha256; }) as M4ToolResultDocument;
+    await persist(value, "tool-results", wrongKind); await persist(value, "tool-results", malformedMissing); await persist(value, "tool-results", unboundMissing); await persist(value, "tool-results", wrongBoundMissing);
+    for (const record of [falseCapability, impossibleCreate, disallowedPass, wrongKind, malformedMissing, unboundMissing, wrongBoundMissing]) assert.equal(await classification(value, record.content_sha256), "INVALID_MANAGED_RECORD");
     assert.equal(await classification(value, incomplete.content_sha256), "INCOMPLETE_MANAGED_RECORD_CHAIN");
     assert.equal(await classification(value, read.resultRecord.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
+    assert.equal(await classification(value, missingRead.resultRecord.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
   } finally { await releaseAdmission(value.admission); await removeRepositoryFixture(value.fixture); }
 });

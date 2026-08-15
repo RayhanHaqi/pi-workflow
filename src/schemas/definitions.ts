@@ -1622,7 +1622,7 @@ export const M4ToolResultSchema = StrictObject(
     byte_count: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
     item_count: Type.Integer({ minimum: 0, maximum: 100_000 }),
     output_digest: Digest(),
-    outcome: StringEnum(["RAW", "METADATA_ONLY", "PASS"] as const),
+    outcome: StringEnum(["RAW", "METADATA_ONLY", "PASS", "MISSING"] as const),
     completed_at: NonEmptyString(64),
   },
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_tool_result_v0.schema.json" },

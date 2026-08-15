@@ -310,7 +310,7 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
               }
               counters.readToolExecutions += 1;
               const result = await tools.readPath(path, offset, length);
-              const providerResult = { content: [{ type: "text", text: result.content ?? "" }], details: {} };
+              const providerResult = { content: [{ type: "text", text: result.outcome === "MISSING" ? `path: ${path}\noutcome: MISSING` : result.content ?? "" }], details: {} };
               counters.providerReadResults?.push(providerResult);
               return providerResult;
             },
@@ -510,7 +510,7 @@ test("provider-visible Routed S01 scope separates regular-file reads from prefix
               assert.equal((await tools.readPath("verify/check.mjs")).content, "process.exit(0);\n");
             }
             const before = await tools.readPath(targetPath);
-            assert.equal(before.content, "log_level=info\n");
+            assert.equal(before.outcome, "PRESENT"); assert.equal(before.content, "log_level=info\n");
             await tools.writePath({ path: targetPath, operation: "REPLACE", replacementBytes: Buffer.from("log_level=warning\n"), expectedPreimageExists: true,
               expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
             tools.submitReport("bounded S01 fixture report");
@@ -1197,6 +1197,7 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
 
     const explicit = await exercise(async (tools) => {
       const before = await tools.readPath("verify/input.txt");
+      assert.equal(before.outcome, "PRESENT");
       await tools.writePath({ path: "verify/input.txt", operation: "REPLACE", replacementBytes: Buffer.from("changed\n"), expectedPreimageExists: true,
         expectedPreimageDigest: before.metadata.digest, expectedPreimageSize: before.metadata.size, expectedPreimageMode: before.metadata.mode });
     });
@@ -1232,6 +1233,36 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
       assert.equal(counters.readToolExecutions, 1);
       assert.deepEqual(providerReadResults, [{ content: [{ type: "text", text: "input\n" }], details: {} }]);
       assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode/u);
+    } finally {
+      configureM6FauxRuntimeForTests(undefined);
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("authoritative missing read is normal evidence and does not authorize CREATE", async () => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-f01-missing-"));
+    const providerReadResults: unknown[] = [];
+    const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0, providerReadResults };
+    const missingCreate = patch("created.txt", "CREATE");
+    const providerCalls = installBoundedPiFauxRuntimeCalls([{ name: "read_scoped", args: { path: "created.txt" } }, missingCreate, report]);
+    try {
+      const result = await run(root, targetGoal("created.txt"), piMutationRuntime(counters), { retainedArtifactRoot: retained });
+      assert.equal(result.outcome, "PASS", result.reason);
+      assert.equal(providerCalls(), 3, "the normal missing response permits the provider's next bounded decision");
+      assert.equal(counters.readToolExecutions, 1); assert.equal(counters.patchToolExecutions, 1);
+      assert.deepEqual(providerReadResults, [{ content: [{ type: "text", text: "path: created.txt\noutcome: MISSING" }], details: {} }]);
+      assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode|state_token|cas/u);
+      assert.ok(result.evidenceRoot !== undefined);
+      const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+      assert.equal(records.toolResults.length, 1); assert.equal(records.toolResults[0]!.outcome, "MISSING");
+      assert.equal(records.mutationReceipts.length, 1); assert.equal(records.mutationReceipts[0]!.operation, "CREATE");
+      assert.equal(records.mutationReceipts[0]!.before.digest, null);
+      const worker = records.boundedWorkerResults.find((entry) => entry.outcome === "COMPLETED");
+      assert.notEqual(worker, undefined); assert.equal(worker!.actual_usage.m4_tool_calls, 2);
+      assert.ok(worker!.m4_evidence_content_sha256.includes(records.toolResults[0]!.content_sha256));
+      assert.ok(worker!.m4_evidence_content_sha256.includes(records.mutationReceipts[0]!.content_sha256));
     } finally {
       configureM6FauxRuntimeForTests(undefined);
       await rm(retained, { recursive: true, force: true });

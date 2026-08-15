@@ -229,11 +229,20 @@ async function readScoped(state: GatewayState, input: ScopedReadRequest): Promis
   const authority = assertReadablePath(state.policy, input.path); const raw = rawReadPermitted(authority);
   await fastPreflight(state);
   const request = await requestRecord(state, "READ", input.path, null, { offset: input.offset, length: input.length, mode: input.mode, raw });
-  const result = await state.filesystem.readScoped({
-    path: input.path, offset: input.offset, length: raw ? input.length : 0,
-    maximumBytes: state.policy.document.limits.maximum_read_bytes,
-    hashLimitBytes: state.policy.document.limits.maximum_hash_bytes,
-  });
+  let result: Awaited<ReturnType<SecureFilesystem["readScoped"]>>;
+  try {
+    result = await state.filesystem.readScoped({
+      path: input.path, offset: input.offset, length: raw ? input.length : 0,
+      maximumBytes: state.policy.document.limits.maximum_read_bytes,
+      hashLimitBytes: state.policy.document.limits.maximum_hash_bytes,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof SecureFilesystemError) || error.code !== "TARGET_MISSING") throw error;
+    const record = await createToolResult(state.location, request, "READ", input.path, (authority?.data_class ?? "HASH_ONLY") as never,
+      null, 0, 0, sha256Canonical({ path: input.path, outcome: "MISSING" }), "MISSING");
+    // The null value is intentional: absence carries no file digest, size, or mode.
+    return detachedFrozen({ metadata: null as never, dataClass: authority?.data_class ?? "HASH_ONLY", content: null, contentEncoding: "METADATA_ONLY", resultRecord: record });
+  }
   const bytes = Buffer.from(result.dataBase64, "base64");
   const content = raw ? (input.mode === "TEXT" ? decodeUtf8(bytes, "DATA_POLICY_FORBIDS_READ", "Scoped text is not valid UTF-8") : result.dataBase64) : null;
   const outputDigest = raw ? sha256Bytes(bytes) : sha256Canonical(result.metadata);
