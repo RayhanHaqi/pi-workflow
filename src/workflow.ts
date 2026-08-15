@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { constants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, type FileHandle } from "node:fs/promises";
+import { isAbsolute, join, normalize } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
@@ -170,6 +171,64 @@ export class WorkflowValidationError extends Error {
     this.name = "WorkflowValidationError";
     this.code = code;
   }
+}
+
+export const MAX_GOAL_FILE_BYTES = 1_048_576;
+export type GoalFileReadErrorCode = "GOAL_FILE_PATH_INVALID" | "GOAL_FILE_NOT_REGULAR" | "GOAL_FILE_TOO_LARGE" | "GOAL_FILE_READ_FAILED" | "GOAL_FILE_INVALID_UTF8";
+
+/** A typed rejection raised before any Goal-file bytes reach JSON parsing. */
+export class GoalFileReadError extends Error {
+  public constructor(public readonly code: GoalFileReadErrorCode, message: string) {
+    super(message);
+    this.name = "GoalFileReadError";
+  }
+}
+
+function goalFileReadFailure(code: GoalFileReadErrorCode, message: string): never {
+  throw new GoalFileReadError(code, message);
+}
+
+/** Reads only an absolute, normalized, regular Goal file within the fixed byte bound. */
+export async function readGoalFileText(filePath: string): Promise<string> {
+  if (!isAbsolute(filePath) || normalize(filePath) !== filePath) {
+    goalFileReadFailure("GOAL_FILE_PATH_INVALID", "Goal file path must be absolute and normalized");
+  }
+
+  let handle: FileHandle | undefined;
+  let text: string;
+  try {
+    const initial = await lstat(filePath);
+    if (!initial.isFile() || initial.isSymbolicLink()) {
+      goalFileReadFailure("GOAL_FILE_NOT_REGULAR", "Goal file must be a regular non-symlink file");
+    }
+    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) goalFileReadFailure("GOAL_FILE_NOT_REGULAR", "Goal file must be a regular non-symlink file");
+    if (!Number.isSafeInteger(metadata.size) || metadata.size > MAX_GOAL_FILE_BYTES) {
+      goalFileReadFailure("GOAL_FILE_TOO_LARGE", `Goal file exceeds ${MAX_GOAL_FILE_BYTES} bytes`);
+    }
+
+    const bytes = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    const finalMetadata = await handle.stat();
+    if (!finalMetadata.isFile()) goalFileReadFailure("GOAL_FILE_NOT_REGULAR", "Goal file must be a regular non-symlink file");
+    if (!Number.isSafeInteger(finalMetadata.size) || finalMetadata.size > MAX_GOAL_FILE_BYTES || finalMetadata.size !== metadata.size || offset !== bytes.length) {
+      goalFileReadFailure("GOAL_FILE_TOO_LARGE", `Goal file exceeds ${MAX_GOAL_FILE_BYTES} bytes or changed while being read`);
+    }
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+    catch { goalFileReadFailure("GOAL_FILE_INVALID_UTF8", "Goal file is not valid UTF-8"); }
+  } catch (error: unknown) {
+    if (error instanceof GoalFileReadError) throw error;
+    goalFileReadFailure("GOAL_FILE_READ_FAILED", `Goal file could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    await handle?.close();
+  }
+  return text;
 }
 
 export interface WorkflowExecutionHookContext {
