@@ -99,6 +99,12 @@ export interface ControllerVerificationCommand {
   readonly timeout_ms?: number;
 }
 
+export interface StaticApprovedDagTimeBudgets {
+  readonly worker_deadline_ms: number;
+  readonly node_wall_ms: number;
+  readonly workflow_wall_ms: number;
+}
+
 export interface BoundedMutationAuthority {
   readonly verification_commands: readonly ControllerVerificationCommand[];
   readonly dirty_baseline_decisions?: readonly BaselinePathDecision[];
@@ -106,6 +112,8 @@ export interface BoundedMutationAuthority {
   readonly hard_mutation_tool_limit?: 1;
   /** Frozen STATIC_APPROVED_DAG repair edge cap; absent means no repair edge. */
   readonly static_max_attempts_per_leaf?: 1 | 2;
+  /** Owner-approved, frozen STATIC_APPROVED_DAG lifecycle wall budgets. */
+  readonly static_time_budgets?: StaticApprovedDagTimeBudgets;
 }
 
 export interface BaselineApprovalRequest {
@@ -666,13 +674,35 @@ function controllerMutationLimit(authority: BoundedMutationAuthority): number {
   return 1;
 }
 
-function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, staticAttemptsPerLeaf = 1): BudgetDocument {
+function staticTimeBudgets(goal: ReturnType<typeof normalizeGoal>, authority: BoundedMutationAuthority): StaticApprovedDagTimeBudgets | undefined {
+  const supplied = authority.static_time_budgets;
+  if (supplied === undefined) return undefined;
+  if (goal.execution_mode !== "STATIC_APPROVED_DAG") fail("INVALID_STATIC_TIME_BUDGETS", "static time budgets are restricted to STATIC_APPROVED_DAG");
+  const candidate = supplied as unknown as Record<string, unknown>;
+  exactKeys(candidate, ["worker_deadline_ms", "node_wall_ms", "workflow_wall_ms"], "static_time_budgets");
+  const checked = (key: keyof StaticApprovedDagTimeBudgets): number => {
+    const value = candidate[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || !Number.isSafeInteger(value) || value <= 0 || value > 604_800_000) {
+      fail("INVALID_STATIC_TIME_BUDGETS", `static_time_budgets.${key} must be a positive safe integer`);
+    }
+    return value;
+  };
+  const result = { worker_deadline_ms: checked("worker_deadline_ms"), node_wall_ms: checked("node_wall_ms"), workflow_wall_ms: checked("workflow_wall_ms") };
+  if (result.worker_deadline_ms > result.node_wall_ms || result.node_wall_ms > result.workflow_wall_ms) {
+    fail("INVALID_STATIC_TIME_BUDGETS", "static time budgets must satisfy worker <= node <= workflow");
+  }
+  return Object.freeze(result);
+}
+
+function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, staticAttemptsPerLeaf = 1, frozenStaticTimeBudgets?: StaticApprovedDagTimeBudgets): BudgetDocument {
   if (staticAttemptsPerLeaf !== 1 && staticAttemptsPerLeaf !== 2) fail("INVALID_STATIC_REPAIR_EDGE", "STATIC_APPROVED_DAG permits at most one frozen repair edge per node");
   const workers = goal.execution_mode === "STATIC_APPROVED_DAG" ? goal.tasks.length * staticAttemptsPerLeaf : goal.execution_mode === "ROUTED_DAG" ? goal.tasks.length + 2 : 1;
+  const limits = Object.freeze({ max_leaves: goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? 8 : 1, max_attempts_per_leaf: goal.execution_mode === "STATIC_APPROVED_DAG" ? staticAttemptsPerLeaf : 1, max_replans: 0, max_worker_invocations: workers, max_model_turns: workers * 32,
+    max_tool_calls: workers * maxToolCalls, max_input_tokens: 1_000_000, max_output_tokens: 100_000, max_cost_microusd: 5_000_000,
+    max_wall_time_ms: frozenStaticTimeBudgets?.workflow_wall_ms ?? workers * MAX_WALL_TIME_MS,
+    ...(frozenStaticTimeBudgets === undefined ? {} : { static_time_budgets: frozenStaticTimeBudgets }) });
   return identifyContractDocument("pi_gacw_budget_v0", { schema_id: "pi_gacw_budget_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", budget_projection_id: "budget-freeze-v1", budget_sha256: fixed(`budget:${workers}`),
-    limits: { max_leaves: goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? 8 : 1, max_attempts_per_leaf: goal.execution_mode === "STATIC_APPROVED_DAG" ? staticAttemptsPerLeaf : 1, max_replans: 0, max_worker_invocations: workers, max_model_turns: workers * 32,
-      max_tool_calls: workers * maxToolCalls, max_input_tokens: 1_000_000, max_output_tokens: 100_000, max_cost_microusd: 5_000_000, max_wall_time_ms: workers * MAX_WALL_TIME_MS },
-    usage: { worker_invocation: { value: 0, enforcement_class: "HARD_ENFORCEABLE" }, model_turn: { value: 0, enforcement_class: "SOFT_ENFORCEABLE" }, provider_request: { value: null, enforcement_class: "UNAVAILABLE" }, tool_call: { value: 0, enforcement_class: "HARD_ENFORCEABLE" } } }) as BudgetDocument;
+    limits, usage: { worker_invocation: { value: 0, enforcement_class: "HARD_ENFORCEABLE" }, model_turn: { value: 0, enforcement_class: "SOFT_ENFORCEABLE" }, provider_request: { value: null, enforcement_class: "UNAVAILABLE" }, tool_call: { value: 0, enforcement_class: "HARD_ENFORCEABLE" } } }) as BudgetDocument;
 }
 function selectedTaskVerificationCommands(goal: ReturnType<typeof normalizeGoal>, candidate: CandidateTask, verification: ContractDocument["verification_commands"]): ContractDocument["verification_commands"] {
   if (goal.execution_mode !== "STATIC_APPROVED_DAG" || candidate.verification_command_ids === undefined) return verification;
@@ -984,6 +1014,9 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
   let goal: ReturnType<typeof normalizeGoal>;
   try { goal = normalizeGoal(value); } catch (error: unknown) { return { outcome: "BLOCKED", reason: error instanceof Error ? error.message : "INVALID_GOAL", finalState: null }; }
   if (options.authority === undefined) return { outcome: "BLOCKED", reason: "CONTROLLER_VERIFICATION_AUTHORITY_REQUIRED", finalState: null };
+  let requestedStaticTimeBudgets: StaticApprovedDagTimeBudgets | undefined;
+  try { requestedStaticTimeBudgets = staticTimeBudgets(goal, options.authority); }
+  catch (error: unknown) { return { outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "INVALID_STATIC_TIME_BUDGETS"}: ${error.message}` : "INVALID_STATIC_TIME_BUDGETS", finalState: null }; }
   const controllerAbort = new AbortController();
   let cancellationObserved = options.signal?.aborted === true;
   const observeCancellation = (): void => { cancellationObserved = true; controllerAbort.abort(); };
@@ -1030,7 +1063,8 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     const maxM4ToolCalls = MAX_TOOL_CALLS_PER_WORKER;
     const maxM4MutationCalls = controllerMutationLimit(options.authority);
     const route = routeMap(maxM4ToolCalls); const routeApprovalDocument = routeApproval(route); const staticAttemptsPerLeaf = options.authority.static_max_attempts_per_leaf ?? 1;
-    const budgetDocument = budget(goal, maxM4ToolCalls, staticAttemptsPerLeaf); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification));
+    const frozenStaticTimeBudgets = requestedStaticTimeBudgets;
+    const budgetDocument = budget(goal, maxM4ToolCalls, staticAttemptsPerLeaf, frozenStaticTimeBudgets); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification));
     const graph = taskGraph(goal, tasks); const scopeSha = m3ScopeIdentity(goal.scope.editable_paths, goal.scope.frozen_paths);
     const acceptanceSha = sha256Canonical(acceptance(goal, verification as unknown as readonly M4CommandSpecification[]));
     // The staging graph has no M4/M5/worker path. It obtains the exact M3
@@ -1118,12 +1152,30 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     // including the routed planner. The existing approved reducer event roots
     // the exact Contract or Plan evidence that this callback verified.
     await approvalDigest();
-    const invoke = async (operationId: string, task: TaskDocument | null, workerPlan: PlanApprovalDocument | null, profile: "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT", routeRole: BoundedWorkerRoute["logicalRole"]): Promise<ResolvedWorkerInvocation> => {
+    const approvedStaticTimeBudgets = goal.execution_mode === "STATIC_APPROVED_DAG" ? budgetDocument.limits.static_time_budgets : undefined;
+    const workflowStartedAt = approvedStaticTimeBudgets === undefined ? null : Date.now();
+    const assertStaticWorkflowDeadline = (stage: string): void => {
+      if (workflowStartedAt !== null && Date.now() - workflowStartedAt >= approvedStaticTimeBudgets!.workflow_wall_ms) {
+        throw new BoundedWorkflowError("STATIC_WORKFLOW_WALL_DEADLINE_EXCEEDED", `frozen static workflow wall deadline exhausted before ${stage}`);
+      }
+    };
+    const assertStaticNodeDeadline = (startedAt: number, stage: string): void => {
+      if (approvedStaticTimeBudgets === undefined) return;
+      assertStaticWorkflowDeadline(stage);
+      if (Date.now() - startedAt >= approvedStaticTimeBudgets.node_wall_ms) {
+        throw new BoundedWorkflowError("STATIC_NODE_WALL_DEADLINE_EXCEEDED", `frozen static node wall deadline exhausted before ${stage}`);
+      }
+    };
+    const invoke = async (operationId: string, task: TaskDocument | null, workerPlan: PlanApprovalDocument | null, profile: "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT", routeRole: BoundedWorkerRoute["logicalRole"], nodeStartedAt?: number): Promise<ResolvedWorkerInvocation> => {
       assertNotCancelled("worker reservation");
+      if (nodeStartedAt === undefined) assertStaticWorkflowDeadline("worker reservation");
+      else assertStaticNodeDeadline(nodeStartedAt, "worker reservation");
       sources = { ...sources, m3StateTokens: [gateway.acceptedState] };
       const admission = await decision("AUTHORIZE_WORK", `pre-m8-authorize-${operationId}`, { operationId, usageEvidence: usages.slice(publishedUsageCount) });
       publishedUsageCount = usages.length;
       assertNotCancelled("worker invocation");
+      if (nodeStartedAt === undefined) assertStaticWorkflowDeadline("worker invocation");
+      else assertStaticNodeDeadline(nodeStartedAt, "worker invocation");
       if (admission.outcome !== "AUTHORIZE" || admission.reservation === null) throw new BoundedWorkflowError("M5_ADMISSION", admission.blocking_reason ?? "M5 refused worker");
       const selectedRoute = route.routes.find((entry) => entry.logical_role === routeRole);
       if (selectedRoute === undefined) throw new Error("product route is absent");
@@ -1134,7 +1186,10 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         systemPrompt: `Pre-M8 bounded ${profile}; use only supplied M4 tools; no retry, replan, commands, shell, filesystem, or network.`,
         userPrompt: providerVisibleTaskContract(task?.objective ?? goal.objective, readableScope, task?.scope.editable_paths ?? goal.scope.editable_paths, profile === "SOL_PLANNER" ? workerPlan : null, maxM4MutationCalls === 1 ? 1 : null),
         allowedReadPaths: readableScope.regularFilePaths, allowedEditPaths: task?.scope.editable_paths ?? [], maxM4ToolCalls, maxM4MutationCalls,
-        maxModelTurns: (() => { const remaining = admission.budget.find((entry) => entry.dimension === "MODEL_TURN")?.soft_remaining; if (remaining === undefined || remaining === null) throw new BoundedWorkflowError("M5_MODEL_TURN_AUTHORITY", "M5 did not provide an enforceable model-turn admission remainder"); return remaining; })(), deadlineMs: MAX_WALL_TIME_MS, signal: controllerAbort.signal });
+        maxModelTurns: (() => { const remaining = admission.budget.find((entry) => entry.dimension === "MODEL_TURN")?.soft_remaining; if (remaining === undefined || remaining === null) throw new BoundedWorkflowError("M5_MODEL_TURN_AUTHORITY", "M5 did not provide an enforceable model-turn admission remainder"); return remaining; })(),
+        deadlineMs: approvedStaticTimeBudgets?.worker_deadline_ms ?? MAX_WALL_TIME_MS, signal: controllerAbort.signal });
+      if (nodeStartedAt === undefined) assertStaticWorkflowDeadline("worker postflight");
+      else assertStaticNodeDeadline(nodeStartedAt, "worker postflight");
       const [inspection, records, m5Records] = await Promise.all([inspectRunStorage({ stateRoot, runId: RUN_ID }), readBoundedWorkerRecords({ stateRoot, runId: RUN_ID }), readM5ManagedRecords({ stateRoot, runId: RUN_ID })]);
       const persistedInvocation = records.invocations.find((entry) => entry.content_sha256 === execution.invocation.content_sha256); const persistedResult = records.results.find((entry) => entry.content_sha256 === execution.result.content_sha256);
       const reservationStates = m5Records.workflowStates.filter((entry) => entry.content_sha256 === admission.current_state_content_sha256);
@@ -1173,10 +1228,12 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       let staticTransitionIndex = 40;
       let staticStopped = false;
       const staticCommit = async (type: TransitionEvent["event_type"], payload: Record<string, unknown> = {}): Promise<void> => {
+        assertStaticWorkflowDeadline(`static transition ${type}`);
         await commit(type, staticTransitionIndex, payload);
         staticTransitionIndex += 1;
       };
-      const staticVerification = async (task: TaskDocument) => {
+      const staticVerification = async (task: TaskDocument, nodeStartedAt: number) => {
+        assertStaticNodeDeadline(nodeStartedAt, "static verification admission");
         const taskSpecs = task.verification_commands.map((command) => {
           const spec = specs.find((candidate) => candidate.command_id === command.command_id);
           if (spec === undefined) throw new BoundedWorkflowError("STATIC_LEAF_VERIFICATION_AUTHORITY_MISSING", "frozen task verification command is absent from controller authority");
@@ -1185,6 +1242,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         const results: Awaited<ReturnType<typeof gateway.run_verification_command>>["record"][] = [];
         const postflights: M3PostflightDocument[] = [];
         for (const spec of taskSpecs) {
+          assertStaticNodeDeadline(nodeStartedAt, "static verification command admission");
           const tokenBefore = gateway.acceptedState.content_sha256 as Sha256Digest;
           let record: Awaited<ReturnType<typeof gateway.run_verification_command>>["record"] | undefined;
           try {
@@ -1194,6 +1252,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
             record = durable.commandResults.find((candidate) => candidate.command_id === spec.command_id && candidate.state_token_before === tokenBefore);
             if (record === undefined) throw new BoundedWorkflowError("STATIC_LEAF_VERIFICATION_EVIDENCE_MISSING", "failed frozen verification did not retain its command result");
           }
+          assertStaticNodeDeadline(nodeStartedAt, "static verification postflight");
           const durable = await readM5ManagedRecords({ stateRoot, runId: RUN_ID });
           const persisted = durable.commandResults.find((candidate) => candidate.content_sha256 === record.content_sha256);
           const postflight = record.postflight_content_sha256 === null ? undefined : durable.postflights.find((candidate) => candidate.content_sha256 === record.postflight_content_sha256);
@@ -1212,16 +1271,21 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         return { results, postflights };
       };
       for (let index = 0; index < tasks.length && !staticStopped; index += 1) {
+        assertStaticWorkflowDeadline("static node admission");
+        const nodeStartedAt = Date.now();
         await staticCommit("SELECT_READY_LEAF");
+        assertStaticNodeDeadline(nodeStartedAt, "static node admission");
         const taskId = (await expected()).inspection.workflowState!.active_task_id;
         const task = tasks.find((candidate) => candidate.task_id === taskId);
         if (task === undefined) throw new BoundedWorkflowError("STATIC_DAG_READY_NODE_MISSING", "ready-node selection did not identify a frozen task");
         for (let attempt = 1; !staticStopped; attempt += 1) {
-          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", "TERRA_EXECUTOR");
+          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", "TERRA_EXECUTOR", nodeStartedAt);
           if (closeProductiveAuthority(worker)) { staticStopped = true; break; }
+          assertStaticNodeDeadline(nodeStartedAt, "static node mutation postflight");
           await staticCommit("COMPLETE_LEAF_ATTEMPT");
-          const verified = await staticVerification(task);
+          const verified = await staticVerification(task, nodeStartedAt);
           const failure = verified.results.find((record) => record.outcome !== "PASS");
+          assertStaticNodeDeadline(nodeStartedAt, "static node verification transition");
           await staticCommit("PASS_LEAF_POSTFLIGHT");
           if (failure === undefined) {
             await staticCommit("LEAF_VERIFICATION_PASSED");
@@ -1241,6 +1305,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
             operationId: worker.operationId, scopeIdentity: m5.scope_sha256 as Sha256Digest,
             repositoryIdentity: m5.repository_identity_content_sha256 as Sha256Digest, worktreeKey: m5.worktree_key as Sha256Digest,
           };
+          assertStaticNodeDeadline(nodeStartedAt, "static node retry authorization");
           const continuation = await decision("AUTHORIZE_CONTINUATION", `pre-m8-static-repair-${task.task_id}-${attempt}`, {
             operationId: worker.operationId,
             progressEvidence: { claimedKind: "NEW_TEST_EVIDENCE", evidenceContentSha256: [failure.content_sha256 as Sha256Digest] },
@@ -1303,9 +1368,11 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       if (finalState.phase !== "BLOCKED") throw new BoundedWorkflowError("REFUSAL_CLOSEOUT_TERMINAL_INVALID", "resolved refusal did not reach durable BLOCKED terminal state");
       outcome = "BLOCKED"; reason = `WORKER_PRODUCTIVE_REFUSAL:${refusalCode}`;
     } else {
-      for (const spec of specs) { assertNotCancelled("verification command admission"); const result = await gateway.run_verification_command({ commandId: spec.command_id, stateTokenContentSha256: gateway.acceptedState.content_sha256 as Sha256Digest }); commandResults.push(result.record); }
+      for (const spec of specs) { if (goal.execution_mode === "STATIC_APPROVED_DAG") assertStaticWorkflowDeadline("final verification command admission"); assertNotCancelled("verification command admission"); const result = await gateway.run_verification_command({ commandId: spec.command_id, stateTokenContentSha256: gateway.acceptedState.content_sha256 as Sha256Digest }); commandResults.push(result.record); }
+      if (goal.execution_mode === "STATIC_APPROVED_DAG") assertStaticWorkflowDeadline("final postflight");
       assertNotCancelled("final postflight");
       await options.beforeFinalPostflight?.();
+      if (goal.execution_mode === "STATIC_APPROVED_DAG") assertStaticWorkflowDeadline("final postflight");
       assertNotCancelled("final postflight");
       const postflight = await runPostflight({ stateRoot, runId: RUN_ID, acceptedState: gateway.acceptedState, baseline, instructionFiles: [], authorityFiles: [], editablePaths: goal.scope.editable_paths, frozenPaths: goal.scope.frozen_paths, taskScopeIdentity: scopeSha, claimedWorkflowPaths: [], lock: lock! });
       if (canonicalize(postflight.postflight.workflow_owned_delta.map((entry) => entry.path).sort()) !== canonicalize(goal.required_outputs)) throw new BoundedWorkflowError("OUTPUT_DELTA_MISMATCH", "final M3 output delta does not exactly equal expected outputs");

@@ -80,6 +80,32 @@
           "minimum": 1,
           "maximum": 604800000,
           "type": "integer"
+        },
+        "static_time_budgets": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "worker_deadline_ms": {
+              "minimum": 1,
+              "maximum": 604800000,
+              "type": "integer"
+            },
+            "node_wall_ms": {
+              "minimum": 1,
+              "maximum": 604800000,
+              "type": "integer"
+            },
+            "workflow_wall_ms": {
+              "minimum": 1,
+              "maximum": 604800000,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "worker_deadline_ms",
+            "node_wall_ms",
+            "workflow_wall_ms"
+          ]
         }
       },
       "required": [

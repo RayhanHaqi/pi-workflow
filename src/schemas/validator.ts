@@ -450,6 +450,16 @@ export function assertPlanApprovalSemantics(plan: PlanApprovalDocument): void {
       (plan.bindings.logical_routes.length !== 1 || plan.bindings.logical_routes[0]?.logical_role !== "TERRA_EXECUTOR")) {
     throw new ContractValidationError("STATIC_DAG_ROUTE_RESTRICTED", "STATIC_APPROVED_DAG permits only TERRA_EXECUTOR");
   }
+  const timeBudgets = plan.bindings.limits.static_time_budgets;
+  if (timeBudgets !== undefined) {
+    if (plan.bindings.execution_mode !== "STATIC_APPROVED_DAG") {
+      throw new ContractValidationError("STATIC_TIME_BUDGETS_MODE_INVALID", "static time budgets are restricted to STATIC_APPROVED_DAG");
+    }
+    if (timeBudgets.worker_deadline_ms > timeBudgets.node_wall_ms || timeBudgets.node_wall_ms > timeBudgets.workflow_wall_ms ||
+        plan.bindings.limits.max_wall_time_ms !== timeBudgets.workflow_wall_ms) {
+      throw new ContractValidationError("STATIC_TIME_BUDGETS_INVALID", "static time budgets must bind worker <= node <= workflow and the workflow limit");
+    }
+  }
   if (plan.bindings.execution_mode !== "ROUTED_DAG" && plan.bindings.execution_mode !== "STATIC_APPROVED_DAG" && taskCount !== 1) {
     throw new ContractValidationError("ONE_TASK_REQUIRED", `${plan.bindings.execution_mode} requires exactly one task`);
   }

@@ -274,6 +274,12 @@ export const UsageDimensionsSchema = StrictObject({
   tool_call: UsageMeasurementSchema,
 });
 
+export const StaticApprovedDagTimeBudgetsSchema = StrictObject({
+  worker_deadline_ms: Type.Integer({ minimum: 1, maximum: 604_800_000 }),
+  node_wall_ms: Type.Integer({ minimum: 1, maximum: 604_800_000 }),
+  workflow_wall_ms: Type.Integer({ minimum: 1, maximum: 604_800_000 }),
+});
+
 export const LimitEnvelopeSchema = StrictObject({
   max_leaves: Type.Integer({ minimum: 1, maximum: 8 }),
   max_attempts_per_leaf: Type.Integer({ minimum: 1, maximum: 2 }),
@@ -285,6 +291,7 @@ export const LimitEnvelopeSchema = StrictObject({
   max_output_tokens: Type.Integer({ minimum: 1, maximum: 1_000_000_000 }),
   max_cost_microusd: Type.Integer({ minimum: 0, maximum: 1_000_000_000_000 }),
   max_wall_time_ms: Type.Integer({ minimum: 1, maximum: 604_800_000 }),
+  static_time_budgets: Type.Optional(StaticApprovedDagTimeBudgetsSchema),
 });
 
 export const ObjectiveSchema = StrictObject(
