@@ -21,7 +21,7 @@ import {
   type BoundedMutationAuthority,
   type BoundedMutationGoal,
 } from "../src/workflow-controller.js";
-import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
+import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime, type BoundedWorkerTools } from "../src/pi-adapter/bounded-worker.js";
 import { configureM6FauxRuntimeForTests, M6WorkerError, runBoundedPiAgent, runBoundedPiAgentForTests } from "../src/pi-adapter/worker.js";
 import { assertDocumentValid, identifyContractDocument } from "../src/schemas/index.js";
 import { assertM4CanonicalPath } from "../src/secure-fs/path.js";
@@ -34,6 +34,35 @@ type JsonRecord = Record<string, unknown>;
 function record(value: unknown, label: string): JsonRecord {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
   return value as JsonRecord;
+}
+
+function providerReadResult(path: string, offset: number, result: Awaited<ReturnType<BoundedWorkerTools["readPath"]>>) {
+  if (result.outcome === "MISSING") return { content: [{ type: "text", text: `path: ${path}\noutcome: MISSING` }], details: {} };
+  const eof = offset + result.byteCount >= result.metadata.size;
+  return { content: [{ type: "text", text: [`path: ${path}`, `offset: ${offset}`, `byte_count: ${result.byteCount}`, `eof: ${eof}`,
+    ...(eof ? [] : [`next_offset: ${offset + result.byteCount}`]), "content:", result.content ?? ""].join("\n") }], details: {} };
+}
+
+function providerReadWindow(result: unknown, label: string): { readonly path: string; readonly offset: number; readonly byteCount: number; readonly eof: boolean; readonly nextOffset: number | undefined; readonly content: string } {
+  const blocks = record(result, label)["content"];
+  if (!Array.isArray(blocks) || blocks.length !== 1) throw new Error(`${label} must contain one text block`);
+  const text = record(blocks[0], `${label} text block`)["text"];
+  if (typeof text !== "string") throw new Error(`${label} text must be a string`);
+  const boundary = text.indexOf("\ncontent:\n");
+  if (boundary < 0) throw new Error(`${label} must delimit content`);
+  const fields = new Map<string, string>(text.slice(0, boundary).split("\n").map((line) => {
+    const separator = line.indexOf(": ");
+    if (separator <= 0) throw new Error(`${label} metadata line is invalid`);
+    return [line.slice(0, separator), line.slice(separator + 2)];
+  }));
+  const path = fields.get("path"); const offset = fields.get("offset"); const byteCount = fields.get("byte_count"); const eof = fields.get("eof");
+  if (path === undefined || offset === undefined || byteCount === undefined || !/^\d+$/u.test(offset) || !/^\d+$/u.test(byteCount) || (eof !== "true" && eof !== "false")) {
+    throw new Error(`${label} pagination metadata is invalid`);
+  }
+  const nextOffset = fields.get("next_offset");
+  if (eof === "true" && nextOffset !== undefined) throw new Error(`${label} must omit next_offset at eof`);
+  if (eof === "false" && (nextOffset === undefined || !/^\d+$/u.test(nextOffset))) throw new Error(`${label} must include a valid next_offset before eof`);
+  return { path, offset: Number(offset), byteCount: Number(byteCount), eof: eof === "true", nextOffset: nextOffset === undefined ? undefined : Number(nextOffset), content: text.slice(boundary + "\ncontent:\n".length) };
 }
 
 function method(value: JsonRecord, name: string): (...args: readonly unknown[]) => unknown {
@@ -278,7 +307,7 @@ interface PiMutationRuntimeCounters {
 /** Exercises the shared Pi loop with the real bounded-worker tool closures. */
 function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRuntime {
   const providerReadContract = {
-    description: "Read one bounded TEXT window from an allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; offset defaults to 0 and must be a non-negative integer; length defaults to 65536 and must be an integer from 1 through 65536. No mode or metadata arguments are accepted.",
+    description: "Read one bounded TEXT window from an allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; offset and length are byte-based (defaults: 0 and 65536); each call returns at most 65536 bytes. Successful responses include eof and, when eof=false, next_offset; request the next bounded window using next_offset. No mode or metadata arguments are accepted.",
     parameters: { type: "object", additionalProperties: false, required: ["path"], properties: {
       path: { type: "string" }, offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, length: { type: "integer", minimum: 1, maximum: 65_536 },
     } },
@@ -310,7 +339,7 @@ function piMutationRuntime(counters: PiMutationRuntimeCounters): BoundedWorkerRu
               }
               counters.readToolExecutions += 1;
               const result = await tools.readPath(path, offset, length);
-              const providerResult = { content: [{ type: "text", text: result.outcome === "MISSING" ? `path: ${path}\noutcome: MISSING` : result.content ?? "" }], details: {} };
+              const providerResult = providerReadResult(path, offset, result);
               counters.providerReadResults?.push(providerResult);
               return providerResult;
             },
@@ -1222,7 +1251,7 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
     assert.equal(explicitNull.records.mutationReceipts.length, 0, "explicit internal null was not replaced and remained invalid");
   });
 
-  await t.test("provider-visible reads remain text-only", async () => {
+  await t.test("provider-visible short reads include exact content and eof", async () => {
     const root = await fixture();
     const retained = await mkdtemp(join(tmpdir(), "pre-m8-f01-provider-"));
     const providerReadResults: unknown[] = [];
@@ -1231,8 +1260,11 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
     try {
       await run(root, targetGoal("out.txt"), piMutationRuntime(counters), { retainedArtifactRoot: retained });
       assert.equal(counters.readToolExecutions, 1);
-      assert.deepEqual(providerReadResults, [{ content: [{ type: "text", text: "input\n" }], details: {} }]);
-      assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode/u);
+      assert.equal(providerReadResults.length, 1);
+      assert.deepEqual(providerReadWindow(providerReadResults[0], "short provider read"), {
+        path: "verify/input.txt", offset: 0, byteCount: Buffer.byteLength("input\n"), eof: true, nextOffset: undefined, content: "input\n",
+      });
+      assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode|state_token|cas/u);
     } finally {
       configureM6FauxRuntimeForTests(undefined);
       await rm(retained, { recursive: true, force: true });
@@ -1271,14 +1303,14 @@ test("F-01 keeps provider patch CAS metadata controller-owned while preserving i
   });
 });
 
-test("bounded-worker provider read adapter exposes only bounded TEXT windows", async (t) => {
+test("bounded-worker provider read adapter exposes bounded TEXT windows with pagination", async (t) => {
   const report: BoundedPiFauxCall = { name: "submit_worker_report", args: { report: "bounded range report" } };
   const patch: BoundedPiFauxCall = {
     name: "apply_patch_scoped",
     args: { path: "out.txt", operation: "CREATE", replacement_base64: Buffer.from("out\n", "utf8").toString("base64"), expected_preimage_exists: false },
   };
 
-  await t.test("path-only reads default to the first 65536-byte TEXT window and a second window reconstructs a pilot-shaped file", async () => {
+  await t.test("path-only and ranged reads expose bounded byte pagination", async () => {
     const root = await fixture();
     const retained = await mkdtemp(join(tmpdir(), "pre-m8-ranged-read-"));
     const fixtureBytes = Buffer.from("0123456789abcdefghijklmnopqrstuvwxyz".repeat(Math.ceil(70_915 / 36)).slice(0, 70_915), "utf8");
@@ -1289,8 +1321,11 @@ test("bounded-worker provider read adapter exposes only bounded TEXT windows", a
     const providerReadResults: unknown[] = [];
     const counters: PiMutationRuntimeCounters = { readToolExecutions: 0, patchToolExecutions: 0, providerReadResults };
     const providerCalls = installBoundedPiFauxRuntimeCalls([
+      { name: "read_scoped", args: { path: "verify/input.txt" } },
       { name: "read_scoped", args: { path: "verify/large-source.ts" } },
       { name: "read_scoped", args: { path: "verify/large-source.ts", offset: 65_536, length: 65_536 } },
+      { name: "read_scoped", args: { path: "verify/large-source.ts", offset: 17, length: 13 } },
+      { name: "read_scoped", args: { path: "verify/large-source.ts", offset: fixtureBytes.byteLength - 3, length: 10 } },
       patch,
       report,
     ]);
@@ -1301,21 +1336,36 @@ test("bounded-worker provider read adapter exposes only bounded TEXT windows", a
       };
       const result = await run(root, rangedGoal, piMutationRuntime(counters), { retainedArtifactRoot: retained });
       assert.equal(result.outcome, "PASS", result.reason);
-      assert.equal(providerCalls(), 4);
-      assert.equal(counters.readToolExecutions, 2);
+      assert.equal(providerCalls(), 7);
+      assert.equal(counters.readToolExecutions, 5);
       assert.equal(counters.patchToolExecutions, 1);
-      const reads = providerReadResults.map((result) => record(result, "provider read result")["content"]);
-      assert.equal(reads.length, 2);
-      assert.ok(Array.isArray(reads[0]));
-      assert.ok(Array.isArray(reads[1]));
-      const first = record(reads[0][0], "first provider read content")["text"];
-      const second = record(reads[1][0], "second provider read content")["text"];
-      if (typeof first !== "string" || typeof second !== "string") throw new Error("provider read content must be text");
-      assert.equal(Buffer.byteLength(first), 65_536, "path-only read preserves the legacy first-window length");
-      assert.equal(Buffer.byteLength(second), fixtureBytes.byteLength - 65_536, "the second bounded window receives only the remaining bytes");
-      assert.deepEqual(Buffer.concat([Buffer.from(first), Buffer.from(second)]), fixtureBytes, "two individually capped reads reconstruct the exact complete preimage");
+      assert.equal(providerReadResults.length, 5);
+      const [short, first, second, explicitShort, finalShort] = providerReadResults.map((entry, index) => providerReadWindow(entry, `provider read ${index + 1}`));
+      assert.deepEqual(short, {
+        path: "verify/input.txt", offset: 0, byteCount: Buffer.byteLength("input\n"), eof: true, nextOffset: undefined, content: "input\n",
+      });
+      assert.deepEqual(first, {
+        path: "verify/large-source.ts", offset: 0, byteCount: 65_536, eof: false, nextOffset: 65_536, content: fixtureBytes.subarray(0, 65_536).toString("utf8"),
+      });
+      assert.deepEqual(second, {
+        path: "verify/large-source.ts", offset: 65_536, byteCount: fixtureBytes.byteLength - 65_536, eof: true, nextOffset: undefined, content: fixtureBytes.subarray(65_536).toString("utf8"),
+      });
+      assert.deepEqual(Buffer.concat([Buffer.from(first!.content), Buffer.from(second!.content)]), fixtureBytes,
+        "the provider-visible next_offset reconstructs the exact 70915-byte fixture in two windows");
+      assert.deepEqual(explicitShort, {
+        path: "verify/large-source.ts", offset: 17, byteCount: 13, eof: false, nextOffset: 30, content: fixtureBytes.subarray(17, 30).toString("utf8"),
+      });
+      assert.deepEqual(finalShort, {
+        path: "verify/large-source.ts", offset: fixtureBytes.byteLength - 3, byteCount: 3, eof: true, nextOffset: undefined, content: fixtureBytes.subarray(fixtureBytes.byteLength - 3).toString("utf8"),
+      });
+      assert.doesNotMatch(JSON.stringify(providerReadResults), /digest|size|mode|state_token|cas/u);
       const contract = counters.providerReadContract;
       assert.notEqual(contract, undefined);
+      const description = contract!["description"];
+      if (typeof description !== "string") throw new Error("provider read description must be a string");
+      assert.match(description, /offset and length are byte-based/u);
+      assert.match(description, /at most 65536 bytes/u);
+      assert.match(description, /eof/u); assert.match(description, /next_offset/u); assert.match(description, /next bounded window using next_offset/u);
       const parameters = record(contract!["parameters"], "provider read parameters");
       const properties = record(parameters["properties"], "provider read properties");
       assert.deepEqual(Object.keys(properties).sort(), ["length", "offset", "path"]);

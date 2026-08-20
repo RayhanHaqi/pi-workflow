@@ -42,12 +42,13 @@ export interface BoundedWorkerRoute {
 }
 
 export interface BoundedWorkerTools {
-  /** Trusted metadata is internal to this adapter; provider-visible reads remain text-only. */
+  /** Trusted read facts remain internal until the provider projection emits only content and pagination. */
   readonly readPath: (path: string, offset?: number, length?: number) => Promise<
     | {
       readonly content: string | null;
       readonly outcome: "PRESENT";
       readonly resultContentSha256: Sha256Digest;
+      readonly byteCount: number;
       readonly metadata: { readonly digest: Sha256Digest; readonly size: number; readonly mode: number };
     }
     | {
@@ -184,19 +185,24 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
       if (cancelled(input.signal)) throw abortError("PRE_TOOL_ADMISSION");
     };
     const readTool = {
-      name: "read_scoped", label: "Scoped read", description: "Read one bounded TEXT window from an allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; offset defaults to 0 and must be a non-negative integer; length defaults to 65536 and must be an integer from 1 through 65536. No mode or metadata arguments are accepted.",
+      name: "read_scoped", label: "Scoped read", description: "Read one bounded TEXT window from an allowed repository regular file through M4. path must be one canonical repository-relative regular-file path within the frozen allowed read scope; offset and length are byte-based (defaults: 0 and 65536); each call returns at most 65536 bytes. Successful responses include eof and, when eof=false, next_offset; request the next bounded window using next_offset. No mode or metadata arguments are accepted.",
       parameters: { type: "object", additionalProperties: false, required: ["path"], properties: {
         path: { type: "string" }, offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, length: { type: "integer", minimum: 1, maximum: MAX_SCOPED_READ_LENGTH },
       } },
       async execute(_id: string, params: unknown) {
         rejectCancelledToolAdmission();
         const value = toolParams(params);
+        const path = stringParam(value, "path");
+        const offset = boundedIntegerParam(value, "offset", 0, Number.MAX_SAFE_INTEGER, 0);
         const result = await input.tools.readPath(
-          stringParam(value, "path"),
-          boundedIntegerParam(value, "offset", 0, Number.MAX_SAFE_INTEGER, 0),
+          path,
+          offset,
           boundedIntegerParam(value, "length", 1, MAX_SCOPED_READ_LENGTH, MAX_SCOPED_READ_LENGTH),
         );
-        return toolResult(result.outcome === "MISSING" ? `path: ${stringParam(value, "path")}\noutcome: MISSING` : result.content ?? "");
+        if (result.outcome === "MISSING") return toolResult(`path: ${path}\noutcome: MISSING`);
+        const eof = offset + result.byteCount >= result.metadata.size;
+        return toolResult([`path: ${path}`, `offset: ${offset}`, `byte_count: ${result.byteCount}`, `eof: ${eof}`,
+          ...(eof ? [] : [`next_offset: ${offset + result.byteCount}`]), "content:", result.content ?? ""].join("\n"));
       },
     };
     const patchTool = {
@@ -365,6 +371,7 @@ async function runBoundedWorkerImpl(input: RunBoundedWorkerInput, runtime: Bound
         content: result.content,
         outcome: "PRESENT",
         resultContentSha256: result.resultRecord.content_sha256 as Sha256Digest,
+        byteCount: result.resultRecord.byte_count,
         metadata: { digest: result.metadata.digest as Sha256Digest, size: result.metadata.size, mode: result.metadata.mode },
       };
     },
