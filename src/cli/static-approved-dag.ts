@@ -30,13 +30,16 @@ function render(report: unknown): string { return `${JSON.stringify(report)}\n`;
 
 type StaticApprovedDagExecutor = typeof executeStaticApprovedDag;
 type StaticApprovedDagInspector = typeof inspectStaticApprovedDagSpec;
-const invalidArgumentsReport = (reason: string): StaticApprovedDagInspectionReport => ({ classification: "INVALID", spec_version: null, spec_sha256: null, run_label: null, reason, repository: null, graph: null, route: null, budgets: null, verification_commands: null });
+// Pre-execution failures stay mode-specific: execute keeps its pre-inspection INVALID shape, inspect uses the inspection shape.
+const requestsInspection = (argv: readonly string[]): boolean => argv[0] === "inspect";
+const invalidExecutionReport = (reason: string): Record<string, unknown> => ({ classification: "INVALID", spec_sha256: null, run_label: null, reason, workflow: null, telemetry: null });
+const invalidInspectionReport = (reason: string): StaticApprovedDagInspectionReport => ({ classification: "INVALID", spec_version: null, spec_sha256: null, run_label: null, reason, repository: null, graph: null, route: null, budgets: null, verification_commands: null });
 
 export async function main(argv = process.argv.slice(2), execute: StaticApprovedDagExecutor = executeStaticApprovedDag, inspect: StaticApprovedDagInspector = inspectStaticApprovedDagSpec): Promise<number> {
   let argumentsValue: CliArguments;
-  try { argumentsValue = parseArguments(argv); } catch (error: unknown) { process.stdout.write(render(invalidArgumentsReport(error instanceof Error ? error.message : "invalid arguments"))); return 2; }
+  try { argumentsValue = parseArguments(argv); } catch (error: unknown) { process.stdout.write(render(requestsInspection(argv) ? invalidInspectionReport(error instanceof Error ? error.message : "invalid arguments") : invalidExecutionReport(error instanceof Error ? error.message : "invalid arguments"))); return 2; }
   let spec: unknown;
-  try { spec = JSON.parse(await readFile(argumentsValue.specPath, "utf8")) as unknown; } catch (error: unknown) { process.stdout.write(render(invalidArgumentsReport(error instanceof Error ? error.message : "invalid spec file"))); return 2; }
+  try { spec = JSON.parse(await readFile(argumentsValue.specPath, "utf8")) as unknown; } catch (error: unknown) { process.stdout.write(render(argumentsValue.mode === "inspect" ? invalidInspectionReport(error instanceof Error ? error.message : "invalid spec file") : invalidExecutionReport(error instanceof Error ? error.message : "invalid spec file"))); return 2; }
   if (argumentsValue.mode === "inspect") {
     const report = inspect(spec);
     process.stdout.write(render(report));

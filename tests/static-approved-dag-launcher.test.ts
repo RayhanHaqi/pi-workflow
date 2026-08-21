@@ -53,7 +53,8 @@ async function withTemporarySpec(action: (path: string) => Promise<void>): Promi
 async function captureStdout<T>(action: () => Promise<T>): Promise<{ readonly result: T; readonly output: string }> {
   const stdout = process.stdout as unknown as { write(chunk: string | Uint8Array): boolean };
   const originalWrite = stdout.write; let output = "";
-  stdout.write = (chunk) => { output += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"); return true; };
+  // Only the CLI's own writes (always strings) are captured; node:test emits binary reporter chunks through the same patched stream.
+  stdout.write = (chunk) => { if (typeof chunk === "string") output += chunk; return true; };
   try { return { result: await action(), output }; }
   finally { stdout.write = originalWrite; }
 }
@@ -432,4 +433,29 @@ test("CLI inspect emits INSPECTED JSON with exit 0 and never executes; invalid i
       assert.equal((JSON.parse(captured.output) as any).classification, "INVALID", argv.join(" "));
     }
   });
+});
+
+const EXECUTE_INVALID_KEYS = ["classification", "spec_sha256", "run_label", "reason", "workflow", "telemetry"].sort();
+const INSPECT_INVALID_KEYS = ["classification", "spec_version", "spec_sha256", "run_label", "reason", "repository", "graph", "route", "budgets", "verification_commands"].sort();
+
+test("execute-mode pre-execution failures keep the exact legacy execution INVALID shape", async () => {
+  for (const argv of [["missing-spec.json"], [join(ROOT, "..", "outside-spec.json"), "--approved-spec-sha256", digest("a")]]) {
+    let calls = 0;
+    const captured = await captureStdout(() => staticApprovedDagCliMain(argv, async () => { calls += 1; return cliReport("PASS"); }));
+    assert.equal(captured.result, 2); assert.equal(calls, 0);
+    const parsed = JSON.parse(captured.output) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(parsed).sort(), EXECUTE_INVALID_KEYS, argv.join(" "));
+    assert.equal(parsed["classification"], "INVALID"); assert.notEqual(parsed["reason"], "");
+  }
+});
+
+test("inspect-mode pre-execution failures keep the inspection INVALID shape", async () => {
+  for (const argv of [["inspect"], ["inspect", join(ROOT, "..", "missing-inspect-spec.json"), "--approved-spec-sha256", digest("a")], ["inspect", "missing-inspect-spec.json"]]) {
+    let calls = 0;
+    const captured = await captureStdout(() => staticApprovedDagCliMain(argv, async () => { calls += 1; return cliReport("PASS"); }));
+    assert.equal(captured.result, 2); assert.equal(calls, 0);
+    const parsed = JSON.parse(captured.output) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(parsed).sort(), INSPECT_INVALID_KEYS, argv.join(" "));
+    assert.equal(parsed["classification"], "INVALID"); assert.notEqual(parsed["reason"], "");
+  }
 });
