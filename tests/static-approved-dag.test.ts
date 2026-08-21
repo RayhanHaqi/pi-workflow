@@ -128,7 +128,7 @@ function passLeaf(state: WorkflowState, policy: ReducerPolicy, id: string): Work
   return applyEvent(next, policy, "LEAF_VERIFICATION_PASSED");
 }
 
-test("STATIC_APPROVED_DAG accepts only the exact frozen Terra High role and route", () => {
+test("STATIC_APPROVED_DAG accepts only the exact frozen Terra role and canonical route", () => {
   const task = identifyContractDocument("pi_gacw_task_v0", {
     schema_id: "pi_gacw_task_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
     task_projection_id: "task-packet-v1", task_sha256: digest(901), task_id: "terra-task", topological_rank: 0, priority: 0,
@@ -277,5 +277,84 @@ test("STATIC_APPROVED_DAG binds optional selected verifiers fail-closed and pres
 test("verification selection rejects DIRECT_LUNA_HIGH, SINGLE_OWNER_SOL, and ROUTED_DAG before worker/provider admission or mutation", async (t) => {
   for (const execution_mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const) {
     await t.test(execution_mode, async () => { await assertNonStaticSelectionRejectedBeforeAdmission(execution_mode); });
+  }
+});
+
+
+test("STATIC_APPROVED_DAG binds only the owner-selected Terra effort and never escalates", async (t) => {
+  for (const [label, effort] of [["default high", "high"], ["explicit xhigh", "xhigh"]] as const) {
+    await t.test(label, async () => {
+      const root = await selectionFixture();
+      const retained = await mkdtemp(join(tmpdir(), "static-dag-effort-"));
+      const workerEfforts: string[] = [];
+      const planEfforts: string[] = [];
+      configureBoundedWorkerFauxRuntimeForTests(() => ({
+        async execute({ route }) {
+          workerEfforts.push(route.effort);
+          return { completed: false, firstFailureCode: "MODEL_UNAVAILABLE", firstFailureStage: "PROVIDER", cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        },
+      }));
+      try {
+        const result = await runBoundedMutationWorkflowForTests(selectionGoal(["verify-a"]), {
+          cwd: root,
+          authority: { ...selectionAuthority(), ...(effort === "xhigh" ? { static_terra_effort: "xhigh" as const } : {}) },
+          retainedArtifactRoot: retained,
+          approveTasks: async ({ plan, executionAuthority }) => {
+            planEfforts.push(plan!.bindings.logical_routes[0]!.effort);
+            assert.equal(executionAuthority.route_map.routes.find((route) => route.logical_role === "TERRA_EXECUTOR")?.effort, effort);
+            return plan!.content_sha256 as `sha256:${string}`;
+          },
+        });
+        assert.equal(result.outcome, "BLOCKED");
+        assert.deepEqual(planEfforts, [effort]);
+        assert.deepEqual(workerEfforts, [effort]);
+      } finally {
+        configureBoundedWorkerFauxRuntimeForTests(undefined);
+        await rm(retained, { recursive: true, force: true });
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const execution_mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"] as const) {
+    const result = await runBoundedMutationWorkflowForTests({
+      objective: "mode isolation", stop_condition: "stop", execution_mode,
+      scope: execution_mode === "ROUTED_DAG" ? { readable_paths: ["a.txt", "b.txt"], editable_paths: ["a.txt", "b.txt"], frozen_paths: [] } : { readable_paths: ["a.txt"], editable_paths: ["a.txt"], frozen_paths: [] },
+      required_outputs: execution_mode === "ROUTED_DAG" ? ["a.txt", "b.txt"] : ["a.txt"],
+      tasks: execution_mode === "ROUTED_DAG"
+        ? [{ task_id: "a", objective: "a", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [] }, { task_id: "b", objective: "b", editable_paths: ["b.txt"], required_outputs: ["b.txt"], dependencies: ["a"] }]
+        : [{ task_id: "a", objective: "a", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [] }],
+    }, { authority: { verification_commands: [], static_terra_effort: "xhigh" } });
+    assert.equal(result.outcome, "BLOCKED");
+    assert.match(result.reason, /INVALID_STATIC_TERRA_EFFORT/);
+  }
+
+  const rejectedMax = await runBoundedMutationWorkflowForTests(selectionGoal(), {
+    authority: { verification_commands: [], static_terra_effort: "max" as never },
+  });
+  assert.equal(rejectedMax.outcome, "BLOCKED");
+  assert.match(rejectedMax.reason, /INVALID_STATIC_TERRA_EFFORT/);
+
+  const root = await selectionFixture();
+  const retained = await mkdtemp(join(tmpdir(), "static-dag-no-escalation-"));
+  const efforts: string[] = [];
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute({ route }) {
+      efforts.push(route.effort);
+      return { completed: false, firstFailureCode: "MODEL_UNAVAILABLE", firstFailureStage: "PROVIDER", cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+    },
+  }));
+  try {
+    const result = await runBoundedMutationWorkflowForTests(selectionGoal(["verify-a"]), {
+      cwd: root, retainedArtifactRoot: retained,
+      authority: { ...selectionAuthority(), static_max_attempts_per_leaf: 2 },
+      approveTasks: async ({ plan }) => plan!.content_sha256 as `sha256:${string}`,
+    });
+    assert.equal(result.outcome, "BLOCKED");
+    assert.deepEqual(efforts, ["high"]);
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(retained, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
 });

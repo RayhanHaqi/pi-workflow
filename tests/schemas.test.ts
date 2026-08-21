@@ -350,6 +350,11 @@ test("LUNA_MEDIUM is rejected everywhere a route or execution profile can be typ
   invalidEffort.routes[0].effort = "medium";
   expectCode(() => assertSchema("pi_gacw_route_map_v0", invalidEffort), "SCHEMA_INVALID");
 
+  const xhighTerra = routeMapDocument();
+  xhighTerra.routes.find((candidate: MutableJson) => candidate.logical_role === "TERRA_EXECUTOR").effort = "xhigh";
+  assertSchema("pi_gacw_route_map_v0", xhighTerra);
+  assertDocumentValid("pi_gacw_route_map_v0", routeMapDocument());
+
   const invalidModel = routeMapDocument();
   invalidModel.routes[0].model_id = "LUNA_MEDIUM";
   expectCode(() => identifyContractDocument("pi_gacw_route_map_v0", invalidModel), "FORBIDDEN_LUNA_MEDIUM");
@@ -484,6 +489,10 @@ test("route effort, verification-only closeout, owner-acceptance placement, and 
   const luna = invalidEffort.routes.find((candidate: MutableJson) => candidate.logical_role === "LUNA_EXECUTOR");
   luna.effort = "max";
   expectCode(() => reidentify("route-map-v1", invalidEffort), "INVALID_LUNA_EFFORT");
+
+  const xhighTerra = routeMapDocument();
+  xhighTerra.routes.find((candidate: MutableJson) => candidate.logical_role === "TERRA_EXECUTOR").effort = "xhigh";
+  reidentify("route-map-v1", xhighTerra);
 
   const invalidCloseout = routeMapDocument();
   const closeout = invalidCloseout.routes.find((candidate: MutableJson) => candidate.logical_role === "SOL_CLOSEOUT");

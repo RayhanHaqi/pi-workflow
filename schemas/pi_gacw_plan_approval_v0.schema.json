@@ -416,7 +416,8 @@
                 "type": "string",
                 "enum": [
                   "max",
-                  "high"
+                  "high",
+                  "xhigh"
                 ]
               },
               "tool_policy": {

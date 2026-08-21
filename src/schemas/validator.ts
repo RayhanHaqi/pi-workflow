@@ -251,8 +251,8 @@ function assertRouteSemantics(routes: RouteMapDocument["routes"] | PlanApprovalD
       throw new ContractValidationError("INVALID_LUNA_EFFORT", "LUNA_EXECUTOR must use high effort");
     }
     if (route.logical_role === "TERRA_EXECUTOR" &&
-        (route.provider_id !== "openai-codex" || route.model_id !== "gpt-5.6-terra" || route.effort !== "high")) {
-      throw new ContractValidationError("INVALID_TERRA_ROUTE", "TERRA_EXECUTOR must use openai-codex / gpt-5.6-terra / high");
+        (route.provider_id !== "openai-codex" || route.model_id !== "gpt-5.6-terra" || (route.effort !== "high" && route.effort !== "xhigh"))) {
+      throw new ContractValidationError("INVALID_TERRA_ROUTE", "TERRA_EXECUTOR must use openai-codex / gpt-5.6-terra / high or xhigh");
     }
     if (route.logical_role.startsWith("SOL_") && route.effort !== "max") {
       throw new ContractValidationError("INVALID_SOL_EFFORT", `${route.logical_role} must use max effort`);

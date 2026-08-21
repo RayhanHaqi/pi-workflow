@@ -38,7 +38,7 @@ export interface StaticApprovedDagLaunchSpec {
   readonly verification_commands: readonly Readonly<{ readonly command_id: string; readonly executable: string; readonly args: readonly string[]; readonly cwd: string; readonly timeout_ms: number }>[];
   readonly static_time_budgets: StaticApprovedDagTimeBudgets;
   readonly static_max_attempts_per_leaf: 1 | 2;
-  readonly expected_route: Readonly<{ readonly logical_role: "TERRA_EXECUTOR"; readonly provider_id: "openai-codex"; readonly model_id: "gpt-5.6-terra"; readonly effort: "high"; readonly fallback: false }>;
+  readonly expected_route: Readonly<{ readonly logical_role: "TERRA_EXECUTOR"; readonly provider_id: "openai-codex"; readonly model_id: "gpt-5.6-terra"; readonly effort: "high" | "xhigh"; readonly fallback: false }>;
 }
 
 export interface StaticApprovedDagRepositoryFacts {
@@ -129,8 +129,9 @@ export function normalizeStaticApprovedDagLaunchSpec(value: unknown): StaticAppr
   if (budgets.worker_deadline_ms > budgets.node_wall_ms || budgets.node_wall_ms > budgets.workflow_wall_ms) fail("INVALID_SPEC", "static time budgets must satisfy worker <= node <= workflow");
   const attempts = input["static_max_attempts_per_leaf"]; if (attempts !== 1 && attempts !== 2) fail("INVALID_SPEC", "static_max_attempts_per_leaf must be 1 or 2");
   const route = record(input["expected_route"], "expected_route"); exactKeys(route, ["logical_role", "provider_id", "model_id", "effort", "fallback"], "expected_route");
-  if (route["logical_role"] !== "TERRA_EXECUTOR" || route["provider_id"] !== "openai-codex" || route["model_id"] !== "gpt-5.6-terra" || route["effort"] !== "high" || route["fallback"] !== false) fail("STATIC_ROUTE_RESTRICTED", "only frozen Terra High without fallback is authorized");
-  const spec: StaticApprovedDagLaunchSpec = { spec_version: STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION, run_label: taskId(input["run_label"], "run_label"), expected_repository_branch: branch, expected_head: head, expected_tree: tree, goal: normalizeGoal(input["goal"]), verification_commands: normalizeCommands(input["verification_commands"]), static_time_budgets: budgets, static_max_attempts_per_leaf: attempts, expected_route: Object.freeze({ logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false }) };
+  const effort = route["effort"];
+  if (route["logical_role"] !== "TERRA_EXECUTOR" || route["provider_id"] !== "openai-codex" || route["model_id"] !== "gpt-5.6-terra" || (effort !== "high" && effort !== "xhigh") || route["fallback"] !== false) fail("STATIC_ROUTE_RESTRICTED", "only frozen Terra High or XHigh without fallback is authorized");
+  const spec: StaticApprovedDagLaunchSpec = { spec_version: STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION, run_label: taskId(input["run_label"], "run_label"), expected_repository_branch: branch, expected_head: head, expected_tree: tree, goal: normalizeGoal(input["goal"]), verification_commands: normalizeCommands(input["verification_commands"]), static_time_budgets: budgets, static_max_attempts_per_leaf: attempts, expected_route: Object.freeze({ logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort, fallback: false }) };
   for (const task of spec.goal.tasks) if (task.verification_command_ids?.some((id) => !spec.verification_commands.some((command) => command.command_id === id))) fail("INVALID_SPEC", "task selected an unknown verification command");
   return JSON.parse(canonicalize(spec)) as StaticApprovedDagLaunchSpec;
 }
@@ -200,7 +201,7 @@ export async function executeStaticApprovedDag(input: ExecuteStaticApprovedDagIn
     spec = normalizeStaticApprovedDagLaunchSpec(input.spec); digest = sha256Canonical(spec);
     if (input.approved_spec_sha256 !== digest) fail("APPROVED_SPEC_MISMATCH", "--approved-spec-sha256 does not match the normalized launch spec");
     const cwd = input.cwd ?? process.cwd(); await verifyStaticApprovedDagRepositoryPreflight(spec, cwd, input.repositoryFacts);
-    const authority: BoundedMutationAuthority = { verification_commands: spec.verification_commands as readonly ControllerVerificationCommand[], static_time_budgets: spec.static_time_budgets, static_max_attempts_per_leaf: spec.static_max_attempts_per_leaf };
+    const authority: BoundedMutationAuthority = { verification_commands: spec.verification_commands as readonly ControllerVerificationCommand[], static_time_budgets: spec.static_time_budgets, static_max_attempts_per_leaf: spec.static_max_attempts_per_leaf, ...(spec.expected_route.effort === "xhigh" ? { static_terra_effort: "xhigh" as const } : {}) };
     const result = await (input.controller ?? runBoundedMutationWorkflow)(spec.goal, { cwd, authority, approveTasks: createStaticApprovedDagPlanApproval(spec) });
     return resultReport(spec, digest, result, null);
   } catch (error: unknown) {

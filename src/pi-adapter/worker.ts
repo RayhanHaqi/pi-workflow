@@ -765,7 +765,7 @@ function streamOptions(value: unknown): JsonRecord {
   return { ...withoutApiKey, maxRetries: 0, maxRetryDelayMs: 0 };
 }
 
-function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object, effort: "high" | "max" = "high"): PreparedRuntime {
+function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object, effort: "high" | "xhigh" | "max" = "high"): PreparedRuntime {
   const getSupportedThinkingLevels = method(boundary.aiModule, "getSupportedThinkingLevels", "AI module");
   const builtinModels = method(boundary.providersModule, "builtinModels", "providers module");
   const officialIds = verifyOfficialCatalogue(boundary.providersModule);
@@ -1566,7 +1566,7 @@ export interface BoundedPiTool {
 export interface BoundedPiAgentInput {
   readonly providerId: string;
   readonly modelId: string;
-  readonly effort: "high" | "max";
+  readonly effort: "high" | "xhigh" | "max";
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly tools: readonly BoundedPiTool[];

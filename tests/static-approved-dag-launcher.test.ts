@@ -64,10 +64,47 @@ function cliReport(classification: "PASS" | "VALID_BLOCKED" | "INVALID"): any {
 test("launcher normalizes a valid spec, binds its canonical digest, and calls the controller once", async () => {
   const source = spec(); const approved = staticApprovedDagSpecSha256(source); let calls = 0;
   const report = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: approved, cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => {
-    calls += 1; assert.equal(options?.authority?.verification_commands[0]?.timeout_ms, 60_000); assert.deepEqual(options?.authority?.static_time_budgets, { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 });
+    calls += 1; assert.equal(options?.authority?.verification_commands[0]?.timeout_ms, 60_000); assert.deepEqual(options?.authority?.static_time_budgets, { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }); assert.equal(options?.authority?.static_terra_effort, undefined);
     return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any;
   } });
   assert.equal(calls, 1); assert.equal(report.classification, "PASS"); assert.equal(report.telemetry, null);
+});
+
+
+test("XHigh launch specs bind a distinct digest, exact controller authority, and exact plan route", async () => {
+  const high = spec();
+  const xhigh = spec();
+  (xhigh["expected_route"] as any).effort = "xhigh";
+  const normalized = normalizeStaticApprovedDagLaunchSpec(xhigh);
+  assert.equal(normalized.expected_route.effort, "xhigh");
+  assert.notEqual(staticApprovedDagSpecSha256(high), staticApprovedDagSpecSha256(xhigh));
+
+  const approve = createStaticApprovedDagPlanApproval(normalized);
+  assert.equal(await approve(approvalInput(normalized)), digest("c"));
+  for (const mutate of [
+    (input: any) => { input.plan.bindings.logical_routes[0].effort = "high"; },
+    (input: any) => { input.executionAuthority.route_map.routes[0].effort = "high"; },
+  ]) {
+    const candidate = approvalInput(normalized);
+    mutate(candidate);
+    assert.equal(await approve(candidate), null);
+  }
+
+  let calls = 0;
+  const report = await executeStaticApprovedDag({ spec: xhigh, approved_spec_sha256: staticApprovedDagSpecSha256(xhigh), cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => {
+    calls += 1;
+    assert.equal(options?.authority?.static_terra_effort, "xhigh");
+    return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any;
+  } });
+  assert.equal(calls, 1);
+  assert.equal(report.classification, "PASS");
+
+  for (const [source, approved] of [[xhigh, staticApprovedDagSpecSha256(high)], [high, staticApprovedDagSpecSha256(xhigh)]] as const) {
+    let substitutedCalls = 0;
+    const substituted = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: approved, cwd: ROOT, repositoryFacts: facts, controller: async () => { substitutedCalls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
+    assert.equal(substituted.classification, "INVALID");
+    assert.equal(substitutedCalls, 0);
+  }
 });
 
 test("canonical spec digest ignores object key order and wrong approval blocks before controller work", async () => {
@@ -119,6 +156,7 @@ test("plan approval binds plan identity, tasks, scope, commands, budgets, and ro
     (input: any) => { input.plan.bindings.verification_commands[0].cwd = "other"; },
     (input: any) => { input.plan.bindings.limits.static_time_budgets.worker_deadline_ms = 1; },
     (input: any) => { input.plan.bindings.logical_routes[0].model_id = "gpt-5.6-luna"; },
+    (input: any) => { input.plan.bindings.logical_routes[0].effort = "xhigh"; },
   ]) { const candidate = approvalInput(normalized); mutate(candidate); assert.equal(await approve(candidate), null); }
 });
 
@@ -137,9 +175,9 @@ test("result classification distinguishes PASS, admitted BLOCKED, and INVALID", 
   }
 });
 
-test("static route rejects non-static modes, non-Terra routes, XHigh/Max, and fallback", () => {
+test("static route rejects non-static modes, non-Terra routes, Max, and fallback", () => {
   for (const mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"]) { const source = spec(); (source["goal"] as any).execution_mode = mode; assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source)); }
-  for (const route of [{ logical_role: "LUNA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-luna", effort: "high", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "xhigh", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "max", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: true }]) { const source = spec(); source["expected_route"] = route; assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source)); }
+  for (const route of [{ logical_role: "LUNA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-luna", effort: "high", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "max", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: true }]) { const source = spec(); source["expected_route"] = route; assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source)); }
 });
 
 test("launcher has no manual verification path and npm entrypoint builds before the built CLI", async () => {

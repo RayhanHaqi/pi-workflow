@@ -1117,6 +1117,7 @@ function runtimeLogicalRoutes(authority: BoundedExecutionAuthority, mode: M8Mode
   return Object.freeze(logicalRoles(mode).map((role) => {
     const route = authority.route_map.routes.find((entry) => entry.logical_role === role);
     if (route === undefined) binding("native controller route is absent");
+    if (route.effort !== "high" && route.effort !== "max") binding("M8 route effort is unsupported");
     return Object.freeze({ logical_role: route.logical_role, provider_id: route.provider_id, model_id: route.model_id, effort: route.effort,
       tool_policy: Object.freeze({ built_in_tools_disabled: route.tool_policy.built_in_tools_disabled, mutation_tool: route.tool_policy.mutation_tool,
         command_gateway: route.tool_policy.command_gateway, maximum_tool_calls: route.tool_policy.maximum_tool_calls }) });

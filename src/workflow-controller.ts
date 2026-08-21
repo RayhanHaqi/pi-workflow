@@ -69,6 +69,7 @@ const RUN_ID = "pre-m8-bounded";
 const CONTROLLER_VERSION = "0.1.0";
 const MAX_TOOL_CALLS_PER_WORKER = 32;
 const MAX_WALL_TIME_MS = 120_000;
+type StaticTerraEffort = "high" | "xhigh";
 const PRODUCT_ROLES = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
 
 type GoalMode = ConcreteExecutionMode;
@@ -114,6 +115,8 @@ export interface BoundedMutationAuthority {
   readonly static_max_attempts_per_leaf?: 1 | 2;
   /** Owner-approved, frozen STATIC_APPROVED_DAG lifecycle wall budgets. */
   readonly static_time_budgets?: StaticApprovedDagTimeBudgets;
+  /** Explicit owner-selected Terra effort; valid only for STATIC_APPROVED_DAG and defaults to high. */
+  readonly static_terra_effort?: StaticTerraEffort;
 }
 
 export interface BaselineApprovalRequest {
@@ -638,12 +641,12 @@ function event(type: TransitionEvent["event_type"], payload: Record<string, unkn
 function fixed(label: string): Sha256Digest { return sha256Canonical({ protocol: "pre-m8-fixed-v1", label }); }
 function target(repository: M3RepositoryIdentityDocument): ContractDocument["target_repository"] { return { root: repository.git_toplevel, git_common_dir: repository.git_common_dir, worktree: repository.worktree_root, branch: repository.branch ?? "DETACHED", head: repository.head }; }
 
-function routeMap(maxToolCalls: number): RouteMapDocument {
+function routeMap(maxToolCalls: number, staticTerraEffort: StaticTerraEffort): RouteMapDocument {
   const routes = PRODUCT_ROLES.map((logical_role) => {
     const luna = logical_role === "LUNA_EXECUTOR";
     const terra = logical_role === "TERRA_EXECUTOR";
     const mutates = luna || terra || logical_role === "SOL_OWNER";
-    return { logical_role, provider_id: "openai-codex", model_id: terra ? "gpt-5.6-terra" : luna ? "gpt-5.6-luna" : "gpt-5.6-sol", effort: luna || terra ? "high" as const : "max" as const,
+    return { logical_role, provider_id: "openai-codex", model_id: terra ? "gpt-5.6-terra" : luna ? "gpt-5.6-luna" : "gpt-5.6-sol", effort: terra ? staticTerraEffort : luna ? "high" as const : "max" as const,
       tool_policy: { policy_id: `pre-m8-${logical_role.toLowerCase()}`, built_in_tools_disabled: true as const, mutation_tool: mutates ? "APPLY_PATCH_SCOPED" as const : "NONE" as const,
         command_gateway: logical_role === "SOL_CLOSEOUT" ? "VERIFICATION_ONLY" as const : logical_role === "SOL_PLANNER" ? "INSPECTION_ONLY" as const : "TASK_AND_VERIFICATION" as const,
         maximum_tool_calls: maxToolCalls } };
@@ -692,6 +695,14 @@ function staticTimeBudgets(goal: ReturnType<typeof normalizeGoal>, authority: Bo
     fail("INVALID_STATIC_TIME_BUDGETS", "static time budgets must satisfy worker <= node <= workflow");
   }
   return Object.freeze(result);
+}
+
+function staticTerraEffort(goal: ReturnType<typeof normalizeGoal>, authority: BoundedMutationAuthority): StaticTerraEffort {
+  const supplied = authority.static_terra_effort;
+  if (supplied === undefined) return "high";
+  if (goal.execution_mode !== "STATIC_APPROVED_DAG") fail("INVALID_STATIC_TERRA_EFFORT", "static Terra effort is restricted to STATIC_APPROVED_DAG");
+  if (supplied !== "high" && supplied !== "xhigh") fail("INVALID_STATIC_TERRA_EFFORT", "static Terra effort must be high or xhigh");
+  return supplied;
 }
 
 function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, staticAttemptsPerLeaf = 1, frozenStaticTimeBudgets?: StaticApprovedDagTimeBudgets): BudgetDocument {
@@ -1015,8 +1026,9 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
   try { goal = normalizeGoal(value); } catch (error: unknown) { return { outcome: "BLOCKED", reason: error instanceof Error ? error.message : "INVALID_GOAL", finalState: null }; }
   if (options.authority === undefined) return { outcome: "BLOCKED", reason: "CONTROLLER_VERIFICATION_AUTHORITY_REQUIRED", finalState: null };
   let requestedStaticTimeBudgets: StaticApprovedDagTimeBudgets | undefined;
-  try { requestedStaticTimeBudgets = staticTimeBudgets(goal, options.authority); }
-  catch (error: unknown) { return { outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "INVALID_STATIC_TIME_BUDGETS"}: ${error.message}` : "INVALID_STATIC_TIME_BUDGETS", finalState: null }; }
+  let requestedStaticTerraEffort: StaticTerraEffort;
+  try { requestedStaticTimeBudgets = staticTimeBudgets(goal, options.authority); requestedStaticTerraEffort = staticTerraEffort(goal, options.authority); }
+  catch (error: unknown) { return { outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "INVALID_STATIC_AUTHORITY"}: ${error.message}` : "INVALID_STATIC_AUTHORITY", finalState: null }; }
   const controllerAbort = new AbortController();
   let cancellationObserved = options.signal?.aborted === true;
   const observeCancellation = (): void => { cancellationObserved = true; controllerAbort.abort(); };
@@ -1062,7 +1074,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     // owner cap is a distinct bounded mutation-admission limit.
     const maxM4ToolCalls = MAX_TOOL_CALLS_PER_WORKER;
     const maxM4MutationCalls = controllerMutationLimit(options.authority);
-    const route = routeMap(maxM4ToolCalls); const routeApprovalDocument = routeApproval(route); const staticAttemptsPerLeaf = options.authority.static_max_attempts_per_leaf ?? 1;
+    const route = routeMap(maxM4ToolCalls, requestedStaticTerraEffort); const routeApprovalDocument = routeApproval(route); const staticAttemptsPerLeaf = options.authority.static_max_attempts_per_leaf ?? 1;
     const frozenStaticTimeBudgets = requestedStaticTimeBudgets;
     const budgetDocument = budget(goal, maxM4ToolCalls, staticAttemptsPerLeaf, frozenStaticTimeBudgets); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification));
     const graph = taskGraph(goal, tasks); const scopeSha = m3ScopeIdentity(goal.scope.editable_paths, goal.scope.frozen_paths);

@@ -242,7 +242,7 @@ export const RouteSchema = StrictObject({
   logical_role: LogicalModelRoleSchema,
   provider_id: Identifier(),
   model_id: Identifier(),
-  effort: StringEnum(["max", "high"] as const),
+  effort: StringEnum(["max", "high", "xhigh"] as const),
   tool_policy: ToolPolicySchema,
 });
 

@@ -38,7 +38,7 @@ export interface BoundedWorkerRoute {
   readonly logicalRole: "LUNA_EXECUTOR" | "TERRA_EXECUTOR" | "SOL_OWNER" | "SOL_PLANNER" | "SOL_CLOSEOUT";
   readonly providerId: string;
   readonly modelId: string;
-  readonly effort: "high" | "max";
+  readonly effort: "high" | "xhigh" | "max";
 }
 
 export interface BoundedWorkerTools {
