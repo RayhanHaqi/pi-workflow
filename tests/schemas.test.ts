@@ -36,6 +36,7 @@ import {
   objectiveDocument,
   ownerAcceptanceCriterion,
   planApprovalDocument,
+  route,
   routeMapDocument,
   schemaIdByProjection,
   stateIdentities,
@@ -507,6 +508,65 @@ test("route effort, verification-only closeout, owner-acceptance placement, and 
   const tampered = objectiveDocument();
   tampered.objective = "tampered after hashing";
   expectCode(() => assertDocumentValid("pi_gacw_objective_v0", tampered), "IDENTITY_MISMATCH");
+});
+
+test("xhigh effort is semantically contained to TERRA_EXECUTOR routes", async (t) => {
+  const nonTerraRoles = internalLogicalModelRoles.filter((role) => role !== "TERRA_EXECUTOR");
+  for (const role of nonTerraRoles) {
+    await t.test(`${role} / xhigh fails route semantic validation`, () => {
+      const invalid = routeMapDocument();
+      invalid.routes.find((candidate: MutableJson) => candidate.logical_role === role).effort = "xhigh";
+      assert.throws(
+        () => reidentify("route-map-v1", invalid),
+        (error: unknown) => error instanceof ContractValidationError && error.code === "XHIGH_TERRA_ONLY",
+      );
+    });
+  }
+
+  await t.test("TERRA_EXECUTOR / xhigh remains representable in a generic RouteMap", () => {
+    const valid = routeMapDocument();
+    valid.routes.find((candidate: MutableJson) => candidate.logical_role === "TERRA_EXECUTOR").effort = "xhigh";
+    reidentify("route-map-v1", valid);
+  });
+});
+
+function xhighTerraRoute(): MutableJson {
+  const terra = route("TERRA_EXECUTOR");
+  terra.effort = "xhigh";
+  return terra;
+}
+
+test("xhigh effort is admitted in plans only under STATIC_APPROVED_DAG", async (t) => {
+  await t.test("ROUTED_DAG containing TERRA_EXECUTOR / xhigh fails plan semantic validation", () => {
+    const plan = planApprovalDocument("ROUTED_DAG", 2);
+    plan.bindings.logical_routes[plan.bindings.logical_routes.length - 1] = xhighTerraRoute();
+    expectCode(() => reidentify("plan-approval-v1", plan), "XHIGH_REQUIRES_STATIC_DAG");
+  });
+
+  await t.test("DIRECT_LUNA_HIGH containing TERRA_EXECUTOR / xhigh fails plan semantic validation", () => {
+    const plan = planApprovalDocument("DIRECT_LUNA_HIGH", 1);
+    plan.bindings.logical_routes[0] = xhighTerraRoute();
+    expectCode(() => reidentify("plan-approval-v1", plan), "XHIGH_REQUIRES_STATIC_DAG");
+  });
+
+  await t.test("SINGLE_OWNER_SOL containing TERRA_EXECUTOR / xhigh fails plan semantic validation", () => {
+    const plan = planApprovalDocument("SINGLE_OWNER_SOL", 1);
+    plan.bindings.logical_routes[0] = xhighTerraRoute();
+    expectCode(() => reidentify("plan-approval-v1", plan), "XHIGH_REQUIRES_STATIC_DAG");
+  });
+
+  await t.test("STATIC_APPROVED_DAG with TERRA_EXECUTOR / xhigh remains semantically valid", () => {
+    const plan = planApprovalDocument("STATIC_APPROVED_DAG", 2);
+    plan.bindings.logical_routes[0] = xhighTerraRoute();
+    reidentify("plan-approval-v1", plan);
+  });
+
+  await t.test("representative high and max route and plan semantics are unchanged", () => {
+    assertDocumentValid("pi_gacw_route_map_v0", routeMapDocument());
+    assertDocumentValid("pi_gacw_plan_approval_v0", planApprovalDocument("DIRECT_LUNA_HIGH", 1));
+    assertDocumentValid("pi_gacw_plan_approval_v0", planApprovalDocument("ROUTED_DAG", 2));
+    assertDocumentValid("pi_gacw_plan_approval_v0", planApprovalDocument("STATIC_APPROVED_DAG", 2));
+  });
 });
 
 test("schema API rejects unknown schema IDs rather than selecting a fallback", () => {

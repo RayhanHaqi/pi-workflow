@@ -247,6 +247,9 @@ function assertRouteSemantics(routes: RouteMapDocument["routes"] | PlanApprovalD
         throw new ContractValidationError("FORBIDDEN_LUNA_MEDIUM", `${field} cannot select LUNA_MEDIUM`);
       }
     }
+    if (route.effort === "xhigh" && route.logical_role !== "TERRA_EXECUTOR") {
+      throw new ContractValidationError("XHIGH_TERRA_ONLY", `${route.logical_role} cannot use xhigh effort`);
+    }
     if (route.logical_role === "LUNA_EXECUTOR" && route.effort !== "high") {
       throw new ContractValidationError("INVALID_LUNA_EFFORT", "LUNA_EXECUTOR must use high effort");
     }
@@ -439,6 +442,9 @@ export function assertPlanApprovalSemantics(plan: PlanApprovalDocument): void {
   assertAcceptanceSemantics(plan.bindings.acceptance_criteria, plan.bindings.owner_acceptance_criteria);
   assertOwnerAcceptanceMode(plan.bindings.execution_mode, plan.bindings.owner_acceptance_criteria.length);
   assertRouteSemantics(plan.bindings.logical_routes);
+  if (plan.bindings.logical_routes.some((route) => route.effort === "xhigh") && plan.bindings.execution_mode !== "STATIC_APPROVED_DAG") {
+    throw new ContractValidationError("XHIGH_REQUIRES_STATIC_DAG", "xhigh effort is restricted to STATIC_APPROVED_DAG");
+  }
   const taskCount = plan.bindings.dag.ordered_task_packet_identities.length;
   if (taskCount > plan.bindings.limits.max_leaves) {
     throw new ContractValidationError("TASK_GRAPH_ABOVE_LEAF_CAP", `${taskCount} tasks exceeds plan cap`);
