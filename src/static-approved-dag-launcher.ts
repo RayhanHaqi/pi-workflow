@@ -25,6 +25,8 @@ export class StaticApprovedDagLaunchError extends Error {
 }
 
 type JsonRecord = Record<string, unknown>;
+type StaticWorkflowTaskSummary = Readonly<{ readonly task_id: string; readonly status: "PENDING" | "RUNNING" | "PASS" | "BLOCKED"; readonly attempts: number; readonly postflight_completed: boolean; readonly verification_completed: boolean; readonly retry_progress_admitted: boolean }>;
+type StaticWorkflowStateSummary = Readonly<{ readonly outcome: "PASS" | "BLOCKED"; readonly final_phase: string | null; readonly terminal_reason: string | null; readonly active_task_id: string | null; readonly leaves_completed: number | null; readonly terra_worker_invocations: number | null; readonly tasks: readonly StaticWorkflowTaskSummary[] }>;
 type StaticGoalScope = Readonly<{ readonly readable_paths: readonly string[]; readonly editable_paths: readonly string[]; readonly frozen_paths: readonly string[] }>;
 type StaticGoalTask = Readonly<{ readonly task_id: string; readonly objective: string; readonly editable_paths: readonly string[]; readonly required_outputs: readonly string[]; readonly dependencies: readonly string[]; readonly verification_command_ids?: readonly string[] }>;
 
@@ -56,7 +58,9 @@ export interface StaticApprovedDagLaunchReport {
   readonly spec_sha256: Sha256Digest | null;
   readonly run_label: string | null;
   readonly reason: string;
-  readonly workflow: Readonly<{ readonly outcome: "PASS" | "BLOCKED"; readonly final_phase: string | null }> | null;
+  readonly workflow: StaticWorkflowStateSummary | null;
+  readonly evidence_root: string | null;
+  readonly hygiene_warning: string | null;
   readonly telemetry: null;
 }
 
@@ -157,6 +161,41 @@ export async function verifyStaticApprovedDagRepositoryPreflight(spec: StaticApp
 }
 
 function same(left: unknown, right: unknown): boolean { return canonicalize(left) === canonicalize(right); }
+function asRecord(value: unknown): JsonRecord | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null; }
+function stateString(value: unknown): string | null { return typeof value === "string" ? value : null; }
+function stateCount(value: unknown): number | null { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null; }
+function stateBoolean(value: unknown): boolean | null { return typeof value === "boolean" ? value : null; }
+
+const WORKFLOW_TASK_STATUSES = ["PENDING", "RUNNING", "PASS", "BLOCKED"] as const;
+
+/** Project only schema-bounded WorkflowState facts; never fabricate counters or tasks for partial states. */
+function workflowStateSummary(result: BoundedMutationRunResult): StaticWorkflowStateSummary {
+  const state = asRecord(result.finalState);
+  const counters = state === null ? null : asRecord(state["counters"]);
+  const invocations = counters === null ? null : asRecord(counters["worker_invocations"]);
+  const tasks: StaticWorkflowTaskSummary[] = [];
+  if (state !== null && Array.isArray(state["tasks"])) {
+    for (const entry of state["tasks"] as unknown[]) {
+      const task = asRecord(entry);
+      if (task === null) continue;
+      const task_id = stateString(task["task_id"]); const status = stateString(task["status"]);
+      const attempts = stateCount(task["attempts"]); const postflight_completed = stateBoolean(task["postflight_completed"]);
+      const verification_completed = stateBoolean(task["verification_completed"]); const retry_progress_admitted = stateBoolean(task["retry_progress_admitted"]);
+      if (task_id === null || status === null || attempts === null || postflight_completed === null || verification_completed === null || retry_progress_admitted === null) continue;
+      if (!(WORKFLOW_TASK_STATUSES as readonly string[]).includes(status)) continue;
+      tasks.push({ task_id, status: status as StaticWorkflowTaskSummary["status"], attempts, postflight_completed, verification_completed, retry_progress_admitted });
+    }
+  }
+  return Object.freeze({
+    outcome: result.outcome,
+    final_phase: state === null ? null : stateString(state["phase"]),
+    terminal_reason: state === null ? null : stateString(state["terminal_reason"]),
+    active_task_id: state === null ? null : stateString(state["active_task_id"]),
+    leaves_completed: counters === null ? null : stateCount(counters["leaves_completed"]),
+    terra_worker_invocations: invocations === null ? null : stateCount(invocations["terra_executor"]),
+    tasks: Object.freeze(tasks),
+  });
+}
 function selectedCommands(spec: StaticApprovedDagLaunchSpec, task: StaticGoalTask): readonly StaticApprovedDagLaunchSpec["verification_commands"][number][] { const selected = task.verification_command_ids === undefined ? null : new Set(task.verification_command_ids); return spec.verification_commands.filter((command) => selected === null || selected.has(command.command_id)); }
 function commandsMatch(spec: readonly StaticApprovedDagLaunchSpec["verification_commands"][number][], actual: unknown, repositoryRoot: string): boolean {
   if (!Array.isArray(actual) || actual.length !== spec.length) return false;
@@ -192,7 +231,18 @@ function resultReport(spec: StaticApprovedDagLaunchSpec | null, digest: Sha256Di
   const reason = result?.reason ?? (error instanceof Error ? error.message : "launcher failed"); const boundedReason = reason.slice(0, 4096);
   const phase = result?.finalState?.phase ?? null;
   const classification = result?.outcome === "PASS" && phase === "PASS" ? "PASS" : result?.outcome === "BLOCKED" && phase === "BLOCKED" ? "VALID_BLOCKED" : "INVALID";
-  return Object.freeze({ classification, spec_sha256: digest, run_label: spec?.run_label ?? null, reason: boundedReason, workflow: result === null ? null : { outcome: result.outcome, final_phase: phase }, telemetry: null });
+  // No authoritative finalState means no state summary; never fabricate counters or tasks.
+  const workflow = result !== null && asRecord(result.finalState) !== null ? workflowStateSummary(result) : null;
+  return Object.freeze({
+    classification,
+    spec_sha256: digest,
+    run_label: spec?.run_label ?? null,
+    reason: boundedReason,
+    workflow,
+    evidence_root: typeof result?.evidenceRoot === "string" ? result.evidenceRoot : null,
+    hygiene_warning: typeof result?.hygieneWarning === "string" ? result.hygieneWarning.slice(0, 4096) : null,
+    telemetry: null,
+  });
 }
 
 export async function executeStaticApprovedDag(input: ExecuteStaticApprovedDagInput): Promise<StaticApprovedDagLaunchReport> {

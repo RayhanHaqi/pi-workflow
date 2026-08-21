@@ -175,6 +175,97 @@ test("result classification distinguishes PASS, admitted BLOCKED, and INVALID", 
   }
 });
 
+const passFinalState = {
+  phase: "PASS",
+  counters: { worker_invocations: { sol_closeout: 0, luna_executor: 0, terra_executor: 2 }, direct_attempts: 0, single_owner_mutation_cycles: 0, constrained_replans: 0, leaves_completed: 2 },
+  tasks: [
+    { task_id: "a", status: "PASS", attempts: 1, postflight_completed: true, verification_completed: true, retry_progress_admitted: false },
+    { task_id: "b", status: "PASS", attempts: 1, postflight_completed: true, verification_completed: true, retry_progress_admitted: false },
+  ],
+  active_task_id: null,
+  terminal_reason: null,
+};
+const blockedFinalState = {
+  phase: "BLOCKED",
+  counters: { worker_invocations: { sol_closeout: 0, luna_executor: 0, terra_executor: 2 }, direct_attempts: 0, single_owner_mutation_cycles: 0, constrained_replans: 0, leaves_completed: 1 },
+  tasks: [
+    { task_id: "a", status: "PASS", attempts: 1, postflight_completed: true, verification_completed: true, retry_progress_admitted: false },
+    { task_id: "b", status: "RUNNING", attempts: 2, postflight_completed: false, verification_completed: false, retry_progress_admitted: true },
+  ],
+  active_task_id: "b",
+  terminal_reason: "BLOCKED: leaf verification failed after admitted retry",
+};
+
+test("PASS report projects the authoritative final state summary", async () => {
+  let calls = 0;
+  const report = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: passFinalState, evidenceRoot: "/tmp/evidence/run-1" } as any; } });
+  assert.equal(calls, 1);
+  assert.equal(report.classification, "PASS");
+  assert.deepEqual(report.workflow, { outcome: "PASS", final_phase: "PASS", terminal_reason: null, active_task_id: null, leaves_completed: 2, terra_worker_invocations: 2, tasks: passFinalState.tasks });
+  assert.equal(report.evidence_root, "/tmp/evidence/run-1");
+  assert.equal(report.hygiene_warning, null);
+  assert.equal(report.telemetry, null);
+});
+
+test("VALID_BLOCKED report truthfully exposes the blocked final state", async () => {
+  let calls = 0;
+  const report = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "BLOCKED", reason: "BLOCKED: leaf verification failed after admitted retry", finalState: blockedFinalState, evidenceRoot: "/tmp/evidence/run-2", hygieneWarning: "worktree lock release could not be proved" } as any; } });
+  assert.equal(calls, 1);
+  assert.equal(report.classification, "VALID_BLOCKED");
+  assert.deepEqual(report.workflow, { outcome: "BLOCKED", final_phase: "BLOCKED", terminal_reason: "BLOCKED: leaf verification failed after admitted retry", active_task_id: "b", leaves_completed: 1, terra_worker_invocations: 2, tasks: blockedFinalState.tasks });
+  assert.equal(report.evidence_root, "/tmp/evidence/run-2");
+  assert.equal(report.hygiene_warning, "worktree lock release could not be proved");
+  assert.equal(report.telemetry, null);
+});
+
+test("INVALID report keeps the workflow summary null and fabricates no counters or tasks", async () => {
+  let calls = 0;
+  const rejected = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "BLOCKED", reason: "not admitted", finalState: null } as any; } });
+  assert.equal(calls, 1);
+  assert.equal(rejected.classification, "INVALID");
+  assert.equal(rejected.workflow, null);
+  assert.equal(rejected.evidence_root, null);
+  assert.equal(rejected.hygiene_warning, null);
+  assert.equal(rejected.telemetry, null);
+
+  const drifted = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: async () => ({ ...(await facts()), clean: false }), controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: passFinalState } as any; } });
+  assert.equal(calls, 1);
+  assert.equal(drifted.classification, "INVALID");
+  assert.equal(drifted.workflow, null);
+  assert.equal(drifted.evidence_root, null);
+  assert.equal(drifted.hygiene_warning, null);
+});
+
+test("evidence root and hygiene warning are projected only when the controller returned them", async () => {
+  const without = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => ({ outcome: "PASS", reason: "PASS", finalState: passFinalState }) as any });
+  assert.equal(without.classification, "PASS");
+  assert.equal(without.evidence_root, null);
+  assert.equal(without.hygiene_warning, null);
+
+  const bounded = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => ({ outcome: "BLOCKED", reason: "blocked", finalState: blockedFinalState, evidenceRoot: "/tmp/evidence/run-3", hygieneWarning: "x".repeat(5_000) }) as any });
+  assert.equal(bounded.classification, "VALID_BLOCKED");
+  assert.equal(bounded.evidence_root, "/tmp/evidence/run-3");
+  assert.equal(bounded.hygiene_warning, "x".repeat(4_096));
+});
+
+test("state summary projection preserves spec digest, plan approval, route authority, and exactly-once invocation", async () => {
+  const source = spec();
+  assert.equal(staticApprovedDagSpecSha256(source), "sha256:160ad49e913ec431b2e757ee50ab4ba37051a1d0b2a0abd8a242ba65b763e262");
+  const normalized = normalizeStaticApprovedDagLaunchSpec(source);
+  const approve = createStaticApprovedDagPlanApproval(normalized);
+  assert.equal(await approve(approvalInput(normalized)), digest("c"));
+  const mutated = approvalInput(normalized);
+  mutated.executionAuthority.route_map.routes[0].effort = "xhigh";
+  assert.equal(await approve(mutated), null);
+
+  let highCalls = 0; let xhighCalls = 0;
+  const high = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: staticApprovedDagSpecSha256(source), cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => { highCalls += 1; assert.equal(options?.authority?.static_terra_effort, undefined); return { outcome: "PASS", reason: "PASS", finalState: passFinalState } as any; } });
+  const xhigh = spec(); (xhigh["expected_route"] as any).effort = "xhigh";
+  const xhighReport = await executeStaticApprovedDag({ spec: xhigh, approved_spec_sha256: staticApprovedDagSpecSha256(xhigh), cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => { xhighCalls += 1; assert.equal(options?.authority?.static_terra_effort, "xhigh"); return { outcome: "PASS", reason: "PASS", finalState: passFinalState } as any; } });
+  assert.equal(highCalls, 1); assert.equal(xhighCalls, 1);
+  assert.equal(high.classification, "PASS"); assert.equal(xhighReport.classification, "PASS");
+});
+
 test("static route rejects non-static modes, non-Terra routes, Max, and fallback", () => {
   for (const mode of ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG"]) { const source = spec(); (source["goal"] as any).execution_mode = mode; assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source)); }
   for (const route of [{ logical_role: "LUNA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-luna", effort: "high", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "max", fallback: false }, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: true }]) { const source = spec(); source["expected_route"] = route; assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source)); }
