@@ -19,7 +19,8 @@
     "schema:check": "tsx src/schemas/emit.ts --check",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && tsx --test --test-concurrency=1 tests/*.test.ts",
-    "build": "npm run schema:check && tsc -p tsconfig.json && chmod 755 dist/src/cli/pi-workflow.js"
+    "build": "npm run schema:check && tsc -p tsconfig.json && chmod 755 dist/src/cli/pi-workflow.js dist/src/cli/static-approved-dag.js",
+    "static-dag": "npm run build && node dist/src/cli/static-approved-dag.js"
   },
   "exports": {
     "./canonical-json": "./dist/src/canonical-json/index.js",
