@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -10,6 +12,7 @@ import {
   staticApprovedDagSpecSha256,
   type StaticApprovedDagLaunchSpec,
 } from "../src/static-approved-dag-launcher.js";
+import { main as staticApprovedDagCliMain } from "../src/cli/static-approved-dag.js";
 
 const HEAD = "a".repeat(40);
 const TREE = "b".repeat(40);
@@ -40,6 +43,24 @@ function approvalInput(value: StaticApprovedDagLaunchSpec): any {
   return { mode: "STATIC_APPROVED_DAG", plan, tasks, executionAuthority: { plan, mode: "STATIC_APPROVED_DAG", repository: { branch: "main", head: HEAD, head_tree: TREE, worktree_root: ROOT }, route_map: { fallback: false, routes: [route] }, tasks, task_graph: { edges: [{ from: "a", to: "b" }] } } };
 }
 
+async function withTemporarySpec(action: (path: string) => Promise<void>): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), "static-approved-dag-cli-")); const path = join(directory, "spec.json");
+  try { await writeFile(path, JSON.stringify(spec()), "utf8"); await action(path); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+async function captureStdout<T>(action: () => Promise<T>): Promise<{ readonly result: T; readonly output: string }> {
+  const stdout = process.stdout as unknown as { write(chunk: string | Uint8Array): boolean };
+  const originalWrite = stdout.write; let output = "";
+  stdout.write = (chunk) => { output += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"); return true; };
+  try { return { result: await action(), output }; }
+  finally { stdout.write = originalWrite; }
+}
+
+function cliReport(classification: "PASS" | "VALID_BLOCKED" | "INVALID"): any {
+  return { classification, spec_sha256: digest("e"), run_label: "cli-test", reason: classification, workflow: null, telemetry: null };
+}
+
 test("launcher normalizes a valid spec, binds its canonical digest, and calls the controller once", async () => {
   const source = spec(); const approved = staticApprovedDagSpecSha256(source); let calls = 0;
   const report = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: approved, cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => {
@@ -55,6 +76,11 @@ test("canonical spec digest ignores object key order and wrong approval blocks b
   let calls = 0;
   const report = await executeStaticApprovedDag({ spec: first, approved_spec_sha256: digest("0"), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
   assert.equal(calls, 0); assert.equal(report.classification, "INVALID");
+});
+
+test("launcher rejects an unknown field in nested scope authority", () => {
+  const source = spec(); (source["goal"] as any).scope.unapproved_authority = true;
+  assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source));
 });
 
 test("launcher rejects root-like cwd forms and accepts node_modules", () => {
@@ -121,4 +147,33 @@ test("launcher has no manual verification path and npm entrypoint builds before 
   assert.doesNotMatch(source, /node:child_process|execFile\(|spawn\(/u);
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> };
   assert.match(packageJson.scripts["static-dag"]!, /^npm run build && node dist\/src\/cli\/static-approved-dag\.js$/u);
+});
+
+test("CLI rejects every --report request before canonical execution", async () => {
+  for (const reportPath of [join(ROOT, "report.json"), "../outside/report.json", "/tmp/static-approved-dag-report.json"]) {
+    let calls = 0;
+    const captured = await captureStdout(() => staticApprovedDagCliMain(["missing-spec.json", "--approved-spec-sha256", digest("a"), "--report", reportPath], async () => { calls += 1; return cliReport("PASS"); }));
+    assert.equal(captured.result, 2); assert.equal(calls, 0); assert.match(captured.output, /--report is not supported/u);
+  }
+});
+
+test("CLI emits PASS, VALID_BLOCKED, and INVALID reports once on stdout", async () => {
+  await withTemporarySpec(async (path) => {
+    for (const [classification, exitCode] of [["PASS", 0], ["VALID_BLOCKED", 3], ["INVALID", 2]] as const) {
+      let calls = 0;
+      const captured = await captureStdout(() => staticApprovedDagCliMain([path, "--approved-spec-sha256", digest("a")], async () => { calls += 1; return cliReport(classification); }));
+      assert.equal(captured.result, exitCode); assert.equal(calls, 1); assert.equal(JSON.parse(captured.output).classification, classification);
+    }
+  });
+});
+
+test("CLI stdout failure cannot repeat canonical execution", async () => {
+  await withTemporarySpec(async (path) => {
+    const stdout = process.stdout as unknown as { write(chunk: string | Uint8Array): boolean }; const originalWrite = stdout.write; let calls = 0;
+    stdout.write = () => { throw new Error("stdout unavailable"); };
+    try {
+      await assert.rejects(staticApprovedDagCliMain([path, "--approved-spec-sha256", digest("a")], async () => { calls += 1; return cliReport("PASS"); }), /stdout unavailable/u);
+      assert.equal(calls, 1);
+    } finally { stdout.write = originalWrite; }
+  });
 });
