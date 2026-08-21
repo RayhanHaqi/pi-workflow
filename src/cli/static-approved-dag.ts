@@ -3,36 +3,45 @@
 import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { executeStaticApprovedDag } from "../static-approved-dag-launcher.js";
+import { executeStaticApprovedDag, inspectStaticApprovedDagSpec, type StaticApprovedDagInspectionReport } from "../static-approved-dag-launcher.js";
 
-interface CliArguments {
-  readonly specPath: string;
-  readonly approvedSpecSha256: string;
-}
+interface CliArguments { readonly mode: "execute" | "inspect"; readonly specPath: string; readonly approvedSpecSha256: string; }
 
 function parseArguments(argv: readonly string[]): CliArguments {
-  const positional: string[] = []; let approved: string | null = null;
-  for (let index = 0; index < argv.length; index += 1) {
+  const inspect = argv[0] === "inspect"; const positional: string[] = []; let approved: string | null = null;
+  for (let index = inspect ? 1 : 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (argument === "--approved-spec-sha256") { if (approved !== null || argv[index + 1] === undefined) throw new Error("usage: static-approved-dag <spec.json> --approved-spec-sha256 sha256:<digest>"); approved = argv[++index]!; continue; }
     if (argument === "--report") throw new Error("--report is not supported; reports are emitted on stdout only");
     if (argument.startsWith("--")) throw new Error("unknown launcher argument");
     positional.push(argument);
   }
+  if (inspect) {
+    if (positional.length !== 1) throw new Error("usage: static-approved-dag inspect <spec.json>");
+    if (approved !== null) throw new Error("usage: static-approved-dag inspect <spec.json> (inspection never executes and takes no approval digest)");
+    return { mode: "inspect", specPath: positional[0]!, approvedSpecSha256: "" };
+  }
   if (positional.length !== 1 || approved === null) throw new Error("usage: static-approved-dag <spec.json> --approved-spec-sha256 sha256:<digest>");
-  return { specPath: positional[0]!, approvedSpecSha256: approved };
+  return { mode: "execute", specPath: positional[0]!, approvedSpecSha256: approved };
 }
 
 
 function render(report: unknown): string { return `${JSON.stringify(report)}\n`; }
 
 type StaticApprovedDagExecutor = typeof executeStaticApprovedDag;
+type StaticApprovedDagInspector = typeof inspectStaticApprovedDagSpec;
+const invalidArgumentsReport = (reason: string): StaticApprovedDagInspectionReport => ({ classification: "INVALID", spec_version: null, spec_sha256: null, run_label: null, reason, repository: null, graph: null, route: null, budgets: null, verification_commands: null });
 
-export async function main(argv = process.argv.slice(2), execute: StaticApprovedDagExecutor = executeStaticApprovedDag): Promise<number> {
+export async function main(argv = process.argv.slice(2), execute: StaticApprovedDagExecutor = executeStaticApprovedDag, inspect: StaticApprovedDagInspector = inspectStaticApprovedDagSpec): Promise<number> {
   let argumentsValue: CliArguments;
-  try { argumentsValue = parseArguments(argv); } catch (error: unknown) { process.stdout.write(render({ classification: "INVALID", spec_sha256: null, run_label: null, reason: error instanceof Error ? error.message : "invalid arguments", workflow: null, telemetry: null })); return 2; }
+  try { argumentsValue = parseArguments(argv); } catch (error: unknown) { process.stdout.write(render(invalidArgumentsReport(error instanceof Error ? error.message : "invalid arguments"))); return 2; }
   let spec: unknown;
-  try { spec = JSON.parse(await readFile(argumentsValue.specPath, "utf8")) as unknown; } catch (error: unknown) { process.stdout.write(render({ classification: "INVALID", spec_sha256: null, run_label: null, reason: error instanceof Error ? error.message : "invalid spec file", workflow: null, telemetry: null })); return 2; }
+  try { spec = JSON.parse(await readFile(argumentsValue.specPath, "utf8")) as unknown; } catch (error: unknown) { process.stdout.write(render(invalidArgumentsReport(error instanceof Error ? error.message : "invalid spec file"))); return 2; }
+  if (argumentsValue.mode === "inspect") {
+    const report = inspect(spec);
+    process.stdout.write(render(report));
+    return report.classification === "INSPECTED" ? 0 : 2;
+  }
   const report = await execute({ spec, approved_spec_sha256: argumentsValue.approvedSpecSha256, cwd: process.cwd() });
   process.stdout.write(render(report));
   return report.classification === "PASS" ? 0 : report.classification === "VALID_BLOCKED" ? 3 : 2;

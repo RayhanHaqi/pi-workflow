@@ -8,6 +8,7 @@ import {
   STATIC_APPROVED_DAG_COMMAND_TIMEOUT_MAX_MS,
   createStaticApprovedDagPlanApproval,
   executeStaticApprovedDag,
+  inspectStaticApprovedDagSpec,
   normalizeStaticApprovedDagLaunchSpec,
   staticApprovedDagSpecSha256,
   type StaticApprovedDagLaunchSpec,
@@ -304,5 +305,131 @@ test("CLI stdout failure cannot repeat canonical execution", async () => {
       await assert.rejects(staticApprovedDagCliMain([path, "--approved-spec-sha256", digest("a")], async () => { calls += 1; return cliReport("PASS"); }), /stdout unavailable/u);
       assert.equal(calls, 1);
     } finally { stdout.write = originalWrite; }
+  });
+});
+
+function threeNodeSpec(): Record<string, unknown> {
+  const source = spec();
+  source["goal"] = { ...(source["goal"] as any), scope: { readable_paths: ["node_modules"], editable_paths: ["out/a.txt", "out/b.txt", "out/c.txt"], frozen_paths: ["node_modules"] }, required_outputs: ["out/a.txt", "out/b.txt", "out/c.txt"], tasks: [
+    { task_id: "a", objective: "Write a.", editable_paths: ["out/a.txt"], required_outputs: ["out/a.txt"], dependencies: [] },
+    { task_id: "b", objective: "Write b.", editable_paths: ["out/b.txt"], required_outputs: ["out/b.txt"], dependencies: ["a"], verification_command_ids: ["tsx"] },
+    { task_id: "c", objective: "Write c.", editable_paths: ["out/c.txt"], required_outputs: ["out/c.txt"], dependencies: ["a", "b"] },
+  ] };
+  return source;
+}
+
+function reversedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reversedKeys);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).reverse().map(([key, entry]) => [key, reversedKeys(entry)]));
+  return value;
+}
+
+test("inspection projects the exact 3-node topology, verifier selection, route, and budgets", () => {
+  const report = inspectStaticApprovedDagSpec(threeNodeSpec());
+  assert.equal(report.classification, "INSPECTED");
+  assert.equal(report.spec_version, "static-approved-dag-launch-v1");
+  assert.equal(report.run_label, "launcher-test");
+  assert.deepEqual(report.repository, { expected_branch: "main", expected_head: HEAD, expected_tree: TREE });
+  assert.equal(report.graph!.node_count, 3);
+  assert.equal(report.graph!.edge_count, 3);
+  assert.deepEqual(report.graph!.nodes.map((node) => node.task_id), ["a", "b", "c"]);
+  assert.deepEqual(report.graph!.nodes.map((node) => node.dependencies), [[], ["a"], ["a", "b"]]);
+  assert.deepEqual(report.graph!.edges, [{ from: "a", to: "b" }, { from: "a", to: "c" }, { from: "b", to: "c" }]);
+  assert.deepEqual(report.graph!.nodes[0]!.verification_command_ids, ["tsx"]);
+  assert.deepEqual(report.graph!.nodes[1]!.verification_command_ids, ["tsx"]);
+  assert.deepEqual(report.graph!.nodes[2]!.verification_command_ids, ["tsx"]);
+  assert.deepEqual(report.route, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false });
+  assert.deepEqual(report.budgets, { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000, max_attempts_per_leaf: 1 });
+  assert.deepEqual(report.verification_commands, [{ command_id: "tsx", cwd: "node_modules", timeout_ms: 60_000 }]);
+});
+
+test("inspection output is deterministic across equivalent JSON object key order", () => {
+  const first = inspectStaticApprovedDagSpec(threeNodeSpec());
+  const second = inspectStaticApprovedDagSpec(reversedKeys(threeNodeSpec()));
+  assert.deepEqual(first, second);
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  assert.equal(first.spec_sha256, second.spec_sha256);
+});
+
+test("inspection digest equals the canonical spec digest and is accepted unchanged by execution", async () => {
+  const source = threeNodeSpec();
+  const report = inspectStaticApprovedDagSpec(source);
+  assert.equal(report.spec_sha256, staticApprovedDagSpecSha256(source));
+  let calls = 0;
+  const launch = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: report.spec_sha256!, cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
+  assert.equal(calls, 1);
+  assert.equal(launch.classification, "PASS");
+});
+
+test("High and XHigh specs both inspect successfully with distinct efforts and digests", () => {
+  const high = inspectStaticApprovedDagSpec(threeNodeSpec());
+  const xhighSource = threeNodeSpec(); (xhighSource["expected_route"] as any).effort = "xhigh";
+  const xhigh = inspectStaticApprovedDagSpec(xhighSource);
+  assert.equal(high.classification, "INSPECTED"); assert.equal(xhigh.classification, "INSPECTED");
+  assert.equal(high.route!.effort, "high"); assert.equal(xhigh.route!.effort, "xhigh");
+  assert.notEqual(high.spec_sha256, xhigh.spec_sha256);
+});
+
+test("inspection keeps invalid specs INVALID without repair and exposes no projection", () => {
+  for (const mutate of [
+    (source: Record<string, unknown>) => { (source["goal"] as any).scope.unapproved_authority = true; },
+    (source: Record<string, unknown>) => { source["expected_route"] = { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "max", fallback: false }; },
+    (source: Record<string, unknown>) => { source["spec_version"] = "unknown-version"; },
+  ]) {
+    const source = threeNodeSpec(); mutate(source);
+    const report = inspectStaticApprovedDagSpec(source);
+    assert.equal(report.classification, "INVALID");
+    assert.notEqual(report.reason, "");
+    assert.equal(report.spec_sha256, null); assert.equal(report.graph, null); assert.equal(report.route, null);
+  }
+});
+
+test("inspection is provider-free: the CLI inspect path never invokes the executor", async () => {
+  await withTemporarySpec(async (path) => {
+    for (const argv of [["inspect", path], ["inspect", "missing-spec.json"]]) {
+      let calls = 0;
+      const captured = await captureStdout(() => staticApprovedDagCliMain(argv, async () => { calls += 1; return cliReport("PASS"); }));
+      assert.equal(calls, 0, argv.join(" "));
+      assert.equal(JSON.parse(captured.output).classification, argv.length === 2 && argv[1] === path ? "INSPECTED" : "INVALID");
+    }
+  });
+});
+
+test("inspection ignores repository drift while execution still rejects the same spec before the controller", async () => {
+  const drifted = threeNodeSpec(); drifted["expected_head"] = "c".repeat(40);
+  const inspected = inspectStaticApprovedDagSpec(drifted);
+  assert.equal(inspected.classification, "INSPECTED");
+  assert.equal(inspected.repository!.expected_head, "c".repeat(40));
+  let calls = 0;
+  const report = await executeStaticApprovedDag({ spec: drifted, approved_spec_sha256: staticApprovedDagSpecSha256(drifted), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
+  assert.equal(calls, 0);
+  assert.equal(report.classification, "INVALID");
+});
+
+test("inspection output stays privacy-bounded: no objective text, absolute executables, or verifier argv", () => {
+  const text = JSON.stringify(inspectStaticApprovedDagSpec(threeNodeSpec()));
+  assert.doesNotMatch(text, /Write a\.|objective|stop_condition/u);
+  assert.ok(!text.includes(process.execPath));
+  assert.ok(!text.includes("tsx/dist/cli.mjs"));
+  assert.ok(!text.includes(ROOT));
+  assert.ok(!text.includes('"args"'));
+  assert.ok(!text.includes('"executable"'));
+});
+
+test("CLI inspect emits INSPECTED JSON with exit 0 and never executes; invalid inspect forms exit 2", async () => {
+  await withTemporarySpec(async (path) => {
+    let calls = 0;
+    const valid = await captureStdout(() => staticApprovedDagCliMain(["inspect", path], async () => { calls += 1; return cliReport("PASS"); }));
+    assert.equal(valid.result, 0); assert.equal(calls, 0);
+    const parsed = JSON.parse(valid.output) as any;
+    assert.equal(parsed.classification, "INSPECTED");
+    assert.equal(parsed.spec_sha256, staticApprovedDagSpecSha256(spec()));
+    assert.equal(parsed.graph.node_count, 2);
+    assert.equal(parsed.graph.edge_count, 1);
+    for (const argv of [["inspect"], ["inspect", path, "--approved-spec-sha256", digest("a")], ["inspect", path, "extra-arg"], ["inspect", path, "--report", "report.json"], ["inspect", "--unknown", path]]) {
+      const captured = await captureStdout(() => staticApprovedDagCliMain(argv, async () => { calls += 1; return cliReport("PASS"); }));
+      assert.equal(captured.result, 2, argv.join(" ")); assert.equal(calls, 0, argv.join(" "));
+      assert.equal((JSON.parse(captured.output) as any).classification, "INVALID", argv.join(" "));
+    }
   });
 });

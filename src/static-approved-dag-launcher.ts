@@ -142,6 +142,36 @@ export function normalizeStaticApprovedDagLaunchSpec(value: unknown): StaticAppr
 
 export function staticApprovedDagSpecSha256(value: unknown): Sha256Digest { return sha256Canonical(normalizeStaticApprovedDagLaunchSpec(value)); }
 
+export type StaticApprovedDagInspectionReport = Readonly<{ classification: "INSPECTED" | "INVALID"; spec_version: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | null; spec_sha256: Sha256Digest | null; run_label: string | null; reason: string; repository: Readonly<{ expected_branch: string; expected_head: string; expected_tree: string }> | null; graph: Readonly<{ node_count: number; edge_count: number; nodes: readonly Readonly<{ task_id: string; dependencies: readonly string[]; editable_paths: readonly string[]; required_outputs: readonly string[]; verification_command_ids: readonly string[] }>[]; edges: readonly Readonly<{ from: string; to: string }>[] }> | null; route: StaticApprovedDagLaunchSpec["expected_route"] | null; budgets: Readonly<StaticApprovedDagTimeBudgets & { max_attempts_per_leaf: 1 | 2 }> | null; verification_commands: readonly Readonly<{ command_id: string; cwd: string; timeout_ms: number }>[] | null }>;
+
+/**
+ * Provider-free owner inspection of a prospective frozen launch spec: normalize, compute the
+ * canonical digest, and project a bounded topology summary. Pure — no filesystem, Git, prompt,
+ * or controller access; invalid specs stay INVALID via the existing normalization boundary.
+ */
+export function inspectStaticApprovedDagSpec(value: unknown): StaticApprovedDagInspectionReport {
+  try {
+    const spec = normalizeStaticApprovedDagLaunchSpec(value);
+    // Omitted per-task selections mean every defined command applies at execution; project that exact semantics instead of inventing a subset.
+    const nodes = spec.goal.tasks.map((task) => Object.freeze({ task_id: task.task_id, dependencies: task.dependencies, editable_paths: task.editable_paths, required_outputs: task.required_outputs, verification_command_ids: task.verification_command_ids ?? spec.verification_commands.map((command) => command.command_id) }));
+    const edges = spec.goal.tasks.flatMap((task) => task.dependencies.map((dependency) => Object.freeze({ from: dependency, to: task.task_id })));
+    return Object.freeze({
+      classification: "INSPECTED",
+      spec_version: spec.spec_version,
+      spec_sha256: sha256Canonical(spec),
+      run_label: spec.run_label,
+      reason: "INSPECTED",
+      repository: Object.freeze({ expected_branch: spec.expected_repository_branch, expected_head: spec.expected_head, expected_tree: spec.expected_tree }),
+      graph: Object.freeze({ node_count: nodes.length, edge_count: edges.length, nodes: Object.freeze(nodes), edges: Object.freeze(edges) }),
+      route: spec.expected_route,
+      budgets: Object.freeze({ ...spec.static_time_budgets, max_attempts_per_leaf: spec.static_max_attempts_per_leaf }),
+      verification_commands: Object.freeze(spec.verification_commands.map(({ command_id, cwd, timeout_ms }) => Object.freeze({ command_id, cwd, timeout_ms }))),
+    });
+  } catch (error: unknown) {
+    return Object.freeze({ classification: "INVALID", spec_version: null, spec_sha256: null, run_label: null, reason: (error instanceof Error ? error.message : "inspection failed").slice(0, 4096), repository: null, graph: null, route: null, budgets: null, verification_commands: null });
+  }
+}
+
 export async function readStaticApprovedDagRepositoryFacts(cwd: string): Promise<StaticApprovedDagRepositoryFacts> {
   const repository = await resolveRepositoryIdentity({ requestedPath: cwd, requireHead: true });
   const fingerprint = await captureGitState(repository);
