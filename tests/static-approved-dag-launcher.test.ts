@@ -588,3 +588,52 @@ test("V2 execution forwards the exact approved route as controller authority and
   assert.equal(report.workflow!.coding_worker_invocations, 2);
   assert.equal(report.workflow!.terra_worker_invocations, null);
 });
+
+// ---------------------------------------------------------------------------
+// Task 4 narrow repair: real Pi provider/model route identities (Ox Alpha)
+// ---------------------------------------------------------------------------
+
+const OX_ROUTE = { logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false };
+
+test("V2 accepts the exact discovered Ox route identity in normalization and inspection", () => {
+  const source = v2Spec(structuredClone(OX_ROUTE));
+  const normalized = normalizeStaticApprovedDagLaunchSpec(source);
+  assert.deepEqual(normalized.expected_route, OX_ROUTE);
+  const report = inspectStaticApprovedDagSpec(source);
+  assert.equal(report.classification, "INSPECTED");
+  assert.equal(report.spec_version, "static-approved-dag-launch-v2");
+  assert.equal(report.route!.provider_id, "openrouter");
+  assert.equal(report.route!.model_id, "stealth/ox-alpha");
+  assert.equal(report.route!.effort, "high");
+  assert.equal(report.route!.fallback, false);
+  assert.match(report.spec_sha256!, /^sha256:[0-9a-f]{64}$/u);
+});
+
+test("V2 digest binding: swapping stealth/ox-alpha for another/model invalidates the prior approval before the controller", async () => {
+  const source = v2Spec(structuredClone(OX_ROUTE));
+  const approved = inspectStaticApprovedDagSpec(source).spec_sha256!;
+  let calls = 0;
+  const accepted = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: approved, cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
+  assert.equal(calls, 1);
+  assert.equal(accepted.classification, "PASS");
+
+  const substituted = structuredClone(source);
+  (substituted["expected_route"] as any).model_id = "another/model";
+  assert.notEqual(staticApprovedDagSpecSha256(substituted), approved);
+  let substitutedCalls = 0;
+  const rejected = await executeStaticApprovedDag({ spec: substituted, approved_spec_sha256: approved, cwd: ROOT, repositoryFacts: facts, controller: async () => { substitutedCalls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
+  assert.equal(substitutedCalls, 0);
+  assert.equal(rejected.classification, "INVALID");
+  assert.match(rejected.reason, /--approved-spec-sha256 does not match the normalized launch spec/u);
+});
+
+test("V2 routing identity rejects whitespace, control characters, oversize values, and empty identifiers at every layer", () => {
+  const overlong = `a${"x".repeat(128)}`;
+  for (const bad of ["", " openrouter", "openrouter ", "stealth /ox-alpha", "stealth/\nox-alpha", "bad\tid", overlong]) {
+    const source = v2Spec({ ...OX_ROUTE, provider_id: bad });
+    assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "INVALID_SPEC", JSON.stringify(bad));
+    const badModel = v2Spec({ ...OX_ROUTE, model_id: bad });
+    assert.throws(() => normalizeStaticApprovedDagLaunchSpec(badModel), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "INVALID_SPEC", JSON.stringify(bad));
+    assert.equal(inspectStaticApprovedDagSpec(badModel).classification, "INVALID");
+  }
+});

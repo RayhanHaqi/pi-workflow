@@ -38,6 +38,7 @@ import { assertM4CanonicalPath } from "./secure-fs/path.js";
 import {
   assertDocumentValid,
   identifyContractDocument,
+  isBoundedRoutingIdentity,
   type BudgetDocument,
   type ConcreteExecutionMode,
   type ContractDocument,
@@ -730,7 +731,7 @@ function staticCodingRoute(goal: ReturnType<typeof normalizeGoal>, authority: Bo
   if (authority.static_terra_effort !== undefined) fail("INVALID_STATIC_CODING_ROUTE", "static_coding_route and static_terra_effort are mutually exclusive");
   if (supplied.effort !== "high") fail("INVALID_STATIC_CODING_ROUTE", "the static coding route binds exactly high effort; xhigh and max require a future qualification");
   for (const [field, value] of [["provider_id", supplied.provider_id], ["model_id", supplied.model_id]] as const) {
-    if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)) fail("INVALID_STATIC_CODING_ROUTE", `static_coding_route.${field} must be a bounded exact routing identifier`);
+    if (typeof value !== "string" || !isBoundedRoutingIdentity(value)) fail("INVALID_STATIC_CODING_ROUTE", `static_coding_route.${field} must be a bounded exact routing identifier`);
   }
   return { provider_id: supplied.provider_id, model_id: supplied.model_id, effort: "high" };
 }

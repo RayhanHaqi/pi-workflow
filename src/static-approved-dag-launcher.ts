@@ -5,6 +5,7 @@ import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import { resolveRepositoryIdentity } from "./repository/index.js";
 import { assertM4CanonicalPath } from "./secure-fs/path.js";
+import { isBoundedRoutingIdentity } from "./schemas/definitions.js";
 import {
   runBoundedMutationWorkflow,
   type BoundedMutationAuthority,
@@ -129,8 +130,8 @@ function normalizeCommands(value: unknown): StaticApprovedDagLaunchSpec["verific
   }));
 }
 
-/** Exact bounded routing identifier for V2 provider/model identity (routing data, not a free-form label). */
-function routeIdentifier(value: unknown, label: string): string { const result = string(value, label, 128); if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(result)) fail("INVALID_SPEC", `${label} is not a bounded routing identifier`); return result; }
+/** Exact bounded routing identity for V2 provider/model routing data; shared grammar authority lives in schemas/definitions. */
+function routeIdentifier(value: unknown, label: string): string { const result = string(value, label, 128); if (!isBoundedRoutingIdentity(result)) fail("INVALID_SPEC", `${label} is not a bounded routing identifier`); return result; }
 
 /** V1 keeps its frozen legacy Terra normalization byte-for-byte; V2 admits only the capability-oriented coding route. */
 function normalizeExpectedRoute(value: unknown, specVersion: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2): StaticRouteV1 | StaticRouteV2 {

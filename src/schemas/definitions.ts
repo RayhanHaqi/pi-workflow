@@ -39,6 +39,17 @@ export const LOGICAL_MODEL_ROLES = [
 // dummy CODING_EXECUTOR routes.
 export const CODING_EXECUTOR = "CODING_EXECUTOR" as const;
 export const ALL_LOGICAL_MODEL_ROLES = [...LOGICAL_MODEL_ROLES, CODING_EXECUTOR] as const;
+// Exact bounded routing identity for owner-selected V2 coding routes.
+// Opaque routing tokens, not paths: non-empty, bounded, whitespace-free,
+// control-character-free, with no normalization or rewriting. Slash and colon
+// are admitted because real Pi registry identities use them (for example
+// "stealth/ox-alpha", "anthropic/claude-opus-4.5:batch").
+export const ROUTING_IDENTITY_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$";
+const routingIdentityRegExp = new RegExp(ROUTING_IDENTITY_PATTERN, "u");
+/** Single shared predicate for V2 routing identity semantics across launcher normalization, controller authority, and schema validation. */
+export function isBoundedRoutingIdentity(value: string): boolean {
+  return typeof value === "string" && routingIdentityRegExp.test(value);
+}
 export const ENFORCEMENT_CLASSES = [
   "HARD_ENFORCEABLE",
   "SOFT_ENFORCEABLE",
@@ -248,8 +259,8 @@ export const ToolPolicySchema = StrictObject({
 
 export const RouteSchema = StrictObject({
   logical_role: LogicalModelRoleSchema,
-  provider_id: Identifier(),
-  model_id: Identifier(),
+  provider_id: Type.String({ pattern: ROUTING_IDENTITY_PATTERN }),
+  model_id: Type.String({ pattern: ROUTING_IDENTITY_PATTERN }),
   effort: StringEnum(["max", "high", "xhigh"] as const),
   tool_policy: ToolPolicySchema,
 });

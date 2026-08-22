@@ -12,6 +12,7 @@ import {
 import {
   CONCRETE_EXECUTION_MODES,
   LOGICAL_MODEL_ROLES,
+  isBoundedRoutingIdentity,
   getInternalSchemaRegistry,
   type AuthorityLockDocument,
   type BaselineDocument,
@@ -239,9 +240,9 @@ function sameMembers(left: readonly string[], right: readonly string[]): boolean
   return normalizedLeft.length === normalizedRight.length && normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
-/** Exact bounded routing identifier: model identity is owner-selected routing data, never a free-form label. */
+/** Exact bounded routing identity: model identity is owner-selected routing data; the grammar is shared authority from definitions. */
 function boundedRouteIdentifier(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+  return isBoundedRoutingIdentity(value);
 }
 
 function assertRouteSemantics(routes: RouteMapDocument["routes"] | PlanApprovalDocument["bindings"]["logical_routes"]): void {

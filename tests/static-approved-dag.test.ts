@@ -418,3 +418,51 @@ test("V2 coding route authority is bounded: escalation, dual authority, malforme
     return result.then((outcome) => { assert.equal(outcome.outcome, "BLOCKED"); assert.match(outcome.reason, /INVALID_STATIC_CODING_ROUTE/); });
   });
 });
+
+test("STATIC_APPROVED_DAG forwards the exact discovered Ox route (openrouter / stealth/ox-alpha) without rewriting", async () => {
+  const root = await selectionFixture();
+  const retained = await mkdtemp(join(tmpdir(), "static-dag-ox-route-"));
+  const workerRoutes: unknown[] = [];
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute({ route, tools }) {
+      workerRoutes.push({ ...route });
+      const path = ["a.txt", "b.txt"][workerRoutes.length - 1]!;
+      await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      tools.submitReport("ox route mutation");
+      return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+    },
+  }));
+  try {
+    const result = await runBoundedMutationWorkflowForTests(selectionGoal(), {
+      cwd: root, retainedArtifactRoot: retained,
+      authority: { ...selectionAuthority(), static_coding_route: { provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high" } },
+      approveTasks: async ({ plan, executionAuthority }) => {
+        const codingRoute = executionAuthority.route_map.routes.find((route) => route.logical_role === "CODING_EXECUTOR");
+        assert.equal(codingRoute?.provider_id, "openrouter");
+        assert.equal(codingRoute?.model_id, "stealth/ox-alpha");
+        assert.equal(codingRoute?.effort, "high");
+        assert.deepEqual(plan!.bindings.logical_routes.map(({ logical_role, provider_id, model_id, effort }) => ({ logical_role, provider_id, model_id, effort })), [{ logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high" }]);
+        return plan!.content_sha256 as `sha256:${string}`;
+      },
+    });
+    assert.equal(result.outcome, "PASS", result.reason);
+    assert.equal(workerRoutes.length, 2);
+    for (const route of workerRoutes) assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high" });
+    assert.equal(result.finalState?.counters.worker_invocations.terra_executor, 2);
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("V2 controller authority rejects malformed routing identities before admission", async (t) => {
+  const invalidAuthority = async (providerId: string, modelId: string) => {
+    const result = await runBoundedMutationWorkflowForTests(selectionGoal(), { authority: { ...selectionAuthority(), static_coding_route: { provider_id: providerId, model_id: modelId, effort: "high" } } });
+    assert.equal(result.outcome, "BLOCKED");
+    assert.match(result.reason, /INVALID_STATIC_CODING_ROUTE/);
+  };
+  await t.test("empty provider rejects", () => invalidAuthority("", "stealth/ox-alpha"));
+  await t.test("embedded whitespace rejects", () => invalidAuthority("open router", "stealth/ox-alpha"));
+  await t.test("newline rejects", () => invalidAuthority("openrouter", "stealth/\nox-alpha"));
+  await t.test("oversize model id rejects", () => invalidAuthority("openrouter", `a${"x".repeat(128)}`));
+});

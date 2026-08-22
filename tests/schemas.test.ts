@@ -12,6 +12,7 @@ import {
   LOGICAL_MODEL_ROLES as internalLogicalModelRoles,
   WORKFLOW_PHASES as internalWorkflowPhases,
   getInternalSchemaRegistry,
+  isBoundedRoutingIdentity,
 } from "../src/schemas/definitions.js";
 import {
   SCHEMA_IDS,
@@ -601,12 +602,29 @@ test("CODING_EXECUTOR routes carry exact bounded routing identity under high eff
     expectCode(() => reidentify("route-map-v1", map), "INVALID_CODING_ROUTE");
   });
 
-  await t.test("CODING_EXECUTOR with an unbounded provider identifier fails route semantic validation", () => {
+  await t.test("CODING_EXECUTOR with an unbounded provider identifier fails document validation", () => {
     const map = routeMapDocument();
-    // A colon passes the structural identifier pattern but fails the exact
-    // bounded routing-identifier semantics.
-    (map.routes as MutableJson[]).push(codingRoute({ provider_id: "bad:provider" }));
-    expectCode(() => reidentify("route-map-v1", map), "INVALID_CODING_ROUTE");
+    // Whitespace is never routing identity; the shared bounded grammar rejects it.
+    (map.routes as MutableJson[]).push(codingRoute({ provider_id: "bad provider" }));
+    assert.throws(() => reidentify("route-map-v1", map), (error: unknown) => error instanceof ContractValidationError);
+  });
+
+  await t.test("the shared routing identity predicate admits real Pi registry shapes and rejects malformed values", () => {
+    for (const accepted of ["openrouter", "stealth/ox-alpha", "anthropic/claude-opus-4.5:batch", "gpt-5.6-terra", `a${".".repeat(127)}`]) {
+      assert.equal(isBoundedRoutingIdentity(accepted), true, accepted);
+    }
+    for (const rejected of ["", " openrouter", "openrouter ", "stealth /ox-alpha", "stealth/\nox-alpha", "bad\tprovider", `a${"x".repeat(128)}`, "/leading-slash", ":leading-colon"]) {
+      assert.equal(isBoundedRoutingIdentity(rejected), false, JSON.stringify(rejected));
+    }
+  });
+
+  await t.test("RouteMap and Plan semantics accept CODING_EXECUTOR with the exact discovered Ox identity", () => {
+    const map = routeMapDocument();
+    (map.routes as MutableJson[]).push(codingRoute({ provider_id: "openrouter", model_id: "stealth/ox-alpha" }));
+    reidentify("route-map-v1", map);
+    const plan = planApprovalDocument("STATIC_APPROVED_DAG");
+    plan.bindings.logical_routes = [codingRoute({ provider_id: "openrouter", model_id: "stealth/ox-alpha" })];
+    reidentify("plan-approval-v1", plan);
   });
 
   await t.test("STATIC_APPROVED_DAG plan admits exactly one CODING_EXECUTOR route", () => {
