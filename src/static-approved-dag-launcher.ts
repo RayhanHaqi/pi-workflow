@@ -267,6 +267,19 @@ function commandsMatch(spec: readonly StaticApprovedDagLaunchSpec["verification_
   });
 }
 
+/** TaskGraph and PlanApproval identity projections treat edges as a set; match the projected representation, not insertion order. */
+function edgeIdentity(value: unknown): string | null {
+  const record = asRecord(value);
+  if (record === null || Object.keys(record).sort().join(",") !== "from,to") return null;
+  return typeof record["from"] === "string" && typeof record["to"] === "string" ? `${record["from"]}\u0000${record["to"]}` : null;
+}
+function sameEdgeSet(actual: unknown, expected: readonly Readonly<{ readonly from: string; readonly to: string }>[]): boolean {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  const identities: string[] = [];
+  for (const entry of actual) { const identity = edgeIdentity(entry); if (identity === null) return false; identities.push(identity); }
+  return same(identities.sort(), expected.map((edge) => `${edge.from}\u0000${edge.to}`).sort());
+}
+
 /** Deterministic parent-side authority check; it does not construct a plan or execute work. */
 export function createStaticApprovedDagPlanApproval(spec: StaticApprovedDagLaunchSpec): NonNullable<BoundedMutationOptions["approveTasks"]> {
   return async ({ mode, plan, tasks, executionAuthority }) => {
@@ -277,7 +290,7 @@ export function createStaticApprovedDagPlanApproval(spec: StaticApprovedDagLaunc
     const executorRole = spec.expected_route.logical_role;
     const route = { logical_role: spec.expected_route.logical_role, provider_id: spec.expected_route.provider_id, model_id: spec.expected_route.model_id, effort: spec.expected_route.effort };
     if (executionAuthority.route_map.fallback !== false || !same(bindings.logical_routes.map(({ logical_role, provider_id, model_id, effort }) => ({ logical_role, provider_id, model_id, effort })), [route]) || !same(executionAuthority.route_map.routes.filter((candidate) => candidate.logical_role === executorRole).map(({ logical_role, provider_id, model_id, effort }) => ({ logical_role, provider_id, model_id, effort })), [route]) || !commandsMatch(spec.verification_commands, bindings.verification_commands, executionAuthority.repository.worktree_root)) return null;
-    if (tasks.length !== executionAuthority.tasks.length || tasks.some((task, index) => task.content_sha256 !== executionAuthority.tasks[index]?.content_sha256) || executionAuthority.tasks.length !== spec.goal.tasks.length || !same(executionAuthority.task_graph?.edges, spec.goal.tasks.flatMap((task) => task.dependencies.map((dependency) => ({ from: dependency, to: task.task_id }))))) return null;
+    if (tasks.length !== executionAuthority.tasks.length || tasks.some((task, index) => task.content_sha256 !== executionAuthority.tasks[index]?.content_sha256) || executionAuthority.tasks.length !== spec.goal.tasks.length || !sameEdgeSet(executionAuthority.task_graph?.edges, spec.goal.tasks.flatMap((task) => task.dependencies.map((dependency) => ({ from: dependency, to: task.task_id }))))) return null;
     for (let index = 0; index < spec.goal.tasks.length; index += 1) {
       const expected = spec.goal.tasks[index]!; const actual = executionAuthority.tasks[index]!;
       if (actual.task_id !== expected.task_id || actual.objective !== expected.objective || actual.assigned_role !== executorRole || actual.write_owner !== expected.task_id || !same(actual.dependencies, expected.dependencies) || !same(actual.scope, { readable_paths: spec.goal.scope.readable_paths, editable_paths: expected.editable_paths, frozen_paths: spec.goal.scope.frozen_paths }) || !same(actual.required_inputs, spec.goal.scope.readable_paths) || !same(actual.required_outputs, expected.required_outputs) || !commandsMatch(selectedCommands(spec, expected), actual.verification_commands, executionAuthority.repository.worktree_root)) return null;
