@@ -29,7 +29,7 @@
     },
     "routes": {
       "minItems": 8,
-      "maxItems": 8,
+      "maxItems": 9,
       "uniqueItems": true,
       "type": "array",
       "items": {
@@ -46,7 +46,8 @@
               "LUNA_EXECUTOR",
               "TERRA_EXECUTOR",
               "BENCHMARK_VERIFIER",
-              "BENCHMARK_SELECTOR"
+              "BENCHMARK_SELECTOR",
+              "CODING_EXECUTOR"
             ]
           },
           "provider_id": {

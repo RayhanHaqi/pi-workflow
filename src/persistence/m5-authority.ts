@@ -63,6 +63,11 @@ function architectureWorkerLimit(policy: M5ControlPolicyDocument, state: Workflo
   return Math.min(20, 2 * policy.route_facts.leaf_count + 4);
 }
 
+/** The static executor role is bound by the frozen policy's reservation envelopes, so legacy V1 and V2 coding policies each keep their exact role. */
+function staticExecutorRole(policy: M5ControlPolicyDocument): "TERRA_EXECUTOR" | "CODING_EXECUTOR" {
+  return policy.role_reservation_envelopes.some((entry) => entry.logical_role === "CODING_EXECUTOR") ? "CODING_EXECUTOR" : "TERRA_EXECUTOR";
+}
+
 function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5ControlPolicyDocument, state: WorkflowState): string | null {
   if (value.run_id !== policy.run_id || value.repository_identity_content_sha256 !== policy.repository_identity_content_sha256 || value.worktree_key !== policy.worktree_key ||
       value.policy_content_sha256 !== policy.content_sha256 || value.objective_sha256 !== policy.objective_sha256 || value.contract_sha256 !== policy.contract_sha256 ||
@@ -110,8 +115,8 @@ function decisionSemanticError(value: M5ControlDecisionDocument, policy: M5Contr
     if (envelope.logical_role !== value.reservation.logical_role || envelope.purpose !== value.reservation.purpose || canonicalize(envelope.amounts) !== canonicalize(value.reservation.amounts)) return "Reservation envelope is false";
     const expectedRole = value.current_state_content_sha256 === state.content_sha256
       ? state.phase === "READY" ? "SOL_CLOSEOUT" : state.phase === "REPLAN_REQUIRED" ? "SOL_REPLAN" : state.phase === "SINGLE_OWNER_FAST_PREFLIGHT" ? "SOL_OWNER"
-        : state.phase === "ROUTE_SELECTED" ? state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : state.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR"
-          : state.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR"
+        : state.phase === "ROUTE_SELECTED" ? state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : state.execution_mode === "STATIC_APPROVED_DAG" ? staticExecutorRole(policy) : "LUNA_EXECUTOR"
+          : state.execution_mode === "STATIC_APPROVED_DAG" ? staticExecutorRole(policy) : "LUNA_EXECUTOR"
       : null;
     if (expectedRole !== null && value.reservation.logical_role !== expectedRole) return "Reservation role is false for the current phase";
   }

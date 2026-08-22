@@ -575,3 +575,49 @@ test("schema API rejects unknown schema IDs rather than selecting a fallback", (
     (error: unknown) => error instanceof ContractValidationError && error.code === "UNKNOWN_SCHEMA",
   );
 });
+
+test("CODING_EXECUTOR routes carry exact bounded routing identity under high effort only", async (t) => {
+  const codingRoute = (overrides: MutableJson = {}): MutableJson => ({
+    logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high",
+    tool_policy: { policy_id: "tools-coding_executor", built_in_tools_disabled: true, mutation_tool: "APPLY_PATCH_SCOPED", command_gateway: "TASK_AND_VERIFICATION", maximum_tool_calls: 100 },
+    ...overrides,
+  });
+
+  await t.test("a generic RouteMap admits CODING_EXECUTOR with owner-selected provider/model routing data", () => {
+    const map = routeMapDocument();
+    (map.routes as MutableJson[]).push(codingRoute());
+    reidentify("route-map-v1", map);
+  });
+
+  await t.test("CODING_EXECUTOR / xhigh fails route semantic validation", () => {
+    const map = routeMapDocument();
+    (map.routes as MutableJson[]).push(codingRoute({ effort: "xhigh" }));
+    expectCode(() => reidentify("route-map-v1", map), "XHIGH_TERRA_ONLY");
+  });
+
+  await t.test("CODING_EXECUTOR / max fails route semantic validation", () => {
+    const map = routeMapDocument();
+    (map.routes as MutableJson[]).push(codingRoute({ effort: "max" }));
+    expectCode(() => reidentify("route-map-v1", map), "INVALID_CODING_ROUTE");
+  });
+
+  await t.test("CODING_EXECUTOR with an unbounded provider identifier fails route semantic validation", () => {
+    const map = routeMapDocument();
+    // A colon passes the structural identifier pattern but fails the exact
+    // bounded routing-identifier semantics.
+    (map.routes as MutableJson[]).push(codingRoute({ provider_id: "bad:provider" }));
+    expectCode(() => reidentify("route-map-v1", map), "INVALID_CODING_ROUTE");
+  });
+
+  await t.test("STATIC_APPROVED_DAG plan admits exactly one CODING_EXECUTOR route", () => {
+    const plan = planApprovalDocument("STATIC_APPROVED_DAG");
+    plan.bindings.logical_routes = [codingRoute()];
+    reidentify("plan-approval-v1", plan);
+  });
+
+  await t.test("STATIC_APPROVED_DAG plan still rejects non-executor routes", () => {
+    const plan = planApprovalDocument("STATIC_APPROVED_DAG");
+    plan.bindings.logical_routes = [route("LUNA_EXECUTOR")];
+    expectCode(() => reidentify("plan-approval-v1", plan), "STATIC_DAG_ROUTE_RESTRICTED");
+  });
+});

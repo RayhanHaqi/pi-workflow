@@ -358,3 +358,63 @@ test("STATIC_APPROVED_DAG binds only the owner-selected Terra effort and never e
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("STATIC_APPROVED_DAG forwards the exact V2 coding route to the bounded worker without substitution", async () => {
+  const root = await selectionFixture();
+  const retained = await mkdtemp(join(tmpdir(), "static-dag-coding-route-"));
+  const workerRoutes: unknown[] = [];
+  const planRoutes: unknown[] = [];
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute({ route, tools }) {
+      workerRoutes.push({ ...route });
+      const path = ["a.txt", "b.txt"][workerRoutes.length - 1]!;
+      await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      tools.submitReport("coding executor mutation");
+      return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+    },
+  }));
+  try {
+    const result = await runBoundedMutationWorkflowForTests(selectionGoal(), {
+      cwd: root, retainedArtifactRoot: retained,
+      authority: { ...selectionAuthority(), static_coding_route: { provider_id: "provider-a", model_id: "model-a", effort: "high" } },
+      approveTasks: async ({ plan, executionAuthority }) => {
+        planRoutes.push(plan!.bindings.logical_routes.map(({ logical_role, provider_id, model_id, effort }) => ({ logical_role, provider_id, model_id, effort })));
+        const codingRoute = executionAuthority.route_map.routes.find((route) => route.logical_role === "CODING_EXECUTOR");
+        assert.equal(codingRoute?.provider_id, "provider-a");
+        assert.equal(codingRoute?.model_id, "model-a");
+        assert.equal(codingRoute?.effort, "high");
+        assert.equal(executionAuthority.route_map.fallback, false);
+        return plan!.content_sha256 as `sha256:${string}`;
+      },
+    });
+    assert.equal(result.outcome, "PASS", result.reason);
+    assert.deepEqual(planRoutes, [[{ logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high" }]]);
+    assert.equal(workerRoutes.length, 2);
+    for (const route of workerRoutes) assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "provider-a", modelId: "model-a", effort: "high" });
+    // The legacy persisted storage slot keeps counting static coding invocations.
+    assert.equal(result.finalState?.counters.worker_invocations.terra_executor, 2);
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("V2 coding route authority is bounded: escalation, dual authority, malformed identity, and non-static modes reject before admission", async (t) => {
+  const invalidAuthority = async (authority: BoundedMutationAuthority, pattern: RegExp) => {
+    const result = await runBoundedMutationWorkflowForTests(selectionGoal(), { authority });
+    assert.equal(result.outcome, "BLOCKED");
+    assert.match(result.reason, pattern);
+  };
+  await t.test("xhigh effort rejects", () => invalidAuthority({ ...selectionAuthority(), static_coding_route: { provider_id: "provider-a", model_id: "model-a", effort: "xhigh" as never } }, /INVALID_STATIC_CODING_ROUTE/));
+  await t.test("max effort rejects", () => invalidAuthority({ ...selectionAuthority(), static_coding_route: { provider_id: "provider-a", model_id: "model-a", effort: "max" as never } }, /INVALID_STATIC_CODING_ROUTE/));
+  await t.test("unbounded provider identifier rejects", () => invalidAuthority({ ...selectionAuthority(), static_coding_route: { provider_id: "bad provider", model_id: "model-a", effort: "high" } }, /INVALID_STATIC_CODING_ROUTE/));
+  await t.test("dual Terra and coding authority rejects", () => invalidAuthority({ ...selectionAuthority(), static_terra_effort: "xhigh", static_coding_route: { provider_id: "provider-a", model_id: "model-a", effort: "high" } }, /INVALID_STATIC_CODING_ROUTE/));
+  await t.test("non-static mode rejects", () => {
+    const result = runBoundedMutationWorkflowForTests({
+      objective: "mode isolation", stop_condition: "stop", execution_mode: "DIRECT_LUNA_HIGH",
+      scope: { readable_paths: ["a.txt"], editable_paths: ["a.txt"], frozen_paths: [] }, required_outputs: ["a.txt"],
+      tasks: [{ task_id: "a", objective: "a", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [] }],
+    }, { authority: { verification_commands: [], static_coding_route: { provider_id: "provider-a", model_id: "model-a", effort: "high" } } });
+    return result.then((outcome) => { assert.equal(outcome.outcome, "BLOCKED"); assert.match(outcome.reason, /INVALID_STATIC_CODING_ROUTE/); });
+  });
+});

@@ -246,7 +246,8 @@
       "enum": [
         "SOL_OWNER",
         "LUNA_EXECUTOR",
-        "TERRA_EXECUTOR"
+        "TERRA_EXECUTOR",
+        "CODING_EXECUTOR"
       ]
     },
     "write_owner": {

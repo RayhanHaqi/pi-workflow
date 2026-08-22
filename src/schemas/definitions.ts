@@ -31,6 +31,14 @@ export const LOGICAL_MODEL_ROLES = [
   "BENCHMARK_VERIFIER",
   "BENCHMARK_SELECTOR",
 ] as const;
+// Capability-oriented coding role for static-approved-dag-launch-v2. It is
+// admitted at the document-schema layer so V2 plans/routes/tasks/reservations
+// can carry it, but it is deliberately NOT a member of the legacy
+// LOGICAL_MODEL_ROLES inventory that drives route-map completeness: legacy
+// execution modes keep their exact historical route inventory without any
+// dummy CODING_EXECUTOR routes.
+export const CODING_EXECUTOR = "CODING_EXECUTOR" as const;
+export const ALL_LOGICAL_MODEL_ROLES = [...LOGICAL_MODEL_ROLES, CODING_EXECUTOR] as const;
 export const ENFORCEMENT_CLASSES = [
   "HARD_ENFORCEABLE",
   "SOFT_ENFORCEABLE",
@@ -187,7 +195,7 @@ function DocumentFields<const SchemaId extends string>(schemaId: SchemaId) {
 
 export const ExecutionModeSchema = StringEnum(EXECUTION_MODES);
 export const ConcreteExecutionModeSchema = StringEnum(CONCRETE_EXECUTION_MODES);
-export const LogicalModelRoleSchema = StringEnum(LOGICAL_MODEL_ROLES);
+export const LogicalModelRoleSchema = StringEnum(ALL_LOGICAL_MODEL_ROLES);
 export const WorkflowPhaseSchema = StringEnum(WORKFLOW_PHASES);
 export const ProjectionIdSchema = StringEnum(PROJECTION_IDS);
 
@@ -337,7 +345,10 @@ export const RouteMapSchema = StrictObject(
     ...DocumentFields("pi_gacw_route_map_v0"),
     route_map_projection_id: Type.Literal("route-map-v1"),
     route_map_sha256: Digest(),
-    routes: Type.Array(RouteSchema, { minItems: 8, maxItems: 8, uniqueItems: true }),
+    // Eight legacy inventory routes, plus at most one owner-approved V2
+    // CODING_EXECUTOR route; completeness semantics are enforced semantically,
+    // not by this structural cap.
+    routes: Type.Array(RouteSchema, { minItems: 8, maxItems: 9, uniqueItems: true }),
     fallback: Type.Literal(false),
     provider_managed_multi_agent: Type.Literal(false),
   },
@@ -488,7 +499,7 @@ export const TaskSchema = StrictObject(
     acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { minItems: 1, maxItems: 10_000 }),
     owner_acceptance_criteria: Type.Array(AcceptanceCriterionSchema, { maxItems: 10_000 }),
     verification_commands: Type.Array(VerificationCommandSchema, { minItems: 0, maxItems: 10_000 }),
-    assigned_role: StringEnum(["SOL_OWNER", "LUNA_EXECUTOR", "TERRA_EXECUTOR"] as const),
+    assigned_role: StringEnum(["SOL_OWNER", "LUNA_EXECUTOR", "TERRA_EXECUTOR", CODING_EXECUTOR] as const),
     write_owner: Identifier(),
   },
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_task_v0.schema.json" },
@@ -2214,6 +2225,7 @@ const internalSchemaRegistry = [
 deepFreeze(EXECUTION_MODES);
 deepFreeze(CONCRETE_EXECUTION_MODES);
 deepFreeze(LOGICAL_MODEL_ROLES);
+deepFreeze(ALL_LOGICAL_MODEL_ROLES);
 deepFreeze(ENFORCEMENT_CLASSES);
 deepFreeze(WORKFLOW_PHASES);
 deepFreeze(EVENT_TYPES);

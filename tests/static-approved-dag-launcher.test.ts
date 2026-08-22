@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   STATIC_APPROVED_DAG_COMMAND_TIMEOUT_MAX_MS,
+  StaticApprovedDagLaunchError,
   createStaticApprovedDagPlanApproval,
   executeStaticApprovedDag,
   inspectStaticApprovedDagSpec,
@@ -38,7 +39,7 @@ const facts = async () => ({ repository_root: ROOT, branch: "main", head: HEAD, 
 function approvalInput(value: StaticApprovedDagLaunchSpec): any {
   value = structuredClone(value);
   const commands = value.verification_commands.map((command) => ({ command_id: command.command_id, argv: [command.executable, `${ROOT}/${command.cwd}/${command.args[0]!}`, ...command.args.slice(1)], cwd: command.cwd, timeout_ms: command.timeout_ms, network: "FORBIDDEN" }));
-  const tasks = value.goal.tasks.map((task, index) => ({ task_id: task.task_id, objective: task.objective, assigned_role: "TERRA_EXECUTOR", write_owner: task.task_id, dependencies: task.dependencies, scope: { readable_paths: value.goal.scope.readable_paths, editable_paths: task.editable_paths, frozen_paths: value.goal.scope.frozen_paths }, required_inputs: value.goal.scope.readable_paths, required_outputs: task.required_outputs, verification_commands: task.verification_command_ids === undefined ? commands : commands.filter((command) => task.verification_command_ids!.includes(command.command_id)) }));
+  const tasks = value.goal.tasks.map((task, index) => ({ task_id: task.task_id, objective: task.objective, assigned_role: value.expected_route.logical_role, write_owner: task.task_id, dependencies: task.dependencies, scope: { readable_paths: value.goal.scope.readable_paths, editable_paths: task.editable_paths, frozen_paths: value.goal.scope.frozen_paths }, required_inputs: value.goal.scope.readable_paths, required_outputs: task.required_outputs, verification_commands: task.verification_command_ids === undefined ? commands : commands.filter((command) => task.verification_command_ids!.includes(command.command_id)) }));
   const route = { logical_role: value.expected_route.logical_role, provider_id: value.expected_route.provider_id, model_id: value.expected_route.model_id, effort: value.expected_route.effort };
   const plan = { content_sha256: digest("c"), bindings: { scope: value.goal.scope, required_inputs: value.goal.scope.readable_paths, required_outputs: value.goal.required_outputs, limits: { static_time_budgets: value.static_time_budgets, max_wall_time_ms: value.static_time_budgets.workflow_wall_ms, max_attempts_per_leaf: value.static_max_attempts_per_leaf }, logical_routes: [route], verification_commands: commands } };
   return { mode: "STATIC_APPROVED_DAG", plan, tasks, executionAuthority: { plan, mode: "STATIC_APPROVED_DAG", repository: { branch: "main", head: HEAD, head_tree: TREE, worktree_root: ROOT }, route_map: { fallback: false, routes: [route] }, tasks, task_graph: { edges: [{ from: "a", to: "b" }] } } };
@@ -203,7 +204,7 @@ test("PASS report projects the authoritative final state summary", async () => {
   const report = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "PASS", reason: "PASS", finalState: passFinalState, evidenceRoot: "/tmp/evidence/run-1" } as any; } });
   assert.equal(calls, 1);
   assert.equal(report.classification, "PASS");
-  assert.deepEqual(report.workflow, { outcome: "PASS", final_phase: "PASS", terminal_reason: null, active_task_id: null, leaves_completed: 2, terra_worker_invocations: 2, tasks: passFinalState.tasks });
+  assert.deepEqual(report.workflow, { outcome: "PASS", final_phase: "PASS", terminal_reason: null, active_task_id: null, leaves_completed: 2, terra_worker_invocations: 2, coding_worker_invocations: null, tasks: passFinalState.tasks });
   assert.equal(report.evidence_root, "/tmp/evidence/run-1");
   assert.equal(report.hygiene_warning, null);
   assert.equal(report.telemetry, null);
@@ -214,7 +215,7 @@ test("VALID_BLOCKED report truthfully exposes the blocked final state", async ()
   const report = await executeStaticApprovedDag({ spec: spec(), approved_spec_sha256: staticApprovedDagSpecSha256(spec()), cwd: ROOT, repositoryFacts: facts, controller: async () => { calls += 1; return { outcome: "BLOCKED", reason: "BLOCKED: leaf verification failed after admitted retry", finalState: blockedFinalState, evidenceRoot: "/tmp/evidence/run-2", hygieneWarning: "worktree lock release could not be proved" } as any; } });
   assert.equal(calls, 1);
   assert.equal(report.classification, "VALID_BLOCKED");
-  assert.deepEqual(report.workflow, { outcome: "BLOCKED", final_phase: "BLOCKED", terminal_reason: "BLOCKED: leaf verification failed after admitted retry", active_task_id: "b", leaves_completed: 1, terra_worker_invocations: 2, tasks: blockedFinalState.tasks });
+  assert.deepEqual(report.workflow, { outcome: "BLOCKED", final_phase: "BLOCKED", terminal_reason: "BLOCKED: leaf verification failed after admitted retry", active_task_id: "b", leaves_completed: 1, terra_worker_invocations: 2, coding_worker_invocations: null, tasks: blockedFinalState.tasks });
   assert.equal(report.evidence_root, "/tmp/evidence/run-2");
   assert.equal(report.hygiene_warning, "worktree lock release could not be proved");
   assert.equal(report.telemetry, null);
@@ -458,4 +459,132 @@ test("inspect-mode pre-execution failures keep the inspection INVALID shape", as
     assert.deepEqual(Object.keys(parsed).sort(), INSPECT_INVALID_KEYS, argv.join(" "));
     assert.equal(parsed["classification"], "INVALID"); assert.notEqual(parsed["reason"], "");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task 4: static-approved-dag-launch-v2 — capability-oriented CODING_EXECUTOR
+// ---------------------------------------------------------------------------
+
+// Portable V1 freeze pins: computed from the exact spec shapes below with a
+// fixed executable, so the digest is machine-independent historical authority.
+const V1_PIN_SPEC = {
+  spec_version: "static-approved-dag-launch-v1", run_label: "launcher-test", expected_repository_branch: "main", expected_head: HEAD, expected_tree: TREE,
+  goal: { objective: "Write exactly two outputs.", stop_condition: "Stop after verification.", execution_mode: "STATIC_APPROVED_DAG", scope: { readable_paths: ["node_modules"], editable_paths: ["out/a.txt", "out/b.txt"], frozen_paths: ["node_modules"] }, required_outputs: ["out/a.txt", "out/b.txt"], tasks: [
+    { task_id: "a", objective: "Write a.", editable_paths: ["out/a.txt"], required_outputs: ["out/a.txt"], dependencies: [] },
+    { task_id: "b", objective: "Write b.", editable_paths: ["out/b.txt"], required_outputs: ["out/b.txt"], dependencies: ["a"] },
+  ] },
+  verification_commands: [{ command_id: "tsx", executable: "/usr/bin/tsx", args: ["--version"], cwd: "node_modules", timeout_ms: 60_000 }],
+  static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }, static_max_attempts_per_leaf: 1,
+  expected_route: { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false },
+};
+const V1_FROZEN_HIGH_DIGEST = "sha256:c557d053d284175ae8bd683341679f456a58ec799593ab183888255aeb1c1ed8";
+const V1_FROZEN_XHIGH_DIGEST = "sha256:792fa269f752717023643b977307ef11cb0904952c6fcfb48104c2a842b58fbc";
+
+function v2Spec(expectedRoute: Record<string, unknown> = { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false }): Record<string, unknown> {
+  return { ...spec(), spec_version: "static-approved-dag-launch-v2", expected_route: expectedRoute };
+}
+
+test("V1 freeze: legacy Terra specs keep their exact historical digests and route semantics", () => {
+  assert.equal(staticApprovedDagSpecSha256(V1_PIN_SPEC), V1_FROZEN_HIGH_DIGEST);
+  const xhigh = structuredClone(V1_PIN_SPEC); (xhigh["expected_route"] as any).effort = "xhigh";
+  assert.equal(staticApprovedDagSpecSha256(xhigh), V1_FROZEN_XHIGH_DIGEST);
+  const normalized = normalizeStaticApprovedDagLaunchSpec(V1_PIN_SPEC);
+  assert.equal(normalized.spec_version, "static-approved-dag-launch-v1");
+  assert.deepEqual(normalized.expected_route, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false });
+});
+
+test("V2 CODING_EXECUTOR spec normalizes and inspects with its exact bounded route", () => {
+  const normalized = normalizeStaticApprovedDagLaunchSpec(v2Spec());
+  assert.equal(normalized.spec_version, "static-approved-dag-launch-v2");
+  assert.deepEqual(normalized.expected_route, { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false });
+  const report = inspectStaticApprovedDagSpec(v2Spec());
+  assert.equal(report.classification, "INSPECTED");
+  assert.equal(report.spec_version, "static-approved-dag-launch-v2");
+  assert.deepEqual(report.route, { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false });
+  assert.equal(report.graph!.node_count, 2);
+  assert.deepEqual(report.verification_commands, [{ command_id: "tsx", cwd: "node_modules", timeout_ms: 60_000 }]);
+});
+
+test("V2 model identity is routing data: different provider/model produce different digests over an identical graph", () => {
+  const first = inspectStaticApprovedDagSpec(v2Spec());
+  const second = inspectStaticApprovedDagSpec(v2Spec({ logical_role: "CODING_EXECUTOR", provider_id: "provider-b", model_id: "model-b", effort: "high", fallback: false }));
+  assert.equal(first.classification, "INSPECTED"); assert.equal(second.classification, "INSPECTED");
+  assert.notEqual(first.spec_sha256, second.spec_sha256);
+  assert.deepEqual(first.graph, second.graph);
+  assert.deepEqual(first.budgets, second.budgets);
+});
+
+test("V2 binds effort to high only and rejects escalation, fallback, and every legacy role", () => {
+  for (const route of [
+    { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "xhigh", fallback: false },
+    { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "max", fallback: false },
+    { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: true },
+    { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false },
+    { logical_role: "LUNA_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false },
+    { logical_role: "SOL_OWNER", provider_id: "provider-a", model_id: "model-a", effort: "max", fallback: false },
+    { logical_role: "SOL_PLANNER", provider_id: "provider-a", model_id: "model-a", effort: "max", fallback: false },
+    { logical_role: "SOL_REPLAN", provider_id: "provider-a", model_id: "model-a", effort: "max", fallback: false },
+    { logical_role: "SOL_CLOSEOUT", provider_id: "provider-a", model_id: "model-a", effort: "max", fallback: false },
+    { logical_role: "BENCHMARK_VERIFIER", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false },
+    { logical_role: "BENCHMARK_SELECTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false },
+  ]) {
+    const source = v2Spec(structuredClone(route));
+    assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "STATIC_ROUTE_RESTRICTED", JSON.stringify(route));
+  }
+  // Malformed routing identity is a spec-shape failure, not a policy restriction.
+  for (const route of [
+    { logical_role: "CODING_EXECUTOR", provider_id: "", model_id: "model-a", effort: "high", fallback: false },
+    { logical_role: "CODING_EXECUTOR", provider_id: "provider a", model_id: "model-a", effort: "high", fallback: false },
+  ]) {
+    const source = v2Spec(structuredClone(route));
+    assert.throws(() => normalizeStaticApprovedDagLaunchSpec(source), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "INVALID_SPEC", JSON.stringify(route));
+  }
+  // V1 keeps rejecting capability routes just as V2 rejects legacy roles.
+  const v1Coding = spec(); v1Coding["expected_route"] = { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false };
+  assert.throws(() => normalizeStaticApprovedDagLaunchSpec(v1Coding), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "STATIC_ROUTE_RESTRICTED");
+});
+
+test("V2 inspection stays privacy-bounded while showing the exact routing identity", () => {
+  const text = JSON.stringify(inspectStaticApprovedDagSpec(v2Spec()));
+  assert.match(text, /CODING_EXECUTOR/u);
+  assert.match(text, /provider-a/u); assert.match(text, /model-a/u);
+  assert.ok(text.includes('"effort":"high"'));
+  assert.doesNotMatch(text, /objective|stop_condition|argv|"args"|"executable"/u);
+  assert.ok(!text.includes(process.execPath));
+});
+
+test("V2 inspect digest is accepted unchanged by execute; post-approval route mutation rejects before the controller", async () => {
+  const source = v2Spec();
+  const inspected = inspectStaticApprovedDagSpec(source);
+  let calls = 0;
+  const accepted = await executeStaticApprovedDag({ spec: source, approved_spec_sha256: inspected.spec_sha256!, cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => {
+    calls += 1;
+    assert.deepEqual(options?.authority?.static_coding_route, { provider_id: "provider-a", model_id: "model-a", effort: "high" });
+    assert.equal(options?.authority?.static_terra_effort, undefined);
+    return { outcome: "PASS", reason: "PASS", finalState: passFinalState } as any;
+  } });
+  assert.equal(calls, 1);
+  assert.equal(accepted.classification, "PASS");
+
+  const mutated = structuredClone(source);
+  (mutated["expected_route"] as any).model_id = "model-b";
+  let substitutedCalls = 0;
+  const rejected = await executeStaticApprovedDag({ spec: mutated, approved_spec_sha256: inspected.spec_sha256!, cwd: ROOT, repositoryFacts: facts, controller: async () => { substitutedCalls += 1; return { outcome: "PASS", reason: "PASS", finalState: { phase: "PASS" } } as any; } });
+  assert.equal(substitutedCalls, 0);
+  assert.equal(rejected.classification, "INVALID");
+  assert.match(rejected.reason, /--approved-spec-sha256 does not match the normalized launch spec/u);
+});
+
+test("V2 execution forwards the exact approved route as controller authority and reports coding_worker_invocations", async () => {
+  let calls = 0;
+  const report = await executeStaticApprovedDag({ spec: v2Spec(), approved_spec_sha256: staticApprovedDagSpecSha256(v2Spec()), cwd: ROOT, repositoryFacts: facts, controller: async (_goal, options) => {
+    calls += 1;
+    assert.deepEqual(options?.authority?.static_coding_route, { provider_id: "provider-a", model_id: "model-a", effort: "high" });
+    assert.equal(options?.authority?.static_terra_effort, undefined);
+    return { outcome: "PASS", reason: "PASS", finalState: passFinalState, evidenceRoot: "/tmp/evidence/run-v2" } as any;
+  } });
+  assert.equal(calls, 1);
+  assert.equal(report.classification, "PASS");
+  assert.equal(report.workflow!.coding_worker_invocations, 2);
+  assert.equal(report.workflow!.terra_worker_invocations, null);
 });

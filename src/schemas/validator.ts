@@ -239,6 +239,11 @@ function sameMembers(left: readonly string[], right: readonly string[]): boolean
   return normalizedLeft.length === normalizedRight.length && normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
+/** Exact bounded routing identifier: model identity is owner-selected routing data, never a free-form label. */
+function boundedRouteIdentifier(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+
 function assertRouteSemantics(routes: RouteMapDocument["routes"] | PlanApprovalDocument["bindings"]["logical_routes"]): void {
   assertUniqueBy(routes, (route) => route.logical_role, "DUPLICATE_LOGICAL_ROUTE");
   for (const route of routes) {
@@ -256,6 +261,10 @@ function assertRouteSemantics(routes: RouteMapDocument["routes"] | PlanApprovalD
     if (route.logical_role === "TERRA_EXECUTOR" &&
         (route.provider_id !== "openai-codex" || route.model_id !== "gpt-5.6-terra" || (route.effort !== "high" && route.effort !== "xhigh"))) {
       throw new ContractValidationError("INVALID_TERRA_ROUTE", "TERRA_EXECUTOR must use openai-codex / gpt-5.6-terra / high or xhigh");
+    }
+    if (route.logical_role === "CODING_EXECUTOR" &&
+        (route.effort !== "high" || !boundedRouteIdentifier(route.provider_id) || !boundedRouteIdentifier(route.model_id))) {
+      throw new ContractValidationError("INVALID_CODING_ROUTE", "CODING_EXECUTOR requires bounded provider/model identifiers and exactly high effort without escalation");
     }
     if (route.logical_role.startsWith("SOL_") && route.effort !== "max") {
       throw new ContractValidationError("INVALID_SOL_EFFORT", `${route.logical_role} must use max effort`);
@@ -419,7 +428,7 @@ export function assertTaskGraphSemantics(taskGraph: TaskGraphDocument, configure
 export function assertTaskSemantics(task: TaskDocument): void {
   assertNoScopeOverlap(task.scope);
   assertAcceptanceSemantics(task.acceptance_criteria, task.owner_acceptance_criteria);
-  if ((task.assigned_role === "LUNA_EXECUTOR" || task.assigned_role === "TERRA_EXECUTOR") && task.owner_acceptance_criteria.length > 0) {
+  if ((task.assigned_role === "LUNA_EXECUTOR" || task.assigned_role === "TERRA_EXECUTOR" || task.assigned_role === "CODING_EXECUTOR") && task.owner_acceptance_criteria.length > 0) {
     throw new ContractValidationError("EXECUTOR_OWNER_ACCEPTANCE_FORBIDDEN", "Executor leaf acceptance must be machine-checkable");
   }
 }
@@ -453,8 +462,8 @@ export function assertPlanApprovalSemantics(plan: PlanApprovalDocument): void {
     throw new ContractValidationError(plan.bindings.execution_mode === "ROUTED_DAG" ? "ROUTED_DAG_TOO_SMALL" : "DAG_TOO_SMALL", `${plan.bindings.execution_mode} requires at least two leaves`);
   }
   if (plan.bindings.execution_mode === "STATIC_APPROVED_DAG" &&
-      (plan.bindings.logical_routes.length !== 1 || plan.bindings.logical_routes[0]?.logical_role !== "TERRA_EXECUTOR")) {
-    throw new ContractValidationError("STATIC_DAG_ROUTE_RESTRICTED", "STATIC_APPROVED_DAG permits only TERRA_EXECUTOR");
+      (plan.bindings.logical_routes.length !== 1 || !['TERRA_EXECUTOR', 'CODING_EXECUTOR'].includes(plan.bindings.logical_routes[0]?.logical_role as string))) {
+    throw new ContractValidationError("STATIC_DAG_ROUTE_RESTRICTED", "STATIC_APPROVED_DAG permits exactly one executor route: legacy TERRA_EXECUTOR or capability-oriented CODING_EXECUTOR");
   }
   const timeBudgets = plan.bindings.limits.static_time_budgets;
   if (timeBudgets !== undefined) {

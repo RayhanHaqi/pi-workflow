@@ -117,6 +117,15 @@ export interface BoundedMutationAuthority {
   readonly static_time_budgets?: StaticApprovedDagTimeBudgets;
   /** Explicit owner-selected Terra effort; valid only for STATIC_APPROVED_DAG and defaults to high. */
   readonly static_terra_effort?: StaticTerraEffort;
+  /** Exact capability-oriented V2 coding route; valid only for STATIC_APPROVED_DAG and mutually exclusive with static_terra_effort. */
+  readonly static_coding_route?: StaticCodingRoute;
+}
+
+/** Model identity is routing data: exact provider/model bound at approval time, high effort only, no fallback. */
+export interface StaticCodingRoute {
+  readonly provider_id: string;
+  readonly model_id: string;
+  readonly effort: "high";
 }
 
 export interface BaselineApprovalRequest {
@@ -641,8 +650,8 @@ function event(type: TransitionEvent["event_type"], payload: Record<string, unkn
 function fixed(label: string): Sha256Digest { return sha256Canonical({ protocol: "pre-m8-fixed-v1", label }); }
 function target(repository: M3RepositoryIdentityDocument): ContractDocument["target_repository"] { return { root: repository.git_toplevel, git_common_dir: repository.git_common_dir, worktree: repository.worktree_root, branch: repository.branch ?? "DETACHED", head: repository.head }; }
 
-function routeMap(maxToolCalls: number, staticTerraEffort: StaticTerraEffort): RouteMapDocument {
-  const routes = PRODUCT_ROLES.map((logical_role) => {
+function routeMap(maxToolCalls: number, staticTerraEffort: StaticTerraEffort, staticCodingRoute?: StaticCodingRoute): RouteMapDocument {
+  const routes: RouteMapDocument["routes"] = PRODUCT_ROLES.map((logical_role) => {
     const luna = logical_role === "LUNA_EXECUTOR";
     const terra = logical_role === "TERRA_EXECUTOR";
     const mutates = luna || terra || logical_role === "SOL_OWNER";
@@ -651,6 +660,14 @@ function routeMap(maxToolCalls: number, staticTerraEffort: StaticTerraEffort): R
         command_gateway: logical_role === "SOL_CLOSEOUT" ? "VERIFICATION_ONLY" as const : logical_role === "SOL_PLANNER" ? "INSPECTION_ONLY" as const : "TASK_AND_VERIFICATION" as const,
         maximum_tool_calls: maxToolCalls } };
   });
+  // Legacy modes never receive a CODING_EXECUTOR route; it exists only when the
+  // owner approved an exact V2 static coding route, and it carries that exact
+  // routing data without any engine-side provider/model hardcoding.
+  if (staticCodingRoute !== undefined) {
+    routes.push({ logical_role: "CODING_EXECUTOR", provider_id: staticCodingRoute.provider_id, model_id: staticCodingRoute.model_id, effort: "high" as const,
+      tool_policy: { policy_id: "pre-m8-coding_executor", built_in_tools_disabled: true as const, mutation_tool: "APPLY_PATCH_SCOPED" as const,
+        command_gateway: "TASK_AND_VERIFICATION" as const, maximum_tool_calls: maxToolCalls } });
+  }
   return identifyContractDocument("pi_gacw_route_map_v0", { schema_id: "pi_gacw_route_map_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
     route_map_projection_id: "route-map-v1", route_map_sha256: fixed("route-map"), routes, fallback: false, provider_managed_multi_agent: false }) as RouteMapDocument;
 }
@@ -705,6 +722,19 @@ function staticTerraEffort(goal: ReturnType<typeof normalizeGoal>, authority: Bo
   return supplied;
 }
 
+/** Validates the exact owner-approved V2 coding route; no defaulting, no substitution, no fallback. */
+function staticCodingRoute(goal: ReturnType<typeof normalizeGoal>, authority: BoundedMutationAuthority): StaticCodingRoute | undefined {
+  const supplied = authority.static_coding_route;
+  if (supplied === undefined) return undefined;
+  if (goal.execution_mode !== "STATIC_APPROVED_DAG") fail("INVALID_STATIC_CODING_ROUTE", "a static coding route is restricted to STATIC_APPROVED_DAG");
+  if (authority.static_terra_effort !== undefined) fail("INVALID_STATIC_CODING_ROUTE", "static_coding_route and static_terra_effort are mutually exclusive");
+  if (supplied.effort !== "high") fail("INVALID_STATIC_CODING_ROUTE", "the static coding route binds exactly high effort; xhigh and max require a future qualification");
+  for (const [field, value] of [["provider_id", supplied.provider_id], ["model_id", supplied.model_id]] as const) {
+    if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)) fail("INVALID_STATIC_CODING_ROUTE", `static_coding_route.${field} must be a bounded exact routing identifier`);
+  }
+  return { provider_id: supplied.provider_id, model_id: supplied.model_id, effort: "high" };
+}
+
 function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, staticAttemptsPerLeaf = 1, frozenStaticTimeBudgets?: StaticApprovedDagTimeBudgets): BudgetDocument {
   if (staticAttemptsPerLeaf !== 1 && staticAttemptsPerLeaf !== 2) fail("INVALID_STATIC_REPAIR_EDGE", "STATIC_APPROVED_DAG permits at most one frozen repair edge per node");
   const workers = goal.execution_mode === "STATIC_APPROVED_DAG" ? goal.tasks.length * staticAttemptsPerLeaf : goal.execution_mode === "ROUTED_DAG" ? goal.tasks.length + 2 : 1;
@@ -724,12 +754,12 @@ function selectedTaskVerificationCommands(goal: ReturnType<typeof normalizeGoal>
   return verification.filter((command) => selected.has(command.command_id));
 }
 
-function taskDocument(goal: ReturnType<typeof normalizeGoal>, candidate: CandidateTask, index: number, verification: ContractDocument["verification_commands"]): TaskDocument {
+function taskDocument(goal: ReturnType<typeof normalizeGoal>, candidate: CandidateTask, index: number, verification: ContractDocument["verification_commands"], staticExecutorRole: "TERRA_EXECUTOR" | "CODING_EXECUTOR"): TaskDocument {
   return identifyContractDocument("pi_gacw_task_v0", { schema_id: "pi_gacw_task_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", task_projection_id: "task-packet-v1", task_sha256: fixed(`task:${candidate.task_id}`),
     task_id: candidate.task_id, topological_rank: index, priority: index, dependencies: candidate.dependencies, objective: candidate.objective,
     scope: { readable_paths: goal.scope.readable_paths, editable_paths: candidate.editable_paths, frozen_paths: goal.scope.frozen_paths }, required_inputs: goal.scope.readable_paths,
     required_outputs: candidate.required_outputs, acceptance_criteria: acceptance({ ...goal, required_outputs: candidate.required_outputs }, []) , owner_acceptance_criteria: ownerAcceptance(goal), verification_commands: selectedTaskVerificationCommands(goal, candidate, verification),
-    assigned_role: goal.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : goal.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR", write_owner: candidate.task_id }) as unknown as TaskDocument;
+    assigned_role: goal.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : goal.execution_mode === "STATIC_APPROVED_DAG" ? staticExecutorRole : "LUNA_EXECUTOR", write_owner: candidate.task_id }) as unknown as TaskDocument;
 }
 function taskGraph(goal: ReturnType<typeof normalizeGoal>, tasks: readonly TaskDocument[]): TaskGraphDocument | null {
   if (goal.execution_mode !== "ROUTED_DAG" && goal.execution_mode !== "STATIC_APPROVED_DAG") return null;
@@ -746,13 +776,13 @@ function contract(goal: ReturnType<typeof normalizeGoal>, repository: M3Reposito
     command_policy: { shell: false, network: "FORBIDDEN", allowed_executables: [...new Set(verification.map((entry) => entry.argv[0]!))], forbidden_operations: ["INSTALL", "COMMIT", "PUSH", "TAG", "MERGE", "REBASE", "RESET", "RESTORE", "CLEAN", "SWITCH_BRANCH", "MODIFY_REMOTE"] },
     limits: budgetDocument.limits, stopping_conditions: [goal.stop_condition] }) as ContractDocument;
 }
-function plan(goal: ReturnType<typeof normalizeGoal>, repository: M3RepositoryIdentityDocument, tasks: readonly TaskDocument[], graph: TaskGraphDocument | null, contractDocument: ContractDocument, route: RouteMapDocument, verification: ContractDocument["verification_commands"], budgetDocument: BudgetDocument): PlanApprovalDocument | null {
+function plan(goal: ReturnType<typeof normalizeGoal>, repository: M3RepositoryIdentityDocument, tasks: readonly TaskDocument[], graph: TaskGraphDocument | null, contractDocument: ContractDocument, route: RouteMapDocument, verification: ContractDocument["verification_commands"], budgetDocument: BudgetDocument, staticExecutorRole: "TERRA_EXECUTOR" | "CODING_EXECUTOR"): PlanApprovalDocument | null {
   if (graph === null) return null;
   return identifyContractDocument("pi_gacw_plan_approval_v0", { schema_id: "pi_gacw_plan_approval_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", plan_approval_projection_id: "plan-approval-v1", plan_approval_sha256: fixed("plan"),
     bindings: { objective_sha256: contractDocument.objective_sha256, target_repository: target(repository), execution_mode: goal.execution_mode, baseline_approval_sha256: contractDocument.baseline_approval_sha256, authority_lock_sha256: contractDocument.authority_lock_sha256, contract_sha256: contractDocument.contract_sha256,
       dag: { task_graph_sha256: graph.task_graph_sha256, edges: graph.edges, ordered_task_packet_identities: tasks.map((task) => task.task_sha256) }, scope: goal.scope, required_inputs: goal.scope.readable_paths, required_outputs: goal.required_outputs,
       acceptance_criteria: contractDocument.acceptance_criteria, owner_acceptance_criteria: ownerAcceptance(goal), verification_commands: verification, command_policy: contractDocument.command_policy,
-      logical_routes: route.routes.filter((entry) => goal.execution_mode === "STATIC_APPROVED_DAG" ? entry.logical_role === "TERRA_EXECUTOR" : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"].includes(entry.logical_role)), limits: budgetDocument.limits, stopping_conditions: [goal.stop_condition] }, approved_by: "owner-confirmation-required" }) as unknown as PlanApprovalDocument;
+      logical_routes: route.routes.filter((entry) => goal.execution_mode === "STATIC_APPROVED_DAG" ? entry.logical_role === staticExecutorRole : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"].includes(entry.logical_role)), limits: budgetDocument.limits, stopping_conditions: [goal.stop_condition] }, approved_by: "owner-confirmation-required" }) as unknown as PlanApprovalDocument;
 }
 function reducer(goal: ReturnType<typeof normalizeGoal>, tasks: readonly TaskDocument[], graph: TaskGraphDocument | null, planDocument: PlanApprovalDocument | null, budgetDocument: BudgetDocument, scopeSha: Sha256Digest, acceptanceSha: Sha256Digest): ReducerPolicy {
   return identifyContractDocument("pi_gacw_reducer_policy_v0", { schema_id: "pi_gacw_reducer_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID, execution_mode: goal.execution_mode,
@@ -870,13 +900,13 @@ async function stageBaselineAuthority(input: {
   return { baseline: capture.baseline, approval, approvalRequest: request };
 }
 
-function m5Policy(repository: M3RepositoryIdentityDocument, state: WorkflowState, reducerPolicy: ReducerPolicy, contractDocument: ContractDocument, budgetDocument: BudgetDocument, routes: RouteMapDocument, approval: RouteMapApprovalDocument, toolPolicy: M4ScopedToolPolicyDocument, catalog: M4CommandCatalogDocument, goal: ReturnType<typeof normalizeGoal>): M5ControlPolicyDocument {
+function m5Policy(repository: M3RepositoryIdentityDocument, state: WorkflowState, reducerPolicy: ReducerPolicy, contractDocument: ContractDocument, budgetDocument: BudgetDocument, routes: RouteMapDocument, approval: RouteMapApprovalDocument, toolPolicy: M4ScopedToolPolicyDocument, catalog: M4CommandCatalogDocument, goal: ReturnType<typeof normalizeGoal>, staticExecutorRole: "TERRA_EXECUTOR" | "CODING_EXECUTOR"): M5ControlPolicyDocument {
   const obligations = [
     ...goal.required_outputs.map((value) => ({ declaration: value, direction: "OUTPUT" as const, stage: 1, producer: goal.tasks.find((task) => task.required_outputs.includes(value))!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "FILE" as const, literal: value, prefix: null })),
     ...catalog.commands.map((entry) => ({ declaration: `command:${entry.command_id}`, direction: "OUTPUT" as const, stage: 1, producer: goal.tasks.at(-1)!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "COMMAND" as const, literal: entry.command_id, prefix: null })),
     ...(goal.execution_mode === "SINGLE_OWNER_SOL" ? [{ declaration: "owner-acceptance", direction: "OUTPUT" as const, stage: 1, producer: goal.tasks[0]!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "OWNER_ACCEPTANCE" as const, literal: "ACCEPTED", prefix: null }] : []),
   ].map((entry) => ({ descriptor_sha256: sha256Canonical(entry), ...entry }));
-  const roles = goal.execution_mode === "DIRECT_LUNA_HIGH" ? ["LUNA_EXECUTOR"] as const : goal.execution_mode === "SINGLE_OWNER_SOL" ? ["SOL_OWNER"] as const : goal.execution_mode === "STATIC_APPROVED_DAG" ? ["TERRA_EXECUTOR"] as const : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"] as const;
+  const roles = goal.execution_mode === "DIRECT_LUNA_HIGH" ? ["LUNA_EXECUTOR"] as const : goal.execution_mode === "SINGLE_OWNER_SOL" ? ["SOL_OWNER"] as const : goal.execution_mode === "STATIC_APPROVED_DAG" ? [staticExecutorRole] as const : ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"] as const;
   const leaves = goal.execution_mode === "ROUTED_DAG" || goal.execution_mode === "STATIC_APPROVED_DAG" ? goal.tasks.length : 1;
   return identifyContractDocument("pi_gacw_m5_control_policy_v0", { schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID,
     repository_identity_content_sha256: repository.content_sha256, worktree_key: repository.worktree_key, starting_state_content_sha256: state.content_sha256, objective_sha256: contractDocument.objective_sha256, contract_sha256: contractDocument.contract_sha256, budget_sha256: budgetDocument.budget_sha256,
@@ -1027,8 +1057,12 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
   if (options.authority === undefined) return { outcome: "BLOCKED", reason: "CONTROLLER_VERIFICATION_AUTHORITY_REQUIRED", finalState: null };
   let requestedStaticTimeBudgets: StaticApprovedDagTimeBudgets | undefined;
   let requestedStaticTerraEffort: StaticTerraEffort;
-  try { requestedStaticTimeBudgets = staticTimeBudgets(goal, options.authority); requestedStaticTerraEffort = staticTerraEffort(goal, options.authority); }
+  let requestedStaticCodingRoute: StaticCodingRoute | undefined;
+  try { requestedStaticTimeBudgets = staticTimeBudgets(goal, options.authority); requestedStaticTerraEffort = staticTerraEffort(goal, options.authority); requestedStaticCodingRoute = staticCodingRoute(goal, options.authority); }
   catch (error: unknown) { return { outcome: "BLOCKED", reason: error instanceof Error ? `${error instanceof BoundedWorkflowError ? error.code : "INVALID_STATIC_AUTHORITY"}: ${error.message}` : "INVALID_STATIC_AUTHORITY", finalState: null }; }
+  const staticExecutorRole = requestedStaticCodingRoute === undefined ? "TERRA_EXECUTOR" as const : "CODING_EXECUTOR" as const;
+  // V2 runs reserve exactly the approved coding role; legacy runs keep the full product inventory.
+  const availableRoles = requestedStaticCodingRoute === undefined ? PRODUCT_ROLES : [staticExecutorRole];
   const controllerAbort = new AbortController();
   let cancellationObserved = options.signal?.aborted === true;
   const observeCancellation = (): void => { cancellationObserved = true; controllerAbort.abort(); };
@@ -1074,9 +1108,9 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     // owner cap is a distinct bounded mutation-admission limit.
     const maxM4ToolCalls = MAX_TOOL_CALLS_PER_WORKER;
     const maxM4MutationCalls = controllerMutationLimit(options.authority);
-    const route = routeMap(maxM4ToolCalls, requestedStaticTerraEffort); const routeApprovalDocument = routeApproval(route); const staticAttemptsPerLeaf = options.authority.static_max_attempts_per_leaf ?? 1;
+    const route = routeMap(maxM4ToolCalls, requestedStaticTerraEffort, requestedStaticCodingRoute); const routeApprovalDocument = routeApproval(route); const staticAttemptsPerLeaf = options.authority.static_max_attempts_per_leaf ?? 1;
     const frozenStaticTimeBudgets = requestedStaticTimeBudgets;
-    const budgetDocument = budget(goal, maxM4ToolCalls, staticAttemptsPerLeaf, frozenStaticTimeBudgets); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification));
+    const budgetDocument = budget(goal, maxM4ToolCalls, staticAttemptsPerLeaf, frozenStaticTimeBudgets); const tasks = goal.tasks.map((candidate, index) => taskDocument(goal, candidate, index, verification, staticExecutorRole));
     const graph = taskGraph(goal, tasks); const scopeSha = m3ScopeIdentity(goal.scope.editable_paths, goal.scope.frozen_paths);
     const acceptanceSha = sha256Canonical(acceptance(goal, verification as unknown as readonly M4CommandSpecification[]));
     // The staging graph has no M4/M5/worker path. It obtains the exact M3
@@ -1086,7 +1120,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     assertNotCancelled("final baseline capture");
     const baselineAuthority = canonicalBaselineAuthority(stagedBaseline.baseline, stagedBaseline.approval);
     const contractDocument = contract(goal, repository, tasks, routeApprovalDocument, budgetDocument, verification, baselineAuthority);
-    const planDocument = plan(goal, repository, tasks, graph, contractDocument, route, verification, budgetDocument);
+    const planDocument = plan(goal, repository, tasks, graph, contractDocument, route, verification, budgetDocument, staticExecutorRole);
     const reducerPolicy = reducer(goal, tasks, graph, planDocument, budgetDocument, scopeSha, acceptanceSha);
     const initialState = createInitialState(reducerPolicy, initialIdentities(tasks, contractDocument, planDocument, graph, budgetDocument, scopeSha, acceptanceSha));
     let committed = await initializeRunStorage({ stateRoot, runId: RUN_ID, policy: reducerPolicy, initialState, processMetadata: processMetadata() });
@@ -1125,7 +1159,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     assertNotCancelled("M4 gateway admission");
     const m4Policy = await toolPolicy(repository, full.acceptedState, goal); const commandCatalog = catalog(repository, m4Policy, specs);
     const gateway = await createScopedToolGateway({ stateRoot, runId: RUN_ID, repository, baseline, acceptedState: full.acceptedState, lock: lock!, instructionFiles: [], authorityFiles: [], editablePaths: goal.scope.editable_paths, frozenPaths: goal.scope.frozen_paths, taskScopeIdentity: scopeSha, toolPolicy: m4Policy, commandCatalog, temporaryRoot });
-    const m5 = m5Policy(repository, initialState, reducerPolicy, contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, goal);
+    const m5 = m5Policy(repository, initialState, reducerPolicy, contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, goal, staticExecutorRole);
     const approvedExecutionAuthority = executionAuthority({ goal, repository, baseline, approval, route, routeApproval: routeApprovalDocument, budget: budgetDocument,
       contract: contractDocument, tasks, graph, plan: planDocument, reducerPolicy, maxM4MutationCalls });
     let sources = sourceBundle(contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, gateway.acceptedState, tasks, graph, planDocument);
@@ -1136,7 +1170,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       return { inspection, expectedRevision: inspection.revision, expectedStatePointerContentSha256: inspection.statePointer.content_sha256 as Sha256Digest, expectedWorkflowStateContentSha256: inspection.workflowState.content_sha256 as Sha256Digest };
     };
     const decision = async (intent: "VALIDATE_CONTRACT" | "SELECT_ROUTE" | "AUTHORIZE_WORK" | "AUTHORIZE_CONTINUATION" | "EVALUATE_TERMINAL" | "BLOCK", transitionId: string, extra: Record<string, unknown> = {}) => {
-      const current = await expected(); const result = await kernel.evaluateControlDecision({ intent, expectedRevision: current.expectedRevision, expectedStatePointerContentSha256: current.expectedStatePointerContentSha256, expectedWorkflowStateContentSha256: current.expectedWorkflowStateContentSha256, transitionId, processMetadata: processMetadata(), authoritativeSources: sources, availableLogicalRoles: PRODUCT_ROLES, ...extra } as Parameters<typeof kernel.evaluateControlDecision>[0]);
+      const current = await expected(); const result = await kernel.evaluateControlDecision({ intent, expectedRevision: current.expectedRevision, expectedStatePointerContentSha256: current.expectedStatePointerContentSha256, expectedWorkflowStateContentSha256: current.expectedWorkflowStateContentSha256, transitionId, processMetadata: processMetadata(), authoritativeSources: sources, availableLogicalRoles: availableRoles, ...extra } as Parameters<typeof kernel.evaluateControlDecision>[0]);
       finalState = result.workflowState; return result.decision;
     };
     terminalBlock = async (detail: string, failures: readonly M5FailureInput[] = [], obligationEvidence: readonly M5ObligationEvidenceInput[] = []): Promise<void> => {
@@ -1144,7 +1178,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       if (state.phase === "PASS" || state.phase === "BLOCKED") return;
       const blocked = await kernel.evaluateControlDecision({ intent: "BLOCK", expectedRevision: current.expectedRevision, expectedStatePointerContentSha256: current.expectedStatePointerContentSha256,
         expectedWorkflowStateContentSha256: current.expectedWorkflowStateContentSha256, transitionId: `pre-m8-block-${sha256Canonical({ detail, state: state.content_sha256 }).slice(7, 23)}`,
-        blockReason: detail.slice(0, 255), processMetadata: processMetadata(), authoritativeSources: sources, availableLogicalRoles: PRODUCT_ROLES,
+        blockReason: detail.slice(0, 255), processMetadata: processMetadata(), authoritativeSources: sources, availableLogicalRoles: availableRoles,
         ...(failures[0]?.operationId === undefined ? {} : { operationId: failures[0].operationId }),
         usageEvidence: usages.slice(publishedUsageCount), failures, obligationEvidence });
       publishedUsageCount = usages.length;
@@ -1291,7 +1325,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         const task = tasks.find((candidate) => candidate.task_id === taskId);
         if (task === undefined) throw new BoundedWorkflowError("STATIC_DAG_READY_NODE_MISSING", "ready-node selection did not identify a frozen task");
         for (let attempt = 1; !staticStopped; attempt += 1) {
-          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", "TERRA_EXECUTOR", nodeStartedAt);
+          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", staticExecutorRole, nodeStartedAt);
           if (closeProductiveAuthority(worker)) { staticStopped = true; break; }
           assertStaticNodeDeadline(nodeStartedAt, "static node mutation postflight");
           await staticCommit("COMPLETE_LEAF_ATTEMPT");

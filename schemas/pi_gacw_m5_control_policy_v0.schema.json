@@ -381,7 +381,8 @@
               "LUNA_EXECUTOR",
               "TERRA_EXECUTOR",
               "BENCHMARK_VERIFIER",
-              "BENCHMARK_SELECTOR"
+              "BENCHMARK_SELECTOR",
+              "CODING_EXECUTOR"
             ]
           },
           "purpose": {

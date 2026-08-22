@@ -977,12 +977,17 @@ function stateIsTerminalPhase(state: WorkflowState): boolean {
   return ["DIRECT_VERIFYING", "SINGLE_OWNER_VERIFYING", "CLOSEOUT_VERIFYING", "STATIC_DAG_VERIFYING", "AWAITING_DECLARED_OWNER_ACCEPTANCE", "PASS", "BLOCKED"].includes(state.phase);
 }
 
+/** The static executor role is policy authority, not a global constant: legacy V1 policies reserve TERRA_EXECUTOR, V2 coding policies reserve CODING_EXECUTOR. */
+function staticExecutorRole(policy: M5ControlPolicyDocument): "TERRA_EXECUTOR" | "CODING_EXECUTOR" {
+  return policy.role_reservation_envelopes.some((entry) => entry.logical_role === "CODING_EXECUTOR") ? "CODING_EXECUTOR" : "TERRA_EXECUTOR";
+}
+
 function initialRoutes(policy: M5ControlPolicyDocument, available: ReadonlySet<string>): M5ControlDecisionDocument["routes"] {
   const f = policy.route_facts; const hard = f.hard_sol_conditions.length > 0;
   const direct = !hard && f.task_count === 1 && f.coherent_single_task && f.failure_domain_count === 1 && f.deterministic_acceptance && !f.ownership_ambiguous;
   const routed = !hard && f.task_count >= 2 && f.leaf_count >= 2 && f.leaf_count <= 8 && f.dag_valid && f.leaves_separable && f.unique_write_ownership && f.leaf_acceptance_machine_checkable;
   const requirements: Readonly<Record<string, readonly LogicalModelRole[]>> = {
-    DIRECT_LUNA_HIGH: ["LUNA_EXECUTOR"], SINGLE_OWNER_SOL: ["SOL_OWNER"], ROUTED_DAG: ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"], STATIC_APPROVED_DAG: ["TERRA_EXECUTOR"],
+    DIRECT_LUNA_HIGH: ["LUNA_EXECUTOR"], SINGLE_OWNER_SOL: ["SOL_OWNER"], ROUTED_DAG: ["SOL_PLANNER", "LUNA_EXECUTOR", "SOL_CLOSEOUT"], STATIC_APPROVED_DAG: [staticExecutorRole(policy)],
   };
   const inventory = policy.requested_mode === "STATIC_APPROVED_DAG"
     ? ["STATIC_APPROVED_DAG"] as const
@@ -1022,7 +1027,7 @@ function hasOperationAuthority(input: EvaluateControlDecisionInput, priorDecisio
   if (input.operationId === undefined || (input.failures ?? []).some((failure) => failure.operationId !== input.operationId)) return false;
   return priorDecisions.some((decision) => decision.reservation?.future_operation_id === input.operationId && decision.outcome === "AUTHORIZE");
 }
-function continuationAllowed(action: ContinuationRoute, state: WorkflowState, input: EvaluateControlDecisionInput, priorDecisions: readonly M5ControlDecisionDocument[]): boolean {
+function continuationAllowed(action: ContinuationRoute, state: WorkflowState, input: EvaluateControlDecisionInput, priorDecisions: readonly M5ControlDecisionDocument[], staticExecutor: "TERRA_EXECUTOR" | "CODING_EXECUTOR"): boolean {
   const available = new Set(input.availableLogicalRoles ?? []);
   if (input.intent === "VALIDATE_CONTRACT" || input.intent === "EVALUATE_TERMINAL" || input.intent === "BLOCK") return true;
   if (input.intent === "AUTHORIZE_WORK") return WORK_ADMISSION_PHASES.has(state.phase) && input.operationId !== undefined && (action === "CONTINUE_ADMITTED_OPERATION" || action === "RUN_RESERVED_CLOSEOUT");
@@ -1033,7 +1038,7 @@ function continuationAllowed(action: ContinuationRoute, state: WorkflowState, in
   if (action === "SECOND_LUNA_ATTEMPT") {
     if (state.execution_mode === "STATIC_APPROVED_DAG") {
       const active = state.active_task_id === null ? undefined : state.tasks.find((task) => task.task_id === state.active_task_id);
-      return available.has("TERRA_EXECUTOR") && state.phase === "LEAF_RETRY_READY" && active !== undefined &&
+      return available.has(staticExecutor) && state.phase === "LEAF_RETRY_READY" && active !== undefined &&
         active.attempts < 2 && hasOperationAuthority(input, priorDecisions);
     }
     return available.has("LUNA_EXECUTOR") && ["DIRECT_RETRY_READY", "LEAF_RETRY_READY"].includes(state.phase) && hasOperationAuthority(input, priorDecisions) && state.counters.direct_attempts < 2;
@@ -1045,9 +1050,9 @@ function continuationAllowed(action: ContinuationRoute, state: WorkflowState, in
   return false;
 }
 
-function requiredRole(state: WorkflowState, input: EvaluateControlDecisionInput): LogicalModelRole | null {
+function requiredRole(state: WorkflowState, input: EvaluateControlDecisionInput, policy: M5ControlPolicyDocument): LogicalModelRole | null {
   if (input.requiredLogicalRole !== undefined) return input.requiredLogicalRole;
-  if (state.phase === "DIRECT_FAST_PREFLIGHT" || state.phase === "LEAF_FAST_PREFLIGHT") return state.execution_mode === "STATIC_APPROVED_DAG" ? "TERRA_EXECUTOR" : "LUNA_EXECUTOR";
+  if (state.phase === "DIRECT_FAST_PREFLIGHT" || state.phase === "LEAF_FAST_PREFLIGHT") return state.execution_mode === "STATIC_APPROVED_DAG" ? staticExecutorRole(policy) : "LUNA_EXECUTOR";
   if (state.phase === "SINGLE_OWNER_FAST_PREFLIGHT") return "SOL_OWNER";
   if (state.phase === "ROUTE_SELECTED") return state.execution_mode === "ROUTED_DAG" ? "SOL_PLANNER" : state.execution_mode === "SINGLE_OWNER_SOL" ? "SOL_OWNER" : state.execution_mode === "STATIC_APPROVED_DAG" ? null : "LUNA_EXECUTOR";
   if (state.phase === "REPLAN_REQUIRED") return "SOL_REPLAN";
@@ -1160,14 +1165,18 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
     if (request.intent === "BLOCK") { action = "BLOCK"; blockingReason = request.blockReason ?? "BLOCKED_M5_AUTHORITY_INCOMPLETE"; }
     if (request.intent === "EVALUATE_TERMINAL" && gate.status === "SATISFIED" && failures.length === 0) action = "CONTINUE_ADMITTED_OPERATION";
     if (request.intent === "AUTHORIZE_WORK" && state.phase === "READY" && actions.length === 0) action = "RUN_RESERVED_CLOSEOUT";
-    if (!continuationAllowed(action, state, request, priorDecisions)) { action = "BLOCK"; blockingReason ??= "BLOCKED_ROUTE_NOT_ELIGIBLE"; }
+    if (!continuationAllowed(action, state, request, priorDecisions, staticExecutorRole(policy))) { action = "BLOCK"; blockingReason ??= "BLOCKED_ROUTE_NOT_ELIGIBLE"; }
     routes = continuationRoutes(action, true); selected = action;
   }
-  const role = requiredRole(state, request);
+  const role = requiredRole(state, request, policy);
   let reservation: M5ControlDecisionDocument["reservation"] = null;
   if (request.intent === "AUTHORIZE_WORK" && selected !== "BLOCK" && role !== null) {
     const roleToCounter: Readonly<Record<LogicalModelRole, keyof WorkflowState["counters"]["worker_invocations"]>> = {
       SOL_OWNER: "sol_owner", SOL_PLANNER: "sol_planner", SOL_REPLAN: "sol_replan", SOL_CLOSEOUT: "sol_closeout", LUNA_EXECUTOR: "luna_executor", TERRA_EXECUTOR: "terra_executor",
+      // CODING_EXECUTOR keeps the legacy persisted storage slot; no state-schema
+      // migration is performed and the product surface reports it as
+      // coding_worker_invocations.
+      CODING_EXECUTOR: "terra_executor",
       BENCHMARK_VERIFIER: "luna_executor", BENCHMARK_SELECTOR: "sol_owner",
     };
     const counter = roleToCounter[role];
