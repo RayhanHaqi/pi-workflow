@@ -5,7 +5,7 @@ import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import { resolveRepositoryIdentity } from "./repository/index.js";
 import { assertM4CanonicalPath } from "./secure-fs/path.js";
-import { isBoundedRoutingIdentity } from "./schemas/definitions.js";
+import { isBoundedRoutingIdentity, type ModelExecutionDefinitionV1 } from "./schemas/definitions.js";
 import {
   runBoundedMutationWorkflow,
   type BoundedMutationAuthority,
@@ -35,7 +35,7 @@ type StaticGoalTask = Readonly<{ readonly task_id: string; readonly objective: s
 /** Frozen legacy V1 route: Terra only. Normalization and digest semantics are immutable historical authority. */
 type StaticRouteV1 = Readonly<{ readonly logical_role: "TERRA_EXECUTOR"; readonly provider_id: "openai-codex"; readonly model_id: "gpt-5.6-terra"; readonly effort: "high" | "xhigh"; readonly fallback: false }>;
 /** V2 route: capability-oriented CODING_EXECUTOR with exact bounded provider/model routing data, high effort, no fallback. */
-type StaticRouteV2 = Readonly<{ readonly logical_role: "CODING_EXECUTOR"; readonly provider_id: string; readonly model_id: string; readonly effort: "high"; readonly fallback: false }>;
+type StaticRouteV2 = Readonly<{ readonly logical_role: "CODING_EXECUTOR"; readonly provider_id: string; readonly model_id: string; readonly effort: "high"; readonly fallback: false; readonly model_execution_definition?: ModelExecutionDefinitionV1 }>;
 
 export interface StaticApprovedDagLaunchSpec {
   readonly spec_version: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2;
@@ -133,9 +133,49 @@ function normalizeCommands(value: unknown): StaticApprovedDagLaunchSpec["verific
 /** Exact bounded routing identity for V2 provider/model routing data; shared grammar authority lives in schemas/definitions. */
 function routeIdentifier(value: unknown, label: string): string { const result = string(value, label, 128); if (!isBoundedRoutingIdentity(result)) fail("INVALID_SPEC", `${label} is not a bounded routing identifier`); return result; }
 
+/**
+ * Strict V1 dynamic-model execution authority shape. The object is authority; its canonical
+ * digest is derived, never independently supplied. Unsupported shapes fail closed here so a
+ * mutated or future-shaped definition can never silently widen execution authority.
+ */
+function normalizeModelExecutionDefinition(value: unknown, route: Readonly<{ readonly provider_id: string; readonly model_id: string }>): ModelExecutionDefinitionV1 {
+  const label = "expected_route.model_execution_definition";
+  const input = record(value, label);
+  exactKeys(input, ["schema_id", "canonicalization_id", "provider_id", "model_id", "api", "base_url", "reasoning", "input", "context_window", "max_tokens", "compat", "headers", "thinking_level_map"], label);
+  if (input["schema_id"] !== "pi_gacw_model_execution_definition_v1") fail("INVALID_SPEC", `${label}.schema_id is unsupported`);
+  if (input["canonicalization_id"] !== "canonical-json-v1") fail("INVALID_SPEC", `${label}.canonicalization_id is unsupported`);
+  const provider_id = routeIdentifier(input["provider_id"], `${label}.provider_id`);
+  const model_id = routeIdentifier(input["model_id"], `${label}.model_id`);
+  if (provider_id !== route.provider_id || model_id !== route.model_id) fail("INVALID_SPEC", `${label} identity differs from the approved route`);
+  const api = string(input["api"], `${label}.api`, 128);
+  const base_url = string(input["base_url"], `${label}.base_url`, 2048);
+  if (typeof input["reasoning"] !== "boolean") fail("INVALID_SPEC", `${label}.reasoning must be a boolean`);
+  const inputModalities: string[] = [];
+  if (!Array.isArray(input["input"]) || input["input"].length === 0 || input["input"].length > 8) fail("INVALID_SPEC", `${label}.input must be a bounded non-empty modality array`);
+  for (const entry of input["input"]) inputModalities.push(string(entry, `${label}.input`, 32));
+  const context_window = positiveSafeInteger(input["context_window"], `${label}.context_window`);
+  const max_tokens = positiveSafeInteger(input["max_tokens"], `${label}.max_tokens`);
+  const compatInput = record(input["compat"], `${label}.compat`);
+  exactKeys(compatInput, ["supportsDeveloperRole", "thinkingFormat"], `${label}.compat`);
+  if (typeof compatInput["supportsDeveloperRole"] !== "boolean") fail("INVALID_SPEC", `${label}.compat.supportsDeveloperRole must be a boolean`);
+  const thinkingFormat = string(compatInput["thinkingFormat"], `${label}.compat.thinkingFormat`, 64);
+  const headersInput = record(input["headers"], `${label}.headers`);
+  if (Object.keys(headersInput).length !== 0) fail("INVALID_SPEC", `${label}.headers must be empty; non-empty model headers are unsupported by ModelExecutionDefinitionV1`);
+  if (input["thinking_level_map"] !== "ABSENT") fail("INVALID_SPEC", `${label}.thinking_level_map must be the literal "ABSENT"; present thinking-level maps are unsupported`);
+  return Object.freeze({
+    schema_id: "pi_gacw_model_execution_definition_v1", canonicalization_id: "canonical-json-v1", provider_id, model_id, api, base_url,
+    reasoning: input["reasoning"] as boolean, input: Object.freeze(inputModalities), context_window, max_tokens,
+    compat: Object.freeze({ supportsDeveloperRole: compatInput["supportsDeveloperRole"] as boolean, thinkingFormat }),
+    headers: Object.freeze({}), thinking_level_map: "ABSENT" as const,
+  });
+}
+
 /** V1 keeps its frozen legacy Terra normalization byte-for-byte; V2 admits only the capability-oriented coding route. */
 function normalizeExpectedRoute(value: unknown, specVersion: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2): StaticRouteV1 | StaticRouteV2 {
-  const route = record(value, "expected_route"); exactKeys(route, ["logical_role", "provider_id", "model_id", "effort", "fallback"], "expected_route");
+  const route = record(value, "expected_route");
+  // V1 rejects a model execution definition outright; V2 admits it as optional derived authority.
+  const hasDefinition = specVersion === STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2 && Object.hasOwn(route, "model_execution_definition");
+  exactKeys(route, hasDefinition ? ["logical_role", "provider_id", "model_id", "effort", "fallback", "model_execution_definition"] : ["logical_role", "provider_id", "model_id", "effort", "fallback"], "expected_route");
   if (route["fallback"] !== false) fail("STATIC_ROUTE_RESTRICTED", "expected_route.fallback must be false; no fallback is authorized");
   if (specVersion === STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION) {
     const effort = route["effort"];
@@ -144,7 +184,10 @@ function normalizeExpectedRoute(value: unknown, specVersion: typeof STATIC_APPRO
   }
   if (route["logical_role"] !== "CODING_EXECUTOR") fail("STATIC_ROUTE_RESTRICTED", "static-approved-dag-launch-v2 authorizes only the CODING_EXECUTOR role");
   if (route["effort"] !== "high") fail("STATIC_ROUTE_RESTRICTED", "static-approved-dag-launch-v2 binds exactly high effort; xhigh and max require a future qualification");
-  return Object.freeze({ logical_role: "CODING_EXECUTOR", provider_id: routeIdentifier(route["provider_id"], "expected_route.provider_id"), model_id: routeIdentifier(route["model_id"], "expected_route.model_id"), effort: "high" as const, fallback: false as const });
+  const provider_id = routeIdentifier(route["provider_id"], "expected_route.provider_id");
+  const model_id = routeIdentifier(route["model_id"], "expected_route.model_id");
+  const model_execution_definition = hasDefinition ? normalizeModelExecutionDefinition(route["model_execution_definition"], { provider_id, model_id }) : undefined;
+  return Object.freeze({ logical_role: "CODING_EXECUTOR", provider_id, model_id, effort: "high" as const, fallback: false as const, ...(model_execution_definition === undefined ? {} : { model_execution_definition }) });
 }
 
 export function normalizeStaticApprovedDagLaunchSpec(value: unknown): StaticApprovedDagLaunchSpec {
@@ -280,6 +323,11 @@ function sameEdgeSet(actual: unknown, expected: readonly Readonly<{ readonly fro
   return same(identities.sort(), expected.map((edge) => `${edge.from}\u0000${edge.to}`).sort());
 }
 
+/** The dynamic-model digest is derived authority: recomputed from the frozen definition, never trusted from the caller. */
+function approvedModelDefinitionDigest(route: StaticApprovedDagLaunchSpec["expected_route"]): Sha256Digest | null {
+  return route.logical_role === "CODING_EXECUTOR" && route.model_execution_definition !== undefined ? sha256Canonical(route.model_execution_definition) : null;
+}
+
 /** Deterministic parent-side authority check; it does not construct a plan or execute work. */
 export function createStaticApprovedDagPlanApproval(spec: StaticApprovedDagLaunchSpec): NonNullable<BoundedMutationOptions["approveTasks"]> {
   return async ({ mode, plan, tasks, executionAuthority }) => {
@@ -289,7 +337,13 @@ export function createStaticApprovedDagPlanApproval(spec: StaticApprovedDagLaunc
     if (!same(bindings.scope, spec.goal.scope) || !same(bindings.required_inputs, spec.goal.scope.readable_paths) || !same(bindings.required_outputs, spec.goal.required_outputs) || !same(bindings.limits.static_time_budgets, spec.static_time_budgets) || bindings.limits.max_wall_time_ms !== spec.static_time_budgets.workflow_wall_ms || bindings.limits.max_attempts_per_leaf !== spec.static_max_attempts_per_leaf) return null;
     const executorRole = spec.expected_route.logical_role;
     const route = { logical_role: spec.expected_route.logical_role, provider_id: spec.expected_route.provider_id, model_id: spec.expected_route.model_id, effort: spec.expected_route.effort };
+    const modelDefinitionDigest = approvedModelDefinitionDigest(spec.expected_route);
     if (executionAuthority.route_map.fallback !== false || !same(bindings.logical_routes.map(({ logical_role, provider_id, model_id, effort }) => ({ logical_role, provider_id, model_id, effort })), [route]) || !same(executionAuthority.route_map.routes.filter((candidate) => candidate.logical_role === executorRole).map(({ logical_role, provider_id, model_id, effort }) => ({ logical_role, provider_id, model_id, effort })), [route]) || !commandsMatch(spec.verification_commands, bindings.verification_commands, executionAuthority.repository.worktree_root)) return null;
+    if (modelDefinitionDigest !== null) {
+      const executorEntries = executionAuthority.route_map.routes.filter((candidate) => candidate.logical_role === executorRole);
+      if (executorEntries.length !== 1 || !("model_definition_sha256" in executorEntries[0]!) || executorEntries[0]!.model_definition_sha256 !== modelDefinitionDigest) return null;
+    }
+    else if (executionAuthority.route_map.routes.some((candidate) => "model_definition_sha256" in candidate)) return null;
     if (tasks.length !== executionAuthority.tasks.length || tasks.some((task, index) => task.content_sha256 !== executionAuthority.tasks[index]?.content_sha256) || executionAuthority.tasks.length !== spec.goal.tasks.length || !sameEdgeSet(executionAuthority.task_graph?.edges, spec.goal.tasks.flatMap((task) => task.dependencies.map((dependency) => ({ from: dependency, to: task.task_id }))))) return null;
     for (let index = 0; index < spec.goal.tasks.length; index += 1) {
       const expected = spec.goal.tasks[index]!; const actual = executionAuthority.tasks[index]!;
@@ -327,7 +381,9 @@ export async function executeStaticApprovedDag(input: ExecuteStaticApprovedDagIn
     // controller authority; no layer may rewrite provider, model, effort, or
     // logical role, and no fallback exists.
     const authority: BoundedMutationAuthority = spec.expected_route.logical_role === "CODING_EXECUTOR"
-      ? { verification_commands: spec.verification_commands as readonly ControllerVerificationCommand[], static_time_budgets: spec.static_time_budgets, static_max_attempts_per_leaf: spec.static_max_attempts_per_leaf, static_coding_route: { provider_id: spec.expected_route.provider_id, model_id: spec.expected_route.model_id, effort: spec.expected_route.effort } }
+      ? { verification_commands: spec.verification_commands as readonly ControllerVerificationCommand[], static_time_budgets: spec.static_time_budgets, static_max_attempts_per_leaf: spec.static_max_attempts_per_leaf,
+          static_coding_route: { provider_id: spec.expected_route.provider_id, model_id: spec.expected_route.model_id, effort: spec.expected_route.effort,
+            ...(approvedModelDefinitionDigest(spec.expected_route) !== null ? { model_definition_sha256: approvedModelDefinitionDigest(spec.expected_route)! } : {}) } }
       : { verification_commands: spec.verification_commands as readonly ControllerVerificationCommand[], static_time_budgets: spec.static_time_budgets, static_max_attempts_per_leaf: spec.static_max_attempts_per_leaf, ...(spec.expected_route.effort === "xhigh" ? { static_terra_effort: "xhigh" as const } : {}) };
     const result = await (input.controller ?? runBoundedMutationWorkflow)(spec.goal, { cwd, authority, approveTasks: createStaticApprovedDagPlanApproval(spec) });
     return resultReport(spec, digest, result, null);

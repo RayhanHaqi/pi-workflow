@@ -188,9 +188,16 @@ test("schema snapshots expose the frozen execution, role, event, and phase value
   const state = getSchemaSnapshot("pi_gacw_state_v0") as MutableJson;
   assert.deepEqual(objective.properties.requested_mode.enum, ["AUTO", "DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"]);
   assert.deepEqual(policy.properties.execution_mode.enum, ["DIRECT_LUNA_HIGH", "SINGLE_OWNER_SOL", "ROUTED_DAG", "STATIC_APPROVED_DAG"]);
-  assert.equal(routeMap.properties.routes.items.properties.logical_role.enum.includes("LUNA_EXECUTOR"), true);
-  assert.equal(routeMap.properties.routes.items.properties.logical_role.enum.includes("TERRA_EXECUTOR"), true);
-  assert.equal(routeMap.properties.routes.items.properties.logical_role.enum.includes("LUNA_MEDIUM"), false);
+  // RouteSchema is a union: legacy routes plus the CODING_EXECUTOR dynamic-model variant.
+  const routeVariants = routeMap.properties.routes.items.anyOf as MutableJson[];
+  const routeRoles = routeVariants.map((variant) => variant.properties.logical_role);
+  const allRouteRoles = routeRoles.flatMap((role: MutableJson) => role.enum ?? [role.const]);
+  assert.equal(allRouteRoles.includes("LUNA_EXECUTOR"), true);
+  assert.equal(allRouteRoles.includes("TERRA_EXECUTOR"), true);
+  assert.equal(allRouteRoles.includes("LUNA_MEDIUM"), false);
+  const digestVariants = routeVariants.filter((variant) => "model_definition_sha256" in variant.properties);
+  assert.equal(digestVariants.length, 1);
+  assert.equal(digestVariants[0]!.properties.model_definition_sha256.pattern, "^sha256:[0-9a-f]{64}$");
   const eventTypes = event.anyOf.map((variant: MutableJson) => variant.properties.event_type.const);
   assert.equal(new Set(eventTypes).size, eventTypes.length);
   assert.equal(new Set(state.properties.phase.enum).size, state.properties.phase.enum.length);

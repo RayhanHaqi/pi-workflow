@@ -388,87 +388,170 @@
           "uniqueItems": true,
           "type": "array",
           "items": {
-            "additionalProperties": false,
-            "type": "object",
-            "properties": {
-              "logical_role": {
-                "type": "string",
-                "enum": [
-                  "SOL_OWNER",
-                  "SOL_PLANNER",
-                  "SOL_REPLAN",
-                  "SOL_CLOSEOUT",
-                  "LUNA_EXECUTOR",
-                  "TERRA_EXECUTOR",
-                  "BENCHMARK_VERIFIER",
-                  "BENCHMARK_SELECTOR",
-                  "CODING_EXECUTOR"
-                ]
-              },
-              "provider_id": {
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
-                "type": "string"
-              },
-              "model_id": {
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
-                "type": "string"
-              },
-              "effort": {
-                "type": "string",
-                "enum": [
-                  "max",
-                  "high",
-                  "xhigh"
-                ]
-              },
-              "tool_policy": {
+            "anyOf": [
+              {
                 "additionalProperties": false,
                 "type": "object",
                 "properties": {
-                  "policy_id": {
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                  "logical_role": {
+                    "type": "string",
+                    "enum": [
+                      "SOL_OWNER",
+                      "SOL_PLANNER",
+                      "SOL_REPLAN",
+                      "SOL_CLOSEOUT",
+                      "LUNA_EXECUTOR",
+                      "TERRA_EXECUTOR",
+                      "BENCHMARK_VERIFIER",
+                      "BENCHMARK_SELECTOR",
+                      "CODING_EXECUTOR"
+                    ]
+                  },
+                  "provider_id": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
                     "type": "string"
                   },
-                  "built_in_tools_disabled": {
-                    "const": true,
-                    "type": "boolean"
+                  "model_id": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+                    "type": "string"
                   },
-                  "mutation_tool": {
+                  "effort": {
                     "type": "string",
                     "enum": [
-                      "NONE",
-                      "APPLY_PATCH_SCOPED"
+                      "max",
+                      "high",
+                      "xhigh"
                     ]
                   },
-                  "command_gateway": {
-                    "type": "string",
-                    "enum": [
-                      "INSPECTION_ONLY",
-                      "TASK_AND_VERIFICATION",
-                      "VERIFICATION_ONLY"
+                  "tool_policy": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "policy_id": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                        "type": "string"
+                      },
+                      "built_in_tools_disabled": {
+                        "const": true,
+                        "type": "boolean"
+                      },
+                      "mutation_tool": {
+                        "type": "string",
+                        "enum": [
+                          "NONE",
+                          "APPLY_PATCH_SCOPED"
+                        ]
+                      },
+                      "command_gateway": {
+                        "type": "string",
+                        "enum": [
+                          "INSPECTION_ONLY",
+                          "TASK_AND_VERIFICATION",
+                          "VERIFICATION_ONLY"
+                        ]
+                      },
+                      "maximum_tool_calls": {
+                        "minimum": 0,
+                        "maximum": 1000000,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "policy_id",
+                      "built_in_tools_disabled",
+                      "mutation_tool",
+                      "command_gateway",
+                      "maximum_tool_calls"
                     ]
-                  },
-                  "maximum_tool_calls": {
-                    "minimum": 0,
-                    "maximum": 1000000,
-                    "type": "integer"
                   }
                 },
                 "required": [
-                  "policy_id",
-                  "built_in_tools_disabled",
-                  "mutation_tool",
-                  "command_gateway",
-                  "maximum_tool_calls"
+                  "logical_role",
+                  "provider_id",
+                  "model_id",
+                  "effort",
+                  "tool_policy"
+                ]
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "logical_role": {
+                    "const": "CODING_EXECUTOR",
+                    "type": "string"
+                  },
+                  "provider_id": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+                    "type": "string"
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "max",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
+                  "tool_policy": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "policy_id": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                        "type": "string"
+                      },
+                      "built_in_tools_disabled": {
+                        "const": true,
+                        "type": "boolean"
+                      },
+                      "mutation_tool": {
+                        "type": "string",
+                        "enum": [
+                          "NONE",
+                          "APPLY_PATCH_SCOPED"
+                        ]
+                      },
+                      "command_gateway": {
+                        "type": "string",
+                        "enum": [
+                          "INSPECTION_ONLY",
+                          "TASK_AND_VERIFICATION",
+                          "VERIFICATION_ONLY"
+                        ]
+                      },
+                      "maximum_tool_calls": {
+                        "minimum": 0,
+                        "maximum": 1000000,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "policy_id",
+                      "built_in_tools_disabled",
+                      "mutation_tool",
+                      "command_gateway",
+                      "maximum_tool_calls"
+                    ]
+                  },
+                  "model_definition_sha256": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "logical_role",
+                  "provider_id",
+                  "model_id",
+                  "effort",
+                  "tool_policy",
+                  "model_definition_sha256"
                 ]
               }
-            },
-            "required": [
-              "logical_role",
-              "provider_id",
-              "model_id",
-              "effort",
-              "tool_policy"
             ]
           }
         },

@@ -257,13 +257,42 @@ export const ToolPolicySchema = StrictObject({
   maximum_tool_calls: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
 });
 
-export const RouteSchema = StrictObject({
+const RouteBaseFields = {
   logical_role: LogicalModelRoleSchema,
   provider_id: Type.String({ pattern: ROUTING_IDENTITY_PATTERN }),
   model_id: Type.String({ pattern: ROUTING_IDENTITY_PATTERN }),
   effort: StringEnum(["max", "high", "xhigh"] as const),
   tool_policy: ToolPolicySchema,
-});
+} as const;
+
+/** A dynamic Pi model execution definition admitted through frozen offline authority. */
+export interface ModelExecutionDefinitionV1 {
+  readonly schema_id: "pi_gacw_model_execution_definition_v1";
+  readonly canonicalization_id: "canonical-json-v1";
+  readonly provider_id: string;
+  readonly model_id: string;
+  readonly api: string;
+  readonly base_url: string;
+  readonly reasoning: boolean;
+  /** Owner-frozen modality order is authority data; it is never normalized. */
+  readonly input: readonly string[];
+  readonly context_window: number;
+  readonly max_tokens: number;
+  readonly compat: Readonly<{ readonly supportsDeveloperRole: boolean; readonly thinkingFormat: string }>;
+  readonly headers: Readonly<Record<string, string>>;
+  /** Literal "ABSENT": the resolved Pi model must have thinkingLevelMap === undefined. */
+  readonly thinking_level_map: "ABSENT";
+}
+
+/** Legacy roles must not carry a dynamic-model digest; only CODING_EXECUTOR may bind one. */
+export const RouteSchema = Type.Union([
+  StrictObject(RouteBaseFields),
+  StrictObject({
+    ...RouteBaseFields,
+    logical_role: Type.Literal("CODING_EXECUTOR"),
+    model_definition_sha256: Digest(),
+  }),
+]);
 
 export const EdgeSchema = StrictObject({
   from: Identifier(),

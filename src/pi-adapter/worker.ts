@@ -38,6 +38,7 @@ import {
   type M5ControlPolicyDocument,
   type M6WorkerInvocationDocument,
   type M6WorkerResultDocument,
+  type ModelExecutionDefinitionV1,
   type ReducerPolicy,
   type TaskDocument,
 } from "../schemas/index.js";
@@ -765,7 +766,118 @@ function streamOptions(value: unknown): JsonRecord {
   return { ...withoutApiKey, maxRetries: 0, maxRetryDelayMs: 0 };
 }
 
-function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object, effort: "high" | "xhigh" | "max" = "high"): PreparedRuntime {
+/** Strict execution-relevant compat keys supported by ModelExecutionDefinitionV1; anything else fails closed. */
+const DYNAMIC_MODEL_COMPAT_KEYS = ["supportsDeveloperRole", "thinkingFormat"] as const;
+
+/**
+ * Project the actual resolved Pi model into ModelExecutionDefinitionV1. Unsupported shapes
+ * (extra compat fields, non-empty headers, any thinkingLevelMap) fail closed instead of being
+ * dropped, so projection drift can never silently widen execution authority.
+ */
+function projectModelExecutionDefinition(model: unknown): ModelExecutionDefinitionV1 {
+  const value = record(model, "resolved dynamic model");
+  const compat = record(value["compat"], "resolved dynamic model compat");
+  if (canonicalize(Object.keys(compat).sort()) !== canonicalize([...DYNAMIC_MODEL_COMPAT_KEYS])) {
+    fail("RUNTIME_CAPABILITY_INVALID", "resolved dynamic model compat shape is unsupported by ModelExecutionDefinitionV1", "RUNTIME_GUARD");
+  }
+  if (typeof compat["supportsDeveloperRole"] !== "boolean") fail("RUNTIME_CAPABILITY_INVALID", "resolved dynamic model compat.supportsDeveloperRole must be boolean", "RUNTIME_GUARD");
+  const thinkingFormat = string(compat["thinkingFormat"], "resolved dynamic model compat.thinkingFormat");
+  const headers = value["headers"];
+  if (headers !== undefined && (!isJsonRecord(headers) || Object.keys(headers).length !== 0)) {
+    fail("RUNTIME_CAPABILITY_INVALID", "resolved dynamic model carries non-empty headers; unsupported by ModelExecutionDefinitionV1", "RUNTIME_GUARD");
+  }
+  if (value["thinkingLevelMap"] !== undefined) fail("RUNTIME_CAPABILITY_INVALID", "resolved dynamic model carries a thinkingLevelMap; unsupported by ModelExecutionDefinitionV1", "RUNTIME_GUARD");
+  const input = array(value["input"], "resolved dynamic model input modalities").map((entry, index) => string(entry, `resolved dynamic model input[${index}]`));
+  if (input.length === 0) fail("RUNTIME_CAPABILITY_INVALID", "resolved dynamic model declares no input modalities", "RUNTIME_GUARD");
+  const contextWindow = value["contextWindow"];
+  const maxTokens = value["maxTokens"];
+  for (const [label, numberValue] of [["context_window", contextWindow], ["max_tokens", maxTokens]] as const) {
+    if (typeof numberValue !== "number" || !Number.isSafeInteger(numberValue) || numberValue <= 0) fail("RUNTIME_CAPABILITY_INVALID", `resolved dynamic model ${label} must be a positive safe integer`, "RUNTIME_GUARD");
+  }
+  return Object.freeze({
+    schema_id: "pi_gacw_model_execution_definition_v1",
+    canonicalization_id: "canonical-json-v1",
+    provider_id: string(value["provider"], "resolved dynamic model provider"),
+    model_id: string(value["id"], "resolved dynamic model id"),
+    api: string(value["api"], "resolved dynamic model api"),
+    base_url: string(value["baseUrl"], "resolved dynamic model baseUrl"),
+    reasoning: boolean(value["reasoning"], "resolved dynamic model reasoning"),
+    input: Object.freeze(input),
+    context_window: contextWindow as number,
+    max_tokens: maxTokens as number,
+    compat: Object.freeze({ supportsDeveloperRole: compat["supportsDeveloperRole"] as boolean, thinkingFormat }),
+    headers: Object.freeze({}),
+    thinking_level_map: "ABSENT" as const,
+  });
+}
+
+interface DynamicModelAdmission {
+  readonly models: ModelsRuntime;
+  readonly model: unknown;
+  readonly projection: ModelExecutionDefinitionV1;
+  readonly digest: Sha256Digest;
+}
+
+/**
+ * Resolve the exact approved dynamic model through the public Pi-native runtime with network
+ * disabled, project it, and require exact frozen-digest equality before any provider admission.
+ * The mutable models store is only a candidate source; the frozen digest is the authority.
+ */
+async function admitDynamicPiModelRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, expectedDigest: Sha256Digest, modelsStoreOverride?: unknown): Promise<DynamicModelAdmission> {
+  const modelRuntimeExport = readProperty(boundary.codingAgentModule, "ModelRuntime", "coding-agent module");
+  if (typeof modelRuntimeExport !== "function") fail("RUNTIME_CAPABILITY_INVALID", "coding-agent module.ModelRuntime is not a runtime factory", "RUNTIME_GUARD");
+  const create = readProperty(modelRuntimeExport as unknown as JsonRecord, "create", "ModelRuntime");
+  if (typeof create !== "function") fail("RUNTIME_CAPABILITY_INVALID", "ModelRuntime.create is unavailable on the verified Pi runtime", "RUNTIME_GUARD");
+  let instance: unknown;
+  try {
+    // allowModelNetwork:false is the hard offline gate; no catalog refresh can reach the network.
+    instance = await (create as (options: JsonRecord) => Promise<unknown>)({ credentials: credentialStore, allowModelNetwork: false, ...(modelsStoreOverride === undefined ? {} : { modelsStore: modelsStoreOverride }) });
+  } catch (error: unknown) {
+    fail("RUNTIME_CAPABILITY_INVALID", `offline Pi dynamic model runtime initialization failed: ${error instanceof Error ? error.message : String(error)}`, "RUNTIME_GUARD");
+  }
+  const runtime = record(instance, "Pi ModelRuntime");
+  const getModelMethod = method(runtime, "getModel", "Pi ModelRuntime");
+  const getProviderMethod = method(runtime, "getProvider", "Pi ModelRuntime");
+  const getProvidersMethod = method(runtime, "getProviders", "Pi ModelRuntime");
+  const streamSimpleMethod = method(runtime, "streamSimple", "Pi ModelRuntime");
+  const model = getModelMethod(providerId, modelId);
+  if (model === undefined) fail("RUNTIME_CAPABILITY_INVALID", "the approved dynamic model is absent from the offline Pi runtime catalogue", "RUNTIME_GUARD");
+  const projection = projectModelExecutionDefinition(model);
+  let digest: Sha256Digest;
+  try { digest = sha256Canonical(projection); }
+  catch (error: unknown) { fail("RUNTIME_CAPABILITY_INVALID", `resolved dynamic model projection is not canonicalizable: ${error instanceof Error ? error.message : String(error)}`, "RUNTIME_GUARD"); }
+  if (digest !== expectedDigest) {
+    fail("RUNTIME_CAPABILITY_INVALID", `resolved dynamic model execution definition ${digest} differs from the frozen authority ${expectedDigest}`, "RUNTIME_GUARD");
+  }
+  const models: ModelsRuntime = {
+    getProviders: () => array(getProvidersMethod(), "Pi runtime providers"),
+    getProvider: (provider) => getProviderMethod(provider),
+    getModel: (provider, candidate) => getModelMethod(provider, candidate),
+    getSupportedThinkingLevels: () => [],
+    streamSimple: (streamModel, context, options) => streamSimpleMethod(streamModel, context, options),
+    setProvider: () => fail("RUNTIME_CAPABILITY_INVALID", "provider mutation is forbidden on the dynamic Pi runtime", "RUNTIME_GUARD"),
+    clearProviders: () => undefined,
+  };
+  return { models, model, projection, digest };
+}
+
+/** Test-only hook: run the exact production dynamic-model admission without constructing an Agent or streaming. */
+export interface DynamicModelAdmissionTestInput {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly modelDefinitionSha256: Sha256Digest;
+  readonly credentialStore: CredentialStoreRuntime;
+  /** Test-only in-memory Pi models store; production resolves through the Pi agent directory. */
+  readonly modelsStore?: unknown;
+}
+
+export async function admitDynamicPiModelForTests(input: DynamicModelAdmissionTestInput): Promise<Readonly<{ readonly projection: ModelExecutionDefinitionV1; readonly digest: Sha256Digest }>> {
+  const boundary = await loadRuntimeBoundary();
+  const admission = await admitDynamicPiModelRuntime(boundary, input.providerId, input.modelId, input.credentialStore, input.modelDefinitionSha256, input.modelsStore);
+  return { projection: admission.projection, digest: admission.digest };
+}
+
+async function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object, effort: "high" | "xhigh" | "max" = "high", modelDefinitionSha256?: Sha256Digest | null, modelsStoreOverride?: unknown): Promise<PreparedRuntime> {
   const getSupportedThinkingLevels = method(boundary.aiModule, "getSupportedThinkingLevels", "AI module");
   const builtinModels = method(boundary.providersModule, "builtinModels", "providers module");
   const officialIds = verifyOfficialCatalogue(boundary.providersModule);
@@ -787,12 +899,19 @@ function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: 
     pendingResponseCount = prepared.pendingResponseCount;
     injectedStreamFn = prepared.streamFn;
   } else {
+    if (modelDefinitionSha256 !== undefined && modelDefinitionSha256 !== null && fauxAuthority !== undefined) {
+      fail("AUTHORITY_REJECTED", "dynamic model authority cannot accompany a test faux runtime", "M1_M5_ADMISSION");
+    }
     if (!officialIds.includes(providerId)) fail("RUNTIME_CAPABILITY_INVALID", "M5 provider is absent from the official catalogue", "RUNTIME_GUARD");
-    modelFromCatalogue(boundary.providersModule, providerId, modelId);
-    models = guardModels(builtinModels({ credentials: credentialStore }));
-    const registeredProvider = record(models.getProvider(providerId), "registered catalogue provider");
-    exactString(registeredProvider["id"], providerId, "registered catalogue provider ID");
-    model = models.getModel(providerId, modelId);
+    if (modelDefinitionSha256 === undefined || modelDefinitionSha256 === null) {
+      modelFromCatalogue(boundary.providersModule, providerId, modelId);
+      models = guardModels(builtinModels({ credentials: credentialStore }));
+      const registeredProvider = record(models.getProvider(providerId), "registered catalogue provider");
+      exactString(registeredProvider["id"], providerId, "registered catalogue provider ID");
+      model = models.getModel(providerId, modelId);
+    } else {
+      ({ models, model } = await admitDynamicPiModelRuntime(boundary, providerId, modelId, credentialStore, modelDefinitionSha256, modelsStoreOverride));
+    }
   }
   if (model === undefined) fail("RUNTIME_CAPABILITY_INVALID", "Exact provider/model lookup returned no model", "RUNTIME_GUARD");
   modelIdentity(model, providerId, modelId);
@@ -1357,7 +1476,7 @@ async function runWorker(input: M6DirectReadOnlyWorkerInput, fauxAuthority: obje
     try {
       if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before runtime preparation", "M6_INVOCATION");
       const credentialStore = await resolveCredentialStore(input, admission.providerId);
-      prepared = prepareRuntime(runtimeBoundary, admission.providerId, admission.modelId, credentialStore, fauxAuthority);
+      prepared = await prepareRuntime(runtimeBoundary, admission.providerId, admission.modelId, credentialStore, fauxAuthority);
       if (input.signal?.aborted) fail("WORKER_ABORTED", "Worker was aborted before invocation publication", "M6_INVOCATION");
       await publishM6WorkerRecord({ ...location, kind: "M6_WORKER_INVOCATION", document: invocation });
       return { runtime: prepared };
@@ -1567,6 +1686,8 @@ export interface BoundedPiAgentInput {
   readonly providerId: string;
   readonly modelId: string;
   readonly effort: "high" | "xhigh" | "max";
+  /** Frozen dynamic-model execution authority; absent/null keeps the builtin-only runtime path. */
+  readonly modelDefinitionSha256?: Sha256Digest | null;
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly tools: readonly BoundedPiTool[];
@@ -1689,7 +1810,7 @@ async function runBoundedPiAgentImpl(
     rejectCancelled("POST_RUNTIME_BOUNDARY");
     const credentials = testCredentialStore ?? await publicCredentialStore(input.providerId);
     rejectCancelled("POST_CREDENTIAL_PREPARATION");
-    runtime = prepareRuntime(boundary, input.providerId, input.modelId, credentials, fauxAuthority, input.effort);
+    runtime = await prepareRuntime(boundary, input.providerId, input.modelId, credentials, fauxAuthority, input.effort, input.modelDefinitionSha256 ?? null);
     rejectCancelled("POST_RUNTIME_PREPARATION");
     const names = input.tools.map((tool) => tool.name);
     if (names.length === 0 || new Set(names).size !== names.length) fail("RUNTIME_CAPABILITY_INVALID", "bounded tool profile is invalid", "RUNTIME_GUARD");

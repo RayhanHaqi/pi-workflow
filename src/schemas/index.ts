@@ -17,6 +17,7 @@ export type {
   M3BaselinePath,
   M3BaselineRuntimeDocument,
   M3DeltaEntry,
+  ModelExecutionDefinitionV1,
   M3EnvironmentFingerprint,
   M3FileSetFingerprint,
   M3GitStateFingerprintDocument,

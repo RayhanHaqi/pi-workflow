@@ -390,7 +390,7 @@ test("STATIC_APPROVED_DAG forwards the exact V2 coding route to the bounded work
     assert.equal(result.outcome, "PASS", result.reason);
     assert.deepEqual(planRoutes, [[{ logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high" }]]);
     assert.equal(workerRoutes.length, 2);
-    for (const route of workerRoutes) assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "provider-a", modelId: "model-a", effort: "high" });
+    for (const route of workerRoutes) assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "provider-a", modelId: "model-a", effort: "high", modelDefinitionSha256: null });
     // The legacy persisted storage slot keeps counting static coding invocations.
     assert.equal(result.finalState?.counters.worker_invocations.terra_executor, 2);
   } finally {
@@ -447,7 +447,7 @@ test("STATIC_APPROVED_DAG forwards the exact discovered Ox route (openrouter / s
     });
     assert.equal(result.outcome, "PASS", result.reason);
     assert.equal(workerRoutes.length, 2);
-    for (const route of workerRoutes) assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high" });
+    for (const route of workerRoutes) assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high", modelDefinitionSha256: null });
     assert.equal(result.finalState?.counters.worker_invocations.terra_executor, 2);
   } finally {
     configureBoundedWorkerFauxRuntimeForTests(undefined);

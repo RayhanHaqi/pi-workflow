@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/index.js";
 import type { M5AuthoritativeSources, M5FailureInput, M5ObligationEvidenceInput } from "./control/types.js";
-import { sha256Bytes, sha256Canonical, type Sha256Digest } from "./identity/index.js";
+import { sha256Bytes, sha256Canonical, assertSha256Digest, type Sha256Digest } from "./identity/index.js";
 import { m3ScopeIdentity } from "./identity/m3-scope.js";
 import { commitTransition, initializeRunStorage, inspectRunStorage, terminalizeProcessCrash, type CommittedRunState } from "./persistence/index.js";
 import { loadProcessCrashTerminalizationAuthority, readBoundedWorkerRecords, readM5ManagedRecords } from "./persistence/store.js";
@@ -127,6 +127,8 @@ export interface StaticCodingRoute {
   readonly provider_id: string;
   readonly model_id: string;
   readonly effort: "high";
+  /** Derived from the owner-frozen model_execution_definition by the launcher; absent for builtin-only routes. */
+  readonly model_definition_sha256?: Sha256Digest;
 }
 
 export interface BaselineApprovalRequest {
@@ -666,6 +668,7 @@ function routeMap(maxToolCalls: number, staticTerraEffort: StaticTerraEffort, st
   // routing data without any engine-side provider/model hardcoding.
   if (staticCodingRoute !== undefined) {
     routes.push({ logical_role: "CODING_EXECUTOR", provider_id: staticCodingRoute.provider_id, model_id: staticCodingRoute.model_id, effort: "high" as const,
+      ...(staticCodingRoute.model_definition_sha256 === undefined ? {} : { model_definition_sha256: staticCodingRoute.model_definition_sha256 }),
       tool_policy: { policy_id: "pre-m8-coding_executor", built_in_tools_disabled: true as const, mutation_tool: "APPLY_PATCH_SCOPED" as const,
         command_gateway: "TASK_AND_VERIFICATION" as const, maximum_tool_calls: maxToolCalls } });
   }
@@ -733,7 +736,11 @@ function staticCodingRoute(goal: ReturnType<typeof normalizeGoal>, authority: Bo
   for (const [field, value] of [["provider_id", supplied.provider_id], ["model_id", supplied.model_id]] as const) {
     if (typeof value !== "string" || !isBoundedRoutingIdentity(value)) fail("INVALID_STATIC_CODING_ROUTE", `static_coding_route.${field} must be a bounded exact routing identifier`);
   }
-  return { provider_id: supplied.provider_id, model_id: supplied.model_id, effort: "high" };
+  if (supplied.model_definition_sha256 !== undefined) {
+    try { assertSha256Digest(supplied.model_definition_sha256, "static_coding_route.model_definition_sha256"); }
+    catch { fail("INVALID_STATIC_CODING_ROUTE", "static_coding_route.model_definition_sha256 must be a sha256 digest"); }
+  }
+  return { provider_id: supplied.provider_id, model_id: supplied.model_id, effort: "high", ...(supplied.model_definition_sha256 === undefined ? {} : { model_definition_sha256: supplied.model_definition_sha256 }) };
 }
 
 function budget(goal: ReturnType<typeof normalizeGoal>, maxToolCalls: number, staticAttemptsPerLeaf = 1, frozenStaticTimeBudgets?: StaticApprovedDagTimeBudgets): BudgetDocument {
@@ -1229,7 +1236,8 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       const invocationState = gateway.acceptedState;
       const readableScope = partitionProviderVisibleReadScope(task?.scope.readable_paths ?? goal.scope.readable_paths, m4Policy.path_authorities);
       const execution = await workerRunner({ stateRoot, runId: RUN_ID, operationId, reservation: admission, task, taskGraph: graph, plan: workerPlan, inputStateToken: invocationState, lock: lock!, gateway,
-        route: { logicalRole: routeRole, providerId: selectedRoute.provider_id, modelId: selectedRoute.model_id, effort: selectedRoute.effort }, profile,
+        route: { logicalRole: routeRole, providerId: selectedRoute.provider_id, modelId: selectedRoute.model_id, effort: selectedRoute.effort,
+          modelDefinitionSha256: ("model_definition_sha256" in selectedRoute ? selectedRoute.model_definition_sha256 : null) as Sha256Digest | null }, profile,
         systemPrompt: `Pre-M8 bounded ${profile}; use only supplied M4 tools; no retry, replan, commands, shell, filesystem, or network.`,
         userPrompt: providerVisibleTaskContract(task?.objective ?? goal.objective, readableScope, task?.scope.editable_paths ?? goal.scope.editable_paths, profile === "SOL_PLANNER" ? workerPlan : null, maxM4MutationCalls === 1 ? 1 : null),
         allowedReadPaths: readableScope.regularFilePaths, allowedEditPaths: task?.scope.editable_paths ?? [], maxM4ToolCalls, maxM4MutationCalls,

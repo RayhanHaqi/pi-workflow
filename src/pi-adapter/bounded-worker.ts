@@ -39,6 +39,8 @@ export interface BoundedWorkerRoute {
   readonly providerId: string;
   readonly modelId: string;
   readonly effort: "high" | "xhigh" | "max";
+  /** Frozen dynamic-model execution authority; null keeps the builtin-only runtime path. */
+  readonly modelDefinitionSha256: Sha256Digest | null;
 }
 
 export interface BoundedWorkerTools {
@@ -235,7 +237,7 @@ const acceptedPiRuntime: BoundedWorkerRuntime = Object.freeze({
     if (cancelled(input.signal)) return { completed: false, firstFailureCode: "WORKER_ABORTED", firstFailureStage: "PRE_PROVIDER_ADMISSION", modelTurns: 0, providerRequests: 0, inputTokens: null, outputTokens: null, costMicrousd: null, cleanupCertain: true };
     // The Pi adapter owns Agent cleanup. Scoped closures below remain the hard
     // cancellation gate for every productive tool admission.
-    return runBoundedPiAgent({ providerId: input.route.providerId, modelId: input.route.modelId, effort: input.route.effort, systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
+    return runBoundedPiAgent({ providerId: input.route.providerId, modelId: input.route.modelId, effort: input.route.effort, modelDefinitionSha256: input.route.modelDefinitionSha256, systemPrompt: input.systemPrompt, userPrompt: input.userPrompt,
       tools, maxModelTurns: input.maxModelTurns, deadlineMs: input.deadlineMs,
       ...(input.signal === undefined ? {} : { signal: input.signal }) });
   },

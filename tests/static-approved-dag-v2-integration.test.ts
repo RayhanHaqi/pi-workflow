@@ -15,6 +15,15 @@ import {
 import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type BoundedMutationGoal } from "../src/workflow-controller.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 
+/** Exact owner-frozen Ox dynamic-model execution authority (digest derived by the launcher). */
+const OX_MODEL_EXECUTION_DEFINITION = {
+  api: "openai-completions", base_url: "https://openrouter.ai/api/v1", canonicalization_id: "canonical-json-v1",
+  compat: { supportsDeveloperRole: false, thinkingFormat: "openrouter" }, context_window: 1_048_576, headers: {},
+  input: ["text", "image"], max_tokens: 131_072, model_id: "stealth/ox-alpha", provider_id: "openrouter",
+  reasoning: true, schema_id: "pi_gacw_model_execution_definition_v1", thinking_level_map: "ABSENT",
+} as const;
+const OX_MODEL_DEFINITION_SHA256 = "sha256:106eb60535677cea92ae32ddf9f83176c1479035a2e49d140dcf5c82e8eadad6";
+
 const exec = promisify(execFile);
 
 /** Temporary repository with every readable path present; workload mirrors the frozen OXQ-001 shape at integration scale. */
@@ -31,7 +40,7 @@ async function fixture(): Promise<string> {
   return root;
 }
 
-async function v2Spec(root: string): Promise<ReturnType<typeof normalizeStaticApprovedDagLaunchSpec>> {
+async function v2Spec(root: string, modelExecutionDefinition?: Record<string, unknown>): Promise<ReturnType<typeof normalizeStaticApprovedDagLaunchSpec>> {
   const [branch, head, tree] = await Promise.all([
     exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root }).then((r) => r.stdout.trim()),
     exec("git", ["rev-parse", "HEAD"], { cwd: root }).then((r) => r.stdout.trim()),
@@ -53,7 +62,8 @@ async function v2Spec(root: string): Promise<ReturnType<typeof normalizeStaticAp
     spec_version: "static-approved-dag-launch-v2", run_label: "v2-integration", expected_repository_branch: branch, expected_head: head, expected_tree: tree,
     goal, verification_commands: authorityCommands,
     static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }, static_max_attempts_per_leaf: 1,
-    expected_route: { logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false },
+    expected_route: { logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false,
+      ...(modelExecutionDefinition === undefined ? {} : { model_execution_definition: modelExecutionDefinition }) },
   });
 }
 
@@ -89,7 +99,7 @@ test("V2 launch spec is accepted by the REAL controller approval boundary and ad
     assert.equal(result.workflow?.coding_worker_invocations, 2);
     assert.ok(result.workflow?.tasks.every((task) => task.status === "PASS"));
     for (const route of workerRoutes) {
-      assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high" });
+      assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high", modelDefinitionSha256: null });
     }
   } finally {
     configureBoundedWorkerFauxRuntimeForTests(undefined); await rm(root, { recursive: true, force: true });
@@ -117,6 +127,34 @@ test("launcher matcher accepts the exact real controller authority and rejects r
     const droppedEdge = JSON.parse(JSON.stringify(captured));
     droppedEdge.executionAuthority.task_graph.edges.pop();
     assert.equal(await approve(droppedEdge), null);
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined); await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("real-controller faux integration propagates the exact frozen model-definition digest to the worker generation seam", async () => {
+  const root = await fixture(); const workerRoutes: unknown[] = [];
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute({ route, tools }) {
+      workerRoutes.push({ ...route });
+      const path = ["a.txt", "b.txt"][workerRoutes.length - 1]!;
+      await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      tools.submitReport("dynamic model integration mutation");
+      return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+    },
+  }));
+  try {
+    // The faux runtime reaches the generation seam without any real provider request.
+    const spec = await v2Spec(root, structuredClone(OX_MODEL_EXECUTION_DEFINITION));
+    const result = await executeStaticApprovedDag({
+      spec: JSON.parse(JSON.stringify(spec)), approved_spec_sha256: staticApprovedDagSpecSha256(spec), cwd: root,
+      controller: runBoundedMutationWorkflowForTests,
+    });
+    assert.equal(result.classification, "PASS", result.reason);
+    assert.equal(result.workflow?.coding_worker_invocations, 2);
+    for (const route of workerRoutes) {
+      assert.deepEqual(route, { logicalRole: "CODING_EXECUTOR", providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high", modelDefinitionSha256: OX_MODEL_DEFINITION_SHA256 });
+    }
   } finally {
     configureBoundedWorkerFauxRuntimeForTests(undefined); await rm(root, { recursive: true, force: true });
   }
