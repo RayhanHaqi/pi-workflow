@@ -1,4 +1,4 @@
-export { ROUTING_IDENTITY_PATTERN, SCHEMA_VERSION, isBoundedRoutingIdentity } from "./definitions.js";
+export { SCHEMA_VERSION } from "./definitions.js";
 export type {
   AuthorityLockDocument,
   BaselineApprovalDocument,

@@ -35,10 +35,10 @@ import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
 import { isInterpreterExecutablePath } from "./scoped-tools/commands.js";
 import { assertM4CanonicalPath } from "./secure-fs/path.js";
+import { isBoundedRoutingIdentity } from "./schemas/definitions.js";
 import {
   assertDocumentValid,
   identifyContractDocument,
-  isBoundedRoutingIdentity,
   type BudgetDocument,
   type ConcreteExecutionMode,
   type ContractDocument,
