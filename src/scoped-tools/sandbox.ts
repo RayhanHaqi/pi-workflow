@@ -10,6 +10,7 @@ import { assertDocumentValid } from "../schemas/index.js";
 import { COMMAND_SANDBOX_PROTOCOL, resolveSandboxHelper } from "../secure-fs/sandbox-helper.js";
 import { secureFilesystemTestHooks } from "../secure-fs/test-hooks.js";
 import { ScopedToolGatewayError, type ScopedToolGatewayErrorCode } from "./errors.js";
+import { validatePackageExecutionInputClosure } from "./commands.js";
 
 export interface SandboxExecutionOutcome {
   readonly startedAt: string;
@@ -81,7 +82,7 @@ async function prepareExecutionInputs(specification: M4CommandSpecification, tem
     }
   }
   const root = await mkdtemp(join(dirname(temporaryRoot), ".m4exec-")); await chmod(root, 0o700);
-  const replacements = new Map<string, string>(); const destinations = new Set<string>(); const directories = new Set<string>([root]);
+  const replacements = new Map<string, string>(); const destinations = new Set<string>(); const directories = new Set<string>([root]); const capturedBytes = new Map<string, Buffer>();
   const cleanup = async (): Promise<void> => {
     for (const directory of [...directories].sort((left, right) => left.length - right.length)) {
       try { await chmod(directory, 0o700); } catch { /* best-effort permission restoration before deterministic removal */ }
@@ -109,6 +110,12 @@ async function prepareExecutionInputs(specification: M4CommandSpecification, tem
       try { await target.writeFile(bytes); await target.sync(); } finally { await target.close(); }
       await chmod(destination, input.mode & 0o555);
       replacements.set(input.path, destination);
+      capturedBytes.set(input.path, bytes);
+    }
+    if (specification.execution_input_layout !== "FLAT") {
+      const script = specification.argv[1];
+      if (script === undefined) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package command entrypoint is absent before immutable execution");
+      validatePackageExecutionInputClosure(specification.execution_input_layout.source_root, script, specification.execution_inputs, capturedBytes);
     }
     for (const directoryPath of [...directories].sort((left, right) => right.length - left.length)) {
       const directory = await open(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY); try { await directory.sync(); } finally { await directory.close(); }

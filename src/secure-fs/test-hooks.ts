@@ -20,6 +20,7 @@ export interface SecureFilesystemTestHooks {
   readonly sandboxCheckpointSocket?: string;
   readonly sandboxCheckpointStage?: string;
   readonly beforeRepositoryRevalidation?: () => Promise<void>;
+  readonly afterPackageMetadataDiscovery?: (packageRoot: string) => Promise<void>;
   readonly sandboxOutputChunkBytes?: number;
 }
 

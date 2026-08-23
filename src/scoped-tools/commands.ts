@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
 
 import { sha256Bytes, sha256Canonical } from "../identity/index.js";
 import { MAX_COMMAND_EXECUTABLE_BYTES } from "../schemas/definitions.js";
@@ -8,6 +8,7 @@ import { assertDocumentValid, type M3RepositoryIdentityDocument, type M4CommandC
 import { resolveRepositoryIdentity } from "../repository/identity.js";
 import { detachedFrozen } from "../repository/utils.js";
 import { assertM4CanonicalPath, pathMatchesRules, validatePathRules } from "../secure-fs/path.js";
+import { secureFilesystemTestHooks } from "../secure-fs/test-hooks.js";
 import { ScopedToolGatewayError } from "./errors.js";
 import type { ValidatedToolPolicy } from "./policy.js";
 
@@ -34,17 +35,31 @@ interface FrozenFileIdentity {
   readonly digest: `sha256:${string}`;
 }
 
-async function frozenFileIdentity(path: string): Promise<FrozenFileIdentity> {
+interface FrozenFileSnapshot extends FrozenFileIdentity { readonly bytes: Buffer }
+
+async function frozenFileSnapshot(path: string): Promise<FrozenFileSnapshot> {
   const physical = await realpath(path); const handle = await open(physical, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = await handle.stat(); const bytes = await handle.readFile(); const after = await handle.stat(); const current = await lstat(physical);
     if (!before.isFile() || before.size > MAX_COMMAND_EXECUTABLE_BYTES || before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode ||
         before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || before.dev !== current.dev || before.ino !== current.ino) {
-      throw new ScopedToolGatewayError("COMMAND_SPEC_MISMATCH", "Executable changed while its authority was captured");
+      throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "File changed while its content authority was captured");
     }
     return Object.freeze({ realpath: physical, device: before.dev, inode: before.ino, mode: before.mode & 0o7777,
-      size: before.size, digest: sha256Bytes(bytes) });
+      size: before.size, digest: sha256Bytes(bytes), bytes });
   } finally { await handle.close(); }
+}
+
+async function frozenFileIdentity(path: string): Promise<FrozenFileIdentity> {
+  try {
+    const { bytes: _bytes, ...identity } = await frozenFileSnapshot(path);
+    return Object.freeze(identity);
+  } catch (error: unknown) {
+    if (error instanceof ScopedToolGatewayError && error.code === "EXECUTION_INPUT_DRIFT") {
+      throw new ScopedToolGatewayError("COMMAND_SPEC_MISMATCH", "Executable changed while its authority was captured", {}, { cause: error });
+    }
+    throw error;
+  }
 }
 
 function packageDependencyNames(value: unknown): Readonly<{ required: readonly string[]; optional: readonly string[] }> {
@@ -56,7 +71,11 @@ function packageDependencyNames(value: unknown): Readonly<{ required: readonly s
     if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate) || Object.values(candidate).some((entry) => typeof entry !== "string")) {
       throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", `Package ${field} metadata is malformed`);
     }
-    return Object.keys(candidate).sort();
+    const result = Object.keys(candidate).sort();
+    if (result.some((name) => !/^(?:@[^/\\]+\/)?[^@/\\][^/\\]*$/u.test(name) || name.includes("\0") || name.split("/").some((part) => part === "." || part === ".."))) {
+      throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", `Package ${field} contains an invalid dependency name`);
+    }
+    return result;
   };
   return Object.freeze({ required: names("dependencies"), optional: names("optionalDependencies") });
 }
@@ -93,6 +112,89 @@ async function packageDirectoryForScript(sourceRoot: string, scriptPath: string)
   return packageRoot;
 }
 
+function packageRootFromMetadataCapturePath(path: string): string | null {
+  const parts = path.split("/");
+  if (parts.at(-1) !== "package.json") return null;
+  parts.pop();
+  if (parts.length < 2) return null;
+  let cursor = 0;
+  while (cursor < parts.length) {
+    if (parts[cursor] !== "node_modules") return null;
+    cursor += parts[cursor + 1]?.startsWith("@") ? 3 : 2;
+    if (cursor > parts.length) return null;
+    if (cursor < parts.length && parts[cursor] !== "node_modules") return null;
+  }
+  return parts.join("/");
+}
+
+function entrypointPackageCaptureRoot(scriptCapturePath: string): string {
+  const parts = scriptCapturePath.split("/");
+  if (parts[0] !== "node_modules" || parts.length < 3) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package-tree entrypoint capture path is invalid");
+  const length = parts[1]!.startsWith("@") ? 3 : 2;
+  if (parts.length <= length) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package-tree entrypoint has no package-relative path");
+  return parts.slice(0, length).join("/");
+}
+
+function resolveCapturedPackage(packageRoots: ReadonlySet<string>, fromPackage: string, name: string): string | null {
+  let cursor = fromPackage;
+  for (;;) {
+    const candidate = join(cursor, "node_modules", name);
+    if (packageRoots.has(candidate)) return candidate;
+    if (cursor === "") return null;
+    const parent = dirname(cursor);
+    cursor = parent === "." || parent === cursor ? "" : parent;
+  }
+}
+
+/** Prove package dependency closure solely from content-bound execution-input bytes. */
+export function validatePackageExecutionInputClosure(
+  sourceRoot: string,
+  scriptPath: string,
+  inputs: M4CommandSpecification["execution_inputs"],
+  bytesByPath: ReadonlyMap<string, Buffer>,
+): void {
+  const byCapture = new Map(inputs.map((input) => [input.capture_path!, input]));
+  const packageMetadata = new Map<string, ReturnType<typeof packageDependencyNames>>();
+  for (const input of inputs) {
+    if (input.capture_path === undefined) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package execution-input capture path is absent");
+    const packageRoot = packageRootFromMetadataCapturePath(input.capture_path);
+    if (packageRoot === null) continue;
+    const bytes = bytesByPath.get(input.path);
+    if (bytes === undefined || sha256Bytes(bytes) !== input.digest) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Content-bound package metadata is unavailable");
+    try { packageMetadata.set(packageRoot, packageDependencyNames(JSON.parse(bytes.toString("utf8")))); }
+    catch (error: unknown) {
+      if (error instanceof ScopedToolGatewayError) throw error;
+      throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Captured package metadata is invalid", {}, { cause: error });
+    }
+  }
+  const packageRoots = new Set(packageMetadata.keys());
+  const scriptInput = inputs.find((input) => input.path === scriptPath && input.capture_path !== undefined);
+  if (scriptInput === undefined || join(sourceRoot, scriptInput.capture_path!) !== scriptPath) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package closure omits its content-bound entrypoint");
+  const pending = [entrypointPackageCaptureRoot(scriptInput.capture_path!)]; const reachable = new Set<string>();
+  while (pending.length > 0) {
+    const packageRoot = pending.shift()!;
+    if (reachable.has(packageRoot)) continue;
+    const dependencies = packageMetadata.get(packageRoot);
+    if (dependencies === undefined) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Captured dependency package metadata is absent");
+    reachable.add(packageRoot);
+    for (const name of dependencies.required) {
+      const dependency = resolveCapturedPackage(packageRoots, packageRoot, name);
+      if (dependency === null) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", `Captured required package dependency ${name} is absent`);
+      pending.push(dependency);
+    }
+    for (const name of dependencies.optional) {
+      const dependency = resolveCapturedPackage(packageRoots, packageRoot, name);
+      if (dependency !== null) pending.push(dependency);
+    }
+  }
+  if (reachable.size !== packageRoots.size || [...packageRoots].some((packageRoot) => !reachable.has(packageRoot))) {
+    throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Captured package inventory differs from its content-bound dependency closure");
+  }
+  for (const [capturePath] of byCapture) {
+    if (!capturePath.startsWith("node_modules/")) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package capture contains a file outside node_modules");
+  }
+}
+
 /** Freeze an installed entrypoint's declared package dependency closure as an explicit relative tree. */
 export async function freezePackageExecutionInputs(sourceRoot: string, scriptPath: string): Promise<M4CommandSpecification["execution_inputs"]> {
   const [rootStats, rootPhysical, scriptPhysical] = await Promise.all([lstat(sourceRoot), realpath(sourceRoot), realpath(scriptPath)]);
@@ -100,18 +202,20 @@ export async function freezePackageExecutionInputs(sourceRoot: string, scriptPat
     throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package-tree source authority is unsafe");
   }
   const pending = [await packageDirectoryForScript(sourceRoot, scriptPath)];
-  const packages = new Set<string>();
+  const packages = new Set<string>(); const discoveryMetadata = new Map<string, FrozenFileSnapshot>();
   while (pending.length > 0) {
     const packageRoot = pending.shift()!;
     if (packages.has(packageRoot)) continue;
     packages.add(packageRoot);
     const metadataPath = join(packageRoot, "package.json");
-    let dependencies: ReturnType<typeof packageDependencyNames>;
-    try { dependencies = packageDependencyNames(JSON.parse(await readFile(metadataPath, "utf8"))); }
+    let metadata: FrozenFileSnapshot; let dependencies: ReturnType<typeof packageDependencyNames>;
+    try { metadata = await frozenFileSnapshot(metadataPath); dependencies = packageDependencyNames(JSON.parse(metadata.bytes.toString("utf8"))); }
     catch (error: unknown) {
       if (error instanceof ScopedToolGatewayError) throw error;
       throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package metadata is absent or invalid", {}, { cause: error });
     }
+    discoveryMetadata.set(metadataPath, metadata);
+    await secureFilesystemTestHooks().afterPackageMetadataDiscovery?.(packageRoot);
     for (const name of dependencies.required) {
       const dependency = await resolveInstalledPackage(sourceRoot, packageRoot, name);
       if (dependency === null) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", `Required package dependency ${name} is absent`);
@@ -123,7 +227,7 @@ export async function freezePackageExecutionInputs(sourceRoot: string, scriptPat
     }
   }
 
-  const files: Array<M4CommandSpecification["execution_inputs"][number]> = [];
+  const files: Array<M4CommandSpecification["execution_inputs"][number]> = []; const capturedBytes = new Map<string, Buffer>(); const visitedFiles = new Set<string>(); let totalBytes = 0;
   const visit = async (directory: string): Promise<void> => {
     const entries = (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name, "en"));
     for (const entry of entries) {
@@ -131,19 +235,24 @@ export async function freezePackageExecutionInputs(sourceRoot: string, scriptPat
       if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package closure contains an unsupported filesystem object");
       if (entry.isDirectory()) await visit(path);
       else {
-        const identity = await frozenFileIdentity(path);
+        if (visitedFiles.has(path)) continue;
+        visitedFiles.add(path);
+        const snapshot = await frozenFileSnapshot(path); const discovered = discoveryMetadata.get(path);
+        if (discovered !== undefined && (snapshot.realpath !== discovered.realpath || snapshot.device !== discovered.device || snapshot.inode !== discovered.inode ||
+            snapshot.mode !== discovered.mode || snapshot.size !== discovered.size || snapshot.digest !== discovered.digest || !snapshot.bytes.equals(discovered.bytes))) {
+          throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package metadata changed between dependency discovery and content capture");
+        }
         const capturePath = relative(sourceRoot, path);
         assertM4CanonicalPath(capturePath, "package execution-input capture path");
-        files.push({ path, realpath: identity.realpath, capture_path: capturePath, device: identity.device, inode: identity.inode, mode: identity.mode, size: identity.size, digest: identity.digest });
-        if (files.length > MAX_EXECUTION_INPUT_FILES || files.reduce((total, file) => total + file.size, 0) > MAX_EXECUTION_INPUT_BYTES) {
-          throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package execution-input closure exceeds its explicit bound");
-        }
+        files.push({ path, realpath: snapshot.realpath, capture_path: capturePath, device: snapshot.device, inode: snapshot.inode, mode: snapshot.mode, size: snapshot.size, digest: snapshot.digest });
+        capturedBytes.set(path, snapshot.bytes); totalBytes += snapshot.size;
+        if (files.length > MAX_EXECUTION_INPUT_FILES || totalBytes > MAX_EXECUTION_INPUT_BYTES) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package execution-input closure exceeds its explicit bound");
       }
     }
   };
   for (const packageRoot of [...packages].sort()) await visit(packageRoot);
   files.sort((left, right) => left.capture_path! < right.capture_path! ? -1 : left.capture_path! > right.capture_path! ? 1 : 0);
-  if (!files.some((file) => file.path === scriptPath)) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package execution-input closure omits its entrypoint");
+  validatePackageExecutionInputClosure(sourceRoot, scriptPath, files, capturedBytes);
   return files.map((file) => Object.freeze(file));
 }
 
@@ -244,7 +353,7 @@ export async function validateCommandCatalog(
       const [rootStats, rootPhysical] = await Promise.all([lstat(packageLayout.source_root), realpath(packageLayout.source_root)]);
       if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || rootPhysical !== packageLayout.source_root || rootStats.dev !== packageLayout.device || rootStats.ino !== packageLayout.inode) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package execution-input root identity is invalid", { command_id: spec.command_id });
     }
-    const seenInputs = new Set<string>(); const seenCapturePaths = new Set<string>(); let executionInputBytes = 0;
+    const seenInputs = new Set<string>(); const seenCapturePaths = new Set<string>(); const inputBytes = new Map<string, Buffer>(); let executionInputBytes = 0;
     for (const input of spec.execution_inputs) {
       if (!isAbsolute(input.path) || resolve(input.path) !== input.path || !isAbsolute(input.realpath) || resolve(input.realpath) !== input.realpath || seenInputs.has(input.path)) {
         throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution-input path authority is invalid", { command_id: spec.command_id });
@@ -257,18 +366,20 @@ export async function validateCommandCatalog(
       }
       seenInputs.add(input.path); executionInputBytes += input.size;
       if (seenInputs.size > MAX_EXECUTION_INPUT_FILES || executionInputBytes > MAX_EXECUTION_INPUT_BYTES) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution-input closure exceeds its explicit bound", { command_id: spec.command_id });
-      const inputPhysical = await realpath(input.path); const inputStats = await lstat(input.path);
-      if (inputPhysical !== input.realpath || inputPhysical !== input.path || !inputStats.isFile() || inputStats.isSymbolicLink() || inputStats.dev !== input.device || inputStats.ino !== input.inode ||
-          (inputStats.mode & 0o7777) !== input.mode || inputStats.size !== input.size || sha256Bytes(await readFile(input.path)) !== input.digest) {
+      const snapshot = await frozenFileSnapshot(input.path); inputBytes.set(input.path, snapshot.bytes);
+      if (snapshot.realpath !== input.realpath || snapshot.realpath !== input.path || snapshot.device !== input.device || snapshot.inode !== input.inode ||
+          snapshot.mode !== input.mode || snapshot.size !== input.size || snapshot.digest !== input.digest) {
         throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution-input identity is invalid", { command_id: spec.command_id });
       }
     }
     const interpreter = executableNames.some((name) => isInterpreterExecutablePath(name));
-    if (interpreter) {
-      const script = spec.argv[1];
-      if (script === undefined || script.startsWith("-") || !isAbsolute(script) || !seenInputs.has(script)) {
-        throw new ScopedToolGatewayError("COMMAND_FORBIDDEN", "Interpreter commands require a frozen absolute script as argv[1]", { command_id: spec.command_id });
-      }
+    const script = spec.argv[1];
+    if (interpreter && (script === undefined || script.startsWith("-") || !isAbsolute(script) || !seenInputs.has(script))) {
+      throw new ScopedToolGatewayError("COMMAND_FORBIDDEN", "Interpreter commands require a frozen absolute script as argv[1]", { command_id: spec.command_id });
+    }
+    if (packageLayout !== null) {
+      if (script === undefined) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package command entrypoint is absent", { command_id: spec.command_id });
+      validatePackageExecutionInputClosure(packageLayout.source_root, script, spec.execution_inputs, inputBytes);
     }
     const seenEnvironment = new Set<string>();
     for (const entry of spec.environment) {

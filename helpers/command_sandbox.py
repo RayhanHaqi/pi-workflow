@@ -24,10 +24,10 @@ EXECUTION_INPUT_MAX_BYTES = 64 * 1024 * 1024
 libc = ctypes.CDLL(None, use_errno=True)
 SYS_BY_ARCH = {
     "x86_64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 322, "audit": 0xC000003E, "socket": 41,
-               "network": [41],
+               "local_ipc_bridge": [42,43,44,45,46,47,288,299,307],
                "dangerous": [62,86,90,91,92,93,94,101,109,112,129,132,133,165,166,175,176,188,189,190,197,198,199,200,234,235,246,259,260,261,265,268,272,280,297,298,300,304,308,313,321,424,425,426,427,428,429,430,431,432,433,438,440,442,452]},
     "aarch64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 281, "audit": 0xC00000B7, "socket": 198,
-                "network": [198],
+                "local_ipc_bridge": [202,203,206,207,211,212,242,243,269],
                 "dangerous": [5,6,7,14,15,16,33,37,39,40,52,53,54,55,88,96,97,104,105,106,117,129,130,131,138,154,157,240,265,268,273,280,424,425,426,427,428,429,430,431,432,433,438,440,442,452]},
 }
 PR_SET_NO_NEW_PRIVS = 38
@@ -189,9 +189,12 @@ def apply_seccomp(network_forbidden: bool) -> None:
     blocked = list(data["dangerous"])
     instructions = [SockFilter(0x20, 0, 0, 4), SockFilter(0x15, 1, 0, data["audit"]), SockFilter(0x06, 0, 0, 0x80000000), SockFilter(0x20, 0, 0, 0)]
     if network_forbidden:
-        # New sockets are the network-capability creation boundary. Permit only
-        # AF_UNIX so package CLIs can use local IPC inside the Landlock-confined
-        # temporary root; AF_INET/AF_INET6 and every other family fail closed.
+        # tsx requires AF_UNIX socket creation plus bind/listen, and Node uses
+        # verifier-internal socketpairs.  It remains productive when connect is
+        # denied.  Block every syscall that could bridge those local endpoints
+        # to another process or transfer descriptors, while all non-UNIX socket
+        # creation continues to fail closed.
+        blocked.extend(data["local_ipc_bridge"])
         instructions.extend([
             SockFilter(0x15, 0, 3, data["socket"]),
             SockFilter(0x20, 0, 0, 16),
@@ -233,6 +236,21 @@ def verify_executable(request: dict[str, Any]) -> int:
     if actual!=physical or not stat.S_ISREG(path_st.st_mode) or (path_st.st_dev,path_st.st_ino)!=(held_st.st_dev,held_st.st_ino) or observed!=expected or held_digest!=digest:
         raise SandboxError("EXECUTION_INPUT_DRIFT", "Held executable identity changed")
     return 4
+
+
+def constrain_inherited_descriptors() -> None:
+    soft_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    os.closerange(5, int(soft_limit if soft_limit != resource.RLIM_INFINITY else 1_048_576))
+    for fd in range(4):
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISSOCK(mode):
+            duplicate = socket.socket(fileno=os.dup(fd))
+            try:
+                if duplicate.family != socket.AF_UNIX: raise SandboxError("NETWORK_SANDBOX_UNAVAILABLE", "Sandbox inherited a non-local communication descriptor")
+            finally: duplicate.close()
+        elif not stat.S_ISFIFO(mode):
+            raise SandboxError("COMMAND_SANDBOX_UNAVAILABLE", "Sandbox standard stream descriptor type is unsafe")
+    if not stat.S_ISREG(os.fstat(4).st_mode): raise SandboxError("COMMAND_SANDBOX_UNAVAILABLE", "Held executable descriptor type is unsafe")
 
 
 def verify_execution_inputs(value: Any) -> None:
@@ -279,6 +297,7 @@ def execute(request: dict[str, Any]) -> None:
         os.setpgid(0, 0)
     except OSError as error:
         raise SandboxError("COMMAND_SANDBOX_UNAVAILABLE", "Sandbox process group setup failed") from error
+    constrain_inherited_descriptors()
     required = {"protocol","operation","executable_invocation_path","executable_realpath","executable_identity","executable_sha256","execution_inputs","argv","cwd","cwd_identity","environment","read_paths","directory_read_paths","write_rules","path_identities","network_policy"}
     optional = {"_checkpoint_socket","_checkpoint_stage"}
     if not required.issubset(request) or set(request)-required-optional: raise SandboxError("COMMAND_SPEC_MISMATCH", "Sandbox request has unexpected or missing fields")
@@ -312,7 +331,7 @@ def execute(request: dict[str, Any]) -> None:
     current=os.lstat(os.path.realpath(request["executable_invocation_path"]));held_digest,held=sha256_fd(executable_fd, EXECUTABLE_IDENTITY_MAX_BYTES)
     if (current.st_dev,current.st_ino)!=(held.st_dev,held.st_ino) or held_digest!=request["executable_sha256"]: raise SandboxError("EXECUTION_INPUT_DRIFT","Executable path or retained bytes changed after validation")
     setup_status({"ok":True,"protocol":PROTOCOL,"landlock_abi":abi,"no_new_privs":True,"network_denied":True})
-    os.set_inheritable(3,False)
+    os.close(3);os.set_inheritable(executable_fd,False)
     execveat_fd(executable_fd,argv,environment)
 
 
@@ -327,12 +346,21 @@ def probe_landlock(root: str, outside: str) -> None:
 
 
 def probe_seccomp() -> None:
-    set_no_new_privs();apply_seccomp(True)
-    local=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);local.close()
-    try: socket.socket();os._exit(3)
-    except PermissionError: pass
-    child=subprocess.run(["/usr/bin/python3","-c","import socket; socket.socket()"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    if child.returncode==0:os._exit(4)
+    with tempfile.TemporaryDirectory(prefix="pi-gacw-m4-ipc-") as td:
+        endpoint=str(Path(td,"owned.sock"));server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);server.bind(endpoint);server.listen(1)
+        set_no_new_privs();apply_seccomp(True)
+        local_left,local_right=socket.socketpair();os.write(local_left.fileno(),b"x")
+        if os.read(local_right.fileno(),1)!=b"x":os._exit(3)
+        local_left.close();local_right.close()
+        try: socket.socket(socket.AF_INET,socket.SOCK_STREAM);os._exit(4)
+        except PermissionError: pass
+        client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        try: client.connect(endpoint);os._exit(5)
+        except PermissionError: pass
+        finally: client.close()
+        child=subprocess.run(["/usr/bin/python3","-c",f"import socket; p={endpoint!r}; ok=0\ntry: socket.socket(socket.AF_INET,socket.SOCK_STREAM)\nexcept PermissionError: ok+=1\ns=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\ntry: s.connect(p)\nexcept PermissionError: ok+=1\nraise SystemExit(0 if ok==2 else 1)"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        server.close()
+        if child.returncode!=0:os._exit(6)
 
 
 def fork_probe(fn: Any,*args: Any) -> None:
