@@ -33,8 +33,8 @@ import { captureGitState } from "./repository/fingerprint.js";
 import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/preflight.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
-import { isInterpreterExecutablePath } from "./scoped-tools/commands.js";
-import { assertM4CanonicalPath } from "./secure-fs/path.js";
+import { freezePackageExecutionInputs, isInterpreterExecutablePath } from "./scoped-tools/commands.js";
+import { assertM4CanonicalPath, pathMatchesRules, validatePathRules } from "./secure-fs/path.js";
 import { isBoundedRoutingIdentity } from "./schemas/definitions.js";
 import {
   assertDocumentValid,
@@ -48,6 +48,7 @@ import {
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
   type M4CommandSpecification,
+  type M4PathRule,
   type M4ScopedToolPolicyDocument,
   type M4CommandCatalogDocument,
   type M5ControlDecisionDocument,
@@ -99,6 +100,8 @@ export interface ControllerVerificationCommand {
   readonly args?: readonly string[];
   readonly cwd: string;
   readonly timeout_ms?: number;
+  /** Explicit owner-frozen verifier-only read authority; absent preserves legacy launch semantics. */
+  readonly readable_paths?: readonly M4PathRule[];
 }
 
 export interface StaticApprovedDagTimeBudgets {
@@ -681,7 +684,7 @@ function routeApproval(route: RouteMapDocument): RouteMapApprovalDocument {
     approved_by: "pre-m8-product-owner", approval_token_sha256: fixed("route-token") }) as RouteMapApprovalDocument;
 }
 function verificationDocuments(commands: readonly M4CommandSpecification[]): ContractDocument["verification_commands"] {
-  return commands.map((entry) => ({ command_id: entry.command_id, argv: entry.argv, cwd: entry.cwd === "REPOSITORY_ROOT" ? "repository" : entry.cwd, timeout_ms: entry.timeout_ms, network: "FORBIDDEN" as const }));
+  return commands.map((entry) => ({ command_id: entry.command_id, argv: entry.argv, cwd: entry.cwd === "REPOSITORY_ROOT" ? "repository" : entry.cwd, timeout_ms: entry.timeout_ms, network: "FORBIDDEN" as const, readable_paths: entry.read_paths }));
 }
 function acceptance(goal: ReturnType<typeof normalizeGoal>, commands: readonly M4CommandSpecification[]) {
   return [
@@ -948,11 +951,13 @@ async function commandSpecs(repository: M3RepositoryIdentityDocument, commands: 
   for (const command of commands) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(command.command_id) || ids.has(command.command_id) || !isAbsolute(command.executable) || command.executable !== resolve(command.executable)) fail("INVALID_COMMAND_AUTHORITY", "verification command identity is invalid");
     ids.add(command.command_id); assertM4CanonicalPath(command.cwd, "verification cwd");
-    if (!within(command.cwd, scope.readable_paths)) fail("INVALID_COMMAND_AUTHORITY", "verification cwd is outside readable scope");
+    const explicitReadable = command.readable_paths === undefined ? null : validatePathRules(command.readable_paths, `verification ${command.command_id} readable_paths`);
+    if (explicitReadable === null ? !within(command.cwd, scope.readable_paths) : !pathMatchesRules(command.cwd, explicitReadable)) fail("INVALID_COMMAND_AUTHORITY", "verification cwd is outside verifier-readable authority");
     const [exePhysical, exeStats, exeBytes, cwdStats, cwdPhysical] = await Promise.all([realpath(command.executable), lstat(command.executable), readFile(command.executable), lstat(join(repository.worktree_root, command.cwd)), realpath(join(repository.worktree_root, command.cwd))]);
     if (!exeStats.isFile() || exeStats.isSymbolicLink() || !cwdStats.isDirectory() || cwdPhysical !== join(repository.worktree_root, command.cwd)) fail("INVALID_COMMAND_AUTHORITY", "verification command executable or cwd is unsafe");
     let argv = [command.executable, ...(command.args ?? [])];
-    let executionInputs: { readonly path: string; readonly realpath: string; readonly device: number; readonly inode: number; readonly mode: number; readonly size: number; readonly digest: Sha256Digest }[] = [];
+    let executionInputs: M4CommandSpecification["execution_inputs"] = [];
+    let executionInputLayout: M4CommandSpecification["execution_input_layout"] = "FLAT";
     if (isInterpreterExecutablePath(command.executable)) {
       const scriptArgument = command.args?.[0];
       if (scriptArgument === undefined) fail("INVALID_COMMAND_AUTHORITY", "interpreter verification requires one scoped script argument");
@@ -960,47 +965,73 @@ async function commandSpecs(repository: M3RepositoryIdentityDocument, commands: 
       const scriptPath = join(repository.worktree_root, command.cwd, scriptArgument);
       const scriptRelative = command.cwd === "." ? scriptArgument : join(command.cwd, scriptArgument);
       assertM4CanonicalPath(scriptRelative, "interpreter verification script path");
-      if (!within(scriptRelative, scope.readable_paths)) fail("INVALID_COMMAND_AUTHORITY", "interpreter verification script is outside readable scope");
+      if (explicitReadable === null ? !within(scriptRelative, scope.readable_paths) : !pathMatchesRules(scriptRelative, explicitReadable)) fail("INVALID_COMMAND_AUTHORITY", "interpreter verification script is outside verifier-readable authority");
       const [scriptStats, scriptPhysical, scriptBytes] = await Promise.all([lstat(scriptPath), realpath(scriptPath), readFile(scriptPath)]);
       if (!scriptStats.isFile() || scriptStats.isSymbolicLink() || scriptPhysical !== scriptPath) fail("INVALID_COMMAND_AUTHORITY", "interpreter verification script is unsafe");
       argv = [command.executable, scriptPhysical, ...(command.args ?? []).slice(1)];
-      executionInputs = [{ path: scriptPath, realpath: scriptPhysical, device: scriptStats.dev, inode: scriptStats.ino, mode: scriptStats.mode & 0o7777, size: scriptStats.size, digest: sha256Bytes(scriptBytes) }];
+      if (scriptRelative === "node_modules" || scriptRelative.startsWith("node_modules/")) {
+        executionInputs = await freezePackageExecutionInputs(repository.worktree_root, scriptPath);
+        const sourceRootStats = await lstat(repository.worktree_root);
+        executionInputLayout = { kind: "PACKAGE_TREE", source_root: repository.worktree_root, device: sourceRootStats.dev, inode: sourceRootStats.ino };
+      } else {
+        executionInputs = [{ path: scriptPath, realpath: scriptPhysical, device: scriptStats.dev, inode: scriptStats.ino, mode: scriptStats.mode & 0o7777, size: scriptStats.size, digest: sha256Bytes(scriptBytes) }];
+      }
     }
-    const readableCandidates = (await Promise.all(scope.readable_paths.map(async (entry) => {
+    const readableCandidates = explicitReadable === null ? (await Promise.all(scope.readable_paths.map(async (entry) => {
       try {
         const stats = await lstat(join(repository.worktree_root, entry));
         return stats.isFile() ? { path: entry, kind: "EXACT" as const } : stats.isDirectory() ? { path: entry, kind: "PREFIX" as const } : null;
       } catch { return null; }
-    }))).filter((entry): entry is { readonly path: string; readonly kind: "EXACT" | "PREFIX" } => entry !== null);
+    }))).filter((entry): entry is M4PathRule => entry !== null) : await Promise.all(explicitReadable.map(async (rule) => {
+      const path = join(repository.worktree_root, rule.path);
+      try {
+        const [stats, physical] = await Promise.all([lstat(path), realpath(path)]);
+        if (stats.isSymbolicLink() || physical !== path || (rule.kind === "EXACT" ? !stats.isFile() : !stats.isDirectory())) fail("INVALID_COMMAND_AUTHORITY", "verifier-readable rule kind differs from its physical object");
+      } catch (error: unknown) {
+        if (error instanceof BoundedWorkflowError) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") fail("INVALID_COMMAND_AUTHORITY", "verifier-readable authority cannot be resolved safely");
+        if (rule.kind === "PREFIX") fail("INVALID_COMMAND_AUTHORITY", "prospective verifier-readable prefixes are forbidden");
+      }
+      return rule;
+    }));
     const readable = readableCandidates.filter((entry, index) => !readableCandidates.slice(0, index).some((prior) => prior.kind === "PREFIX" && (entry.path === prior.path || entry.path.startsWith(`${prior.path}/`))));
-    // Node otherwise follows the system OpenSSL configuration symlink into
-    // /etc, which is intentionally outside the frozen M4 read authority.
-    // /dev/null is already a mandatory sandbox path and this exact value is
-    // frozen into the command specification before any worker admission.
+    // Node otherwise follows the system OpenSSL configuration symlink into /etc.
     const environment = basename(exePhysical) === "node" ? [{ key: "OPENSSL_CONF", value: "/dev/null" }] : [];
     const projection = { command_id: command.command_id, command_class: "VERIFICATION" as const, executable_invocation_path: command.executable, executable_realpath: exePhysical, executable_device: exeStats.dev, executable_inode: exeStats.ino, executable_mode: exeStats.mode & 0o7777, executable_size: exeStats.size, executable_sha256: sha256Bytes(exeBytes), argv, cwd: command.cwd, cwd_realpath: cwdPhysical, cwd_device: cwdStats.dev, cwd_inode: cwdStats.ino,
-      execution_inputs: executionInputs, environment, read_paths: readable, write_paths: [], network_policy: "FORBIDDEN" as const, timeout_ms: command.timeout_ms ?? 60_000, stdout_limit: 65_536, stderr_limit: 65_536, expected_exit_codes: [0], repository_side_effect: "NONE" as const, claimed_paths: [], cleanup_paths: [] };
+      execution_input_layout: executionInputLayout, execution_inputs: executionInputs, environment, read_paths: readable, write_paths: [], network_policy: "FORBIDDEN" as const, timeout_ms: command.timeout_ms ?? 60_000, stdout_limit: 65_536, stderr_limit: 65_536, expected_exit_codes: [0], repository_side_effect: "NONE" as const, claimed_paths: [], cleanup_paths: [] };
     specs.push({ ...projection, command_spec_sha256: sha256Canonical(projection) });
   }
   return specs;
 }
-async function toolPolicy(repository: M3RepositoryIdentityDocument, token: M3RepositoryStateTokenDocument, goal: ReturnType<typeof normalizeGoal>): Promise<M4ScopedToolPolicyDocument> {
-  const all = [...new Set([...goal.scope.readable_paths, ...goal.scope.editable_paths, ...goal.scope.frozen_paths])];
-  const commandReadableCandidates = await Promise.all(goal.scope.readable_paths.map(async (path) => {
+
+/** Package-internal test seam over the production controller command-authority constructor. */
+export async function freezeControllerVerificationCommandsForTests(
+  repository: M3RepositoryIdentityDocument,
+  commands: readonly ControllerVerificationCommand[],
+  scope: GoalScope,
+): Promise<readonly M4CommandSpecification[]> {
+  return commandSpecs(repository, commands, scope);
+}
+async function toolPolicy(repository: M3RepositoryIdentityDocument, token: M3RepositoryStateTokenDocument, goal: ReturnType<typeof normalizeGoal>, specs: readonly M4CommandSpecification[]): Promise<M4ScopedToolPolicyDocument> {
+  const workerReadableCandidates = await Promise.all(goal.scope.readable_paths.map(async (path) => {
     try { return (await lstat(join(repository.worktree_root, path))).isDirectory() ? { path, kind: "PREFIX" as const } : { path, kind: "EXACT" as const }; }
     catch { return { path, kind: "EXACT" as const }; }
   }));
-  const commandReadable = commandReadableCandidates.filter((entry, index) => !commandReadableCandidates.slice(0, index).some((prior) => prior.kind === "PREFIX" && (entry.path === prior.path || entry.path.startsWith(`${prior.path}/`))));
-  const pathAuthorities = await Promise.all(all.map(async (path) => {
+  const workerReadable = workerReadableCandidates.filter((entry, index) => !workerReadableCandidates.slice(0, index).some((prior) => prior.kind === "PREFIX" && (entry.path === prior.path || entry.path.startsWith(`${prior.path}/`))));
+  const commandReadableCandidates = specs.flatMap((spec) => spec.read_paths);
+  const commandReadable = commandReadableCandidates.filter((entry, index) => !commandReadableCandidates.slice(0, index).some((prior) => prior.path === entry.path && prior.kind === entry.kind));
+  const authorityRules: M4PathRule[] = [];
+  for (const path of [...new Set([...goal.scope.readable_paths, ...goal.scope.editable_paths, ...goal.scope.frozen_paths])]) {
     let kind: "EXACT" | "PREFIX" = "EXACT";
-    try { if ((await lstat(join(repository.worktree_root, path))).isDirectory()) kind = "PREFIX"; } catch { /* a prospective output remains exact */ }
-    return { path, kind, ownership_class: goal.scope.editable_paths.includes(path) ? "OWNER_ACCEPTED_MUTABLE" as const : "PREEXISTING_UNRELATED" as const, data_class: "PUBLIC_SOURCE" as const, raw_read_approved: true,
-      create: goal.scope.editable_paths.includes(path), replace: goal.scope.editable_paths.includes(path), delete: goal.scope.editable_paths.includes(path), mode_change: false };
-  }));
+    try { if ((await lstat(join(repository.worktree_root, path))).isDirectory()) kind = "PREFIX"; } catch { /* prospective goal paths remain exact */ }
+    authorityRules.push({ path, kind });
+  }
+  for (const rule of commandReadable) if (!authorityRules.some((candidate) => candidate.path === rule.path && candidate.kind === rule.kind)) authorityRules.push(rule);
+  const pathAuthorities = authorityRules.map((rule) => ({ path: rule.path, kind: rule.kind, ownership_class: goal.scope.editable_paths.includes(rule.path) ? "OWNER_ACCEPTED_MUTABLE" as const : "PREEXISTING_UNRELATED" as const, data_class: "PUBLIC_SOURCE" as const, raw_read_approved: true,
+    create: goal.scope.editable_paths.includes(rule.path), replace: goal.scope.editable_paths.includes(rule.path), delete: goal.scope.editable_paths.includes(rule.path), mode_change: false }));
   return identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { schema_id: "pi_gacw_scoped_tool_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID, policy_id: "pre-m8-bounded-policy", repository_identity_content_sha256: repository.content_sha256, worktree_key: repository.worktree_key, task_scope_identity: token.task_scope_identity,
-    readable_paths: commandReadable, editable_paths: goal.scope.editable_paths.map((path) => ({ path, kind: "EXACT" as const })), frozen_paths: goal.scope.frozen_paths.map((path) => ({ path, kind: "EXACT" as const })),
-    command_readable_paths: commandReadable, command_writable_paths: [],
-    path_authorities: pathAuthorities,
+    readable_paths: workerReadable, editable_paths: goal.scope.editable_paths.map((path) => ({ path, kind: "EXACT" as const })), frozen_paths: goal.scope.frozen_paths.map((path) => ({ path, kind: "EXACT" as const })),
+    command_readable_paths: commandReadable, command_writable_paths: [], path_authorities: pathAuthorities,
     evidence_readable_kinds: ["M3_REPOSITORY_STATE_TOKEN", "M3_POSTFLIGHT", "M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT", "BOUNDED_WORKER_RESULT"],
     limits: { maximum_patch_bytes: 1_048_576, maximum_read_bytes: 65_536, maximum_hash_bytes: 1_048_576, maximum_search_input_bytes: 65_536, maximum_search_matches: 1_000, maximum_list_entries: 1_000, maximum_list_metadata_bytes: 1_048_576, maximum_command_stdout_bytes: 65_536, maximum_command_stderr_bytes: 65_536, maximum_command_duration_ms: 60_000 } }) as M4ScopedToolPolicyDocument;
 }
@@ -1165,7 +1196,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       baseline, approval, instructionFiles: [], authorityFiles: [], requiredEnvironment: await environment(repository), taskScopeIdentity: scopeSha, allowShallow: false, allowPartialClone: false, lock });
     await commit("PASS_FULL_PREFLIGHT", 6, {}, [full.preflight]);
     assertNotCancelled("M4 gateway admission");
-    const m4Policy = await toolPolicy(repository, full.acceptedState, goal); const commandCatalog = catalog(repository, m4Policy, specs);
+    const m4Policy = await toolPolicy(repository, full.acceptedState, goal, specs); const commandCatalog = catalog(repository, m4Policy, specs);
     const gateway = await createScopedToolGateway({ stateRoot, runId: RUN_ID, repository, baseline, acceptedState: full.acceptedState, lock: lock!, instructionFiles: [], authorityFiles: [], editablePaths: goal.scope.editable_paths, frozenPaths: goal.scope.frozen_paths, taskScopeIdentity: scopeSha, toolPolicy: m4Policy, commandCatalog, temporaryRoot });
     const m5 = m5Policy(repository, initialState, reducerPolicy, contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, goal, staticExecutorRole);
     const approvedExecutionAuthority = executionAuthority({ goal, repository, baseline, approval, route, routeApproval: routeApprovalDocument, budget: budgetDocument,

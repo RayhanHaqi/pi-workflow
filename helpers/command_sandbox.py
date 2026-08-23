@@ -23,11 +23,11 @@ EXECUTABLE_IDENTITY_MAX_BYTES = 128 * 1024 * 1024
 EXECUTION_INPUT_MAX_BYTES = 64 * 1024 * 1024
 libc = ctypes.CDLL(None, use_errno=True)
 SYS_BY_ARCH = {
-    "x86_64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 322, "audit": 0xC000003E,
-               "network": [41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,288,299,307],
+    "x86_64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 322, "audit": 0xC000003E, "socket": 41,
+               "network": [41],
                "dangerous": [62,86,90,91,92,93,94,101,109,112,129,132,133,165,166,175,176,188,189,190,197,198,199,200,234,235,246,259,260,261,265,268,272,280,297,298,300,304,308,313,321,424,425,426,427,428,429,430,431,432,433,438,440,442,452]},
-    "aarch64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 281, "audit": 0xC00000B7,
-                "network": [198,203,202,206,207,211,212,210,200,201,204,205,199,208,209,242,243,269],
+    "aarch64": {"landlock_create_ruleset": 444, "landlock_add_rule": 445, "landlock_restrict_self": 446, "execveat": 281, "audit": 0xC00000B7, "socket": 198,
+                "network": [198],
                 "dangerous": [5,6,7,14,15,16,33,37,39,40,52,53,54,55,88,96,97,104,105,106,117,129,130,131,138,154,157,240,265,268,273,280,424,425,426,427,428,429,430,431,432,433,438,440,442,452]},
 }
 PR_SET_NO_NEW_PRIVS = 38
@@ -144,7 +144,7 @@ def assert_hardlink_safe_write_rules(write_rules: list[dict[str, str]]) -> None:
             raise
 
 
-def apply_landlock(read_paths: list[str], write_rules: list[dict[str, str]], path_identities: list[dict[str, int]] | None = None) -> int:
+def apply_landlock(read_paths: list[str], write_rules: list[dict[str, str]], path_identities: list[dict[str, int]] | None = None, directory_read_paths: list[str] | None = None) -> int:
     abi = landlock_abi()
     if abi < 3: raise SandboxError("COMMAND_SANDBOX_UNAVAILABLE", "Landlock ABI lacks truncate mediation")
     ruleset = syscall(architecture()["landlock_create_ruleset"], ctypes.byref(Ruleset(HANDLED_ACCESS)), ctypes.sizeof(Ruleset), 0)
@@ -153,6 +153,8 @@ def apply_landlock(read_paths: list[str], write_rules: list[dict[str, str]], pat
         merged: dict[str, int] = {"/dev/null": ACCESS_READ_FILE | ACCESS_WRITE_FILE}
         for path in read_paths:
             merged[path] = merged.get(path, 0) | READ_ACCESS
+        for path in directory_read_paths or []:
+            merged[path] = merged.get(path, 0) | ACCESS_EXECUTE | ACCESS_READ_DIR
         for rule in write_rules:
             if not isinstance(rule, dict) or set(rule) != {"path", "kind"} or rule["kind"] not in ("EXACT", "PREFIX"):
                 raise SandboxError("COMMAND_SPEC_MISMATCH", "Write rule is malformed")
@@ -184,8 +186,19 @@ def apply_landlock(read_paths: list[str], write_rules: list[dict[str, str]], pat
 
 def apply_seccomp(network_forbidden: bool) -> None:
     data = architecture()
-    blocked = list(data["dangerous"]) + (list(data["network"]) if network_forbidden else [])
+    blocked = list(data["dangerous"])
     instructions = [SockFilter(0x20, 0, 0, 4), SockFilter(0x15, 1, 0, data["audit"]), SockFilter(0x06, 0, 0, 0x80000000), SockFilter(0x20, 0, 0, 0)]
+    if network_forbidden:
+        # New sockets are the network-capability creation boundary. Permit only
+        # AF_UNIX so package CLIs can use local IPC inside the Landlock-confined
+        # temporary root; AF_INET/AF_INET6 and every other family fail closed.
+        instructions.extend([
+            SockFilter(0x15, 0, 3, data["socket"]),
+            SockFilter(0x20, 0, 0, 16),
+            SockFilter(0x15, 1, 0, socket.AF_UNIX),
+            SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),
+            SockFilter(0x20, 0, 0, 0),
+        ])
     for number in sorted(set(blocked)):
         instructions.extend([SockFilter(0x15, 0, 1, number), SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM)])
     instructions.append(SockFilter(0x06, 0, 0, 0x7FFF0000))
@@ -266,14 +279,14 @@ def execute(request: dict[str, Any]) -> None:
         os.setpgid(0, 0)
     except OSError as error:
         raise SandboxError("COMMAND_SANDBOX_UNAVAILABLE", "Sandbox process group setup failed") from error
-    required = {"protocol","operation","executable_invocation_path","executable_realpath","executable_identity","executable_sha256","execution_inputs","argv","cwd","cwd_identity","environment","read_paths","write_rules","path_identities","network_policy"}
+    required = {"protocol","operation","executable_invocation_path","executable_realpath","executable_identity","executable_sha256","execution_inputs","argv","cwd","cwd_identity","environment","read_paths","directory_read_paths","write_rules","path_identities","network_policy"}
     optional = {"_checkpoint_socket","_checkpoint_stage"}
     if not required.issubset(request) or set(request)-required-optional: raise SandboxError("COMMAND_SPEC_MISMATCH", "Sandbox request has unexpected or missing fields")
     executable_fd=verify_executable(request)
-    argv=request["argv"];environment=request["environment"];cwd=request["cwd"];cwd_identity=request["cwd_identity"];read_paths=request["read_paths"];write_rules=request["write_rules"];path_identities=request["path_identities"]
+    argv=request["argv"];environment=request["environment"];cwd=request["cwd"];cwd_identity=request["cwd_identity"];read_paths=request["read_paths"];directory_read_paths=request["directory_read_paths"];write_rules=request["write_rules"];path_identities=request["path_identities"]
     if not isinstance(argv,list) or not argv or not all(isinstance(x,str) and x and "\x00" not in x for x in argv): raise SandboxError("COMMAND_SPEC_MISMATCH","argv is malformed")
     if not isinstance(environment,dict) or not all(isinstance(k,str) and isinstance(v,str) and "\x00" not in k+v for k,v in environment.items()): raise SandboxError("COMMAND_SPEC_MISMATCH","environment is malformed")
-    if not isinstance(read_paths,list) or not all(isinstance(x,str) for x in read_paths) or not isinstance(write_rules,list): raise SandboxError("COMMAND_SPEC_MISMATCH","filesystem rules are malformed")
+    if not isinstance(read_paths,list) or not all(isinstance(x,str) for x in read_paths) or not isinstance(directory_read_paths,list) or not all(isinstance(x,str) for x in directory_read_paths) or not isinstance(write_rules,list): raise SandboxError("COMMAND_SPEC_MISMATCH","filesystem rules are malformed")
     if request["network_policy"] != "FORBIDDEN": raise SandboxError("NETWORK_SANDBOX_UNAVAILABLE","V0 command gateway requires denied network")
     checkpoint(request,"BEFORE_LANDLOCK")
     verify_execution_inputs(request["execution_inputs"])
@@ -292,7 +305,7 @@ def execute(request: dict[str, Any]) -> None:
             if current.st_dev!=st.st_dev or current.st_ino!=st.st_ino: raise SandboxError("COMMAND_CWD_IDENTITY_DRIFT","cwd path no longer names the frozen inode")
         finally: os.close(current_fd)
         os.fchdir(cwd_fd)
-        abi=apply_landlock(read_paths,write_rules,path_identities)
+        abi=apply_landlock(read_paths,write_rules,path_identities,directory_read_paths)
     finally: os.close(cwd_fd)
     apply_seccomp(True)
     # Re-resolve only as a drift detector; execution is bound to the retained FD.
@@ -315,6 +328,7 @@ def probe_landlock(root: str, outside: str) -> None:
 
 def probe_seccomp() -> None:
     set_no_new_privs();apply_seccomp(True)
+    local=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);local.close()
     try: socket.socket();os._exit(3)
     except PermissionError: pass
     child=subprocess.run(["/usr/bin/python3","-c","import socket; socket.socket()"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)

@@ -264,6 +264,32 @@
               "FORBIDDEN",
               "OWNER_APPROVED"
             ]
+          },
+          "readable_paths": {
+            "maxItems": 128,
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "path": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "EXACT",
+                    "PREFIX"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "kind"
+              ]
+            }
           }
         },
         "required": [

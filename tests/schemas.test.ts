@@ -82,7 +82,7 @@ function commandCatalogDocument(executableSize: number): MutableJson {
     commands: [{
       command_id: "verify", command_spec_sha256: digest(803), command_class: "VERIFICATION", executable_invocation_path: "/usr/bin/node", executable_realpath: "/usr/bin/node",
       executable_device: 1, executable_inode: 1, executable_mode: 0o755, executable_size: executableSize, executable_sha256: digest(804), argv: ["/usr/bin/node"],
-      cwd: "REPOSITORY_ROOT", cwd_realpath: "/repository", cwd_device: 1, cwd_inode: 2, execution_inputs: [], environment: [], read_paths: [], write_paths: [], network_policy: "FORBIDDEN",
+      cwd: "REPOSITORY_ROOT", cwd_realpath: "/repository", cwd_device: 1, cwd_inode: 2, execution_input_layout: "FLAT", execution_inputs: [], environment: [], read_paths: [], write_paths: [], network_policy: "FORBIDDEN",
       timeout_ms: 60_000, stdout_limit: 65_536, stderr_limit: 65_536, expected_exit_codes: [0], repository_side_effect: "NONE", claimed_paths: [], cleanup_paths: [],
     }],
   };

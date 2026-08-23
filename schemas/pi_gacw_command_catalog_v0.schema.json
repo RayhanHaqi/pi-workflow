@@ -130,8 +130,47 @@
             "maximum": 9007199254740991,
             "type": "integer"
           },
+          "execution_input_layout": {
+            "anyOf": [
+              {
+                "const": "FLAT",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "PACKAGE_TREE",
+                    "type": "string"
+                  },
+                  "source_root": {
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "type": "string"
+                  },
+                  "device": {
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "inode": {
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source_root",
+                  "device",
+                  "inode"
+                ]
+              }
+            ]
+          },
           "execution_inputs": {
-            "maxItems": 128,
+            "maxItems": 1024,
             "type": "array",
             "items": {
               "additionalProperties": false,
@@ -143,6 +182,11 @@
                   "type": "string"
                 },
                 "realpath": {
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "capture_path": {
                   "minLength": 1,
                   "maxLength": 4096,
                   "type": "string"
@@ -334,6 +378,7 @@
           "cwd_realpath",
           "cwd_device",
           "cwd_inode",
+          "execution_input_layout",
           "execution_inputs",
           "environment",
           "read_paths",

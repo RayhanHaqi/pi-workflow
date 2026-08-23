@@ -73,11 +73,30 @@ interface PreparedExecutionInputs {
 
 async function prepareExecutionInputs(specification: M4CommandSpecification, temporaryRoot: string): Promise<PreparedExecutionInputs> {
   if (specification.execution_inputs.length === 0) return { argv: specification.argv, readRoot: null, cleanup: async () => {} };
+  if (specification.execution_input_layout !== "FLAT") {
+    const layout = specification.execution_input_layout;
+    const [stats, physical] = await Promise.all([lstat(layout.source_root), realpath(layout.source_root)]);
+    if (!stats.isDirectory() || stats.isSymbolicLink() || physical !== layout.source_root || stats.dev !== layout.device || stats.ino !== layout.inode) {
+      throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Package execution-input root changed before immutable capture");
+    }
+  }
   const root = await mkdtemp(join(dirname(temporaryRoot), ".m4exec-")); await chmod(root, 0o700);
-  const replacements = new Map<string, string>(); const names = new Set<string>();
+  const replacements = new Map<string, string>(); const destinations = new Set<string>(); const directories = new Set<string>([root]);
+  const cleanup = async (): Promise<void> => {
+    for (const directory of [...directories].sort((left, right) => left.length - right.length)) {
+      try { await chmod(directory, 0o700); } catch { /* best-effort permission restoration before deterministic removal */ }
+    }
+    await rm(root, { recursive: true, force: true });
+  };
   try {
     for (const input of specification.execution_inputs) {
-      const name = basename(input.path); if (names.has(name)) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution-input basenames collide"); names.add(name);
+      const capturePath = specification.execution_input_layout === "FLAT" ? basename(input.path) : input.capture_path!;
+      const destination = join(root, capturePath);
+      if (destinations.has(destination)) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution-input capture paths collide");
+      destinations.add(destination);
+      const destinationDirectory = dirname(destination);
+      await mkdir(destinationDirectory, { recursive: true, mode: 0o700 });
+      for (let cursor = destinationDirectory; cursor !== dirname(root) && cursor.startsWith(root); cursor = dirname(cursor)) directories.add(cursor);
       const source = await open(input.path, constants.O_RDONLY | constants.O_NOFOLLOW);
       let bytes: Buffer;
       try {
@@ -86,15 +105,18 @@ async function prepareExecutionInputs(specification: M4CommandSpecification, tem
             before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mode !== after.mode || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs ||
             `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== input.digest) throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution input changed before immutable capture");
       } finally { await source.close(); }
-      const destination = join(root, name); const target = await open(destination, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o400);
+      const target = await open(destination, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
       try { await target.writeFile(bytes); await target.sync(); } finally { await target.close(); }
+      await chmod(destination, input.mode & 0o555);
       replacements.set(input.path, destination);
     }
-    const directory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY); try { await directory.sync(); } finally { await directory.close(); }
-    return { argv: specification.argv.map((value) => replacements.get(value) ?? value), readRoot: root,
-      cleanup: async () => { await rm(root, { recursive: true, force: true }); } };
+    for (const directoryPath of [...directories].sort((left, right) => right.length - left.length)) {
+      const directory = await open(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY); try { await directory.sync(); } finally { await directory.close(); }
+      await chmod(directoryPath, 0o500);
+    }
+    return { argv: specification.argv.map((value) => replacements.get(value) ?? value), readRoot: root, cleanup };
   } catch (error: unknown) {
-    await rm(root, { recursive: true, force: true });
+    await cleanup();
     if (error instanceof ScopedToolGatewayError) throw error;
     throw new ScopedToolGatewayError("EXECUTION_INPUT_DRIFT", "Execution input is absent or was replaced", {}, { cause: error });
   }
@@ -141,10 +163,15 @@ export async function runSandboxedCommand(
     throw new ScopedToolGatewayError("COMMAND_SPEC_MISMATCH", "Executable changed before held-FD capture");
   }
   const readPaths = new Set<string>(await systemReadRoots());
+  const directoryReadPaths = new Set<string>();
   readPaths.add("/dev/null");
   readPaths.add(await realpath(specification.executable_realpath));
   for (const rule of specification.read_paths) {
     const path = absoluteRepositoryPath(repository, rule.path); await assertSandboxRuleType(path, rule.kind); readPaths.add(path);
+    for (let ancestor = dirname(path); ancestor === repository.worktree_root || ancestor.startsWith(`${repository.worktree_root}/`); ancestor = dirname(ancestor)) {
+      directoryReadPaths.add(ancestor);
+      if (ancestor === repository.worktree_root) break;
+    }
   }
   readPaths.add(temporaryRoot);
   if (prepared.readRoot !== null) readPaths.add(prepared.readRoot);
@@ -157,7 +184,7 @@ export async function runSandboxedCommand(
     writeRules.push({ path, kind: rule.kind });
   }
   writeRules.push({ path: temporaryRoot, kind: "PREFIX" });
-  const authorityPaths = [...new Set([...readPaths, ...writeRules.map((rule) => rule.path)])].sort();
+  const authorityPaths = [...new Set([...readPaths, ...directoryReadPaths, ...writeRules.map((rule) => rule.path)])].sort();
   const pathIdentities = await Promise.all(authorityPaths.map(sandboxPathIdentity));
   const environment: Record<string, string> = { LC_ALL: "C", LANG: "C", PATH: "/usr/bin:/bin", HOME: temporaryRoot, TMPDIR: temporaryRoot };
   for (const entry of specification.environment) environment[entry.key] = entry.value;
@@ -168,12 +195,13 @@ export async function runSandboxedCommand(
     executable_realpath: specification.executable_realpath,
     executable_identity: { device: specification.executable_device, inode: specification.executable_inode, mode: specification.executable_mode, size: specification.executable_size },
     executable_sha256: specification.executable_sha256,
-    execution_inputs: specification.execution_inputs,
+    execution_inputs: specification.execution_inputs.map(({ capture_path: _capturePath, ...input }) => input),
     argv: prepared.argv,
     cwd,
     cwd_identity: { device: specification.cwd_device, inode: specification.cwd_inode },
     environment,
     read_paths: [...readPaths].sort(),
+    directory_read_paths: [...directoryReadPaths].sort(),
     write_rules: writeRules,
     path_identities: pathIdentities,
     network_policy: specification.network_policy,

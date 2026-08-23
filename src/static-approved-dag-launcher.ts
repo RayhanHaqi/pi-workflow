@@ -44,7 +44,7 @@ export interface StaticApprovedDagLaunchSpec {
   readonly expected_head: string;
   readonly expected_tree: string;
   readonly goal: Readonly<{ readonly objective: string; readonly stop_condition: string; readonly execution_mode: "STATIC_APPROVED_DAG"; readonly scope: StaticGoalScope; readonly required_outputs: readonly string[]; readonly tasks: readonly StaticGoalTask[] }>;
-  readonly verification_commands: readonly Readonly<{ readonly command_id: string; readonly executable: string; readonly args: readonly string[]; readonly cwd: string; readonly timeout_ms: number }>[];
+  readonly verification_commands: readonly Readonly<{ readonly command_id: string; readonly executable: string; readonly args: readonly string[]; readonly cwd: string; readonly timeout_ms: number; readonly readable_paths?: readonly Readonly<{ readonly path: string; readonly kind: "EXACT" | "PREFIX" }>[] }>[];
   readonly static_time_budgets: StaticApprovedDagTimeBudgets;
   readonly static_max_attempts_per_leaf: 1 | 2;
   readonly expected_route: StaticRouteV1 | StaticRouteV2;
@@ -90,6 +90,19 @@ function sortedUniqueStrings(value: unknown, label: string, maximum: number): re
 function paths(value: unknown, label: string): readonly string[] { const result = sortedUniqueStrings(value, label, 128); for (const entry of result) { try { assertM4CanonicalPath(entry, label); } catch { fail("INVALID_SPEC", `${label} contains a non-canonical repository path`); } } return result; }
 function taskId(value: unknown, label: string): string { const result = string(value, label, 128); if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(result)) fail("INVALID_SPEC", `${label} is not an identifier`); return result; }
 function within(value: string, roots: readonly string[]): boolean { return roots.some((root) => value === root || value.startsWith(`${root}/`)); }
+function pathRules(value: unknown, label: string): readonly Readonly<{ readonly path: string; readonly kind: "EXACT" | "PREFIX" }>[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 128) fail("INVALID_SPEC", `${label} must be a bounded non-empty array`);
+  const seen = new Set<string>();
+  const rules = value.map((entry, index) => {
+    const rule = record(entry, `${label}[${index}]`); exactKeys(rule, ["path", "kind"], `${label}[${index}]`);
+    const path = string(rule["path"], `${label}[${index}].path`, 4096);
+    try { assertM4CanonicalPath(path, `${label}[${index}].path`); } catch { fail("INVALID_SPEC", `${label} contains a non-canonical repository path`); }
+    if (rule["kind"] !== "EXACT" && rule["kind"] !== "PREFIX") fail("INVALID_SPEC", `${label} contains an invalid rule kind`);
+    const identity = `${rule["kind"]}\u0000${path}`; if (seen.has(identity)) fail("INVALID_SPEC", `${label} contains duplicate rules`); seen.add(identity);
+    return Object.freeze({ path, kind: rule["kind"] });
+  });
+  return Object.freeze(rules.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : left.kind.localeCompare(right.kind)));
+}
 
 function normalizeGoal(value: unknown): StaticApprovedDagLaunchSpec["goal"] {
   const input = record(value, "goal"); exactKeys(input, ["objective", "stop_condition", "execution_mode", "scope", "required_outputs", "tasks"], "goal");
@@ -114,19 +127,23 @@ function normalizeGoal(value: unknown): StaticApprovedDagLaunchSpec["goal"] {
   return Object.freeze({ objective: string(input["objective"], "goal.objective"), stop_condition: string(input["stop_condition"], "goal.stop_condition"), execution_mode: "STATIC_APPROVED_DAG", scope, required_outputs: requiredOutputs, tasks: Object.freeze(tasks) });
 }
 
-function normalizeCommands(value: unknown): StaticApprovedDagLaunchSpec["verification_commands"] {
+function normalizeCommands(value: unknown, specVersion: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2): StaticApprovedDagLaunchSpec["verification_commands"] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 128) fail("INVALID_SPEC", "verification_commands must be a non-empty bounded array");
   const ids = new Set<string>();
   return Object.freeze(value.map((entry, index) => {
-    const command = record(entry, `verification_commands[${index}]`); exactKeys(command, ["command_id", "executable", "args", "cwd", "timeout_ms"], `verification_commands[${index}]`);
+    const command = record(entry, `verification_commands[${index}]`);
+    const v2 = specVersion === STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2;
+    exactKeys(command, v2 ? ["command_id", "executable", "args", "cwd", "timeout_ms", "readable_paths"] : ["command_id", "executable", "args", "cwd", "timeout_ms"], `verification_commands[${index}]`);
     const commandId = taskId(command["command_id"], `verification_commands[${index}].command_id`); if (ids.has(commandId)) fail("INVALID_SPEC", "verification command IDs must be unique"); ids.add(commandId);
     const executable = string(command["executable"], `verification_commands[${index}].executable`); if (!isAbsolute(executable) || normalize(executable) !== executable) fail("INVALID_SPEC", "verification executable must be an absolute normalized path accepted by controller authority");
     if (!Array.isArray(command["args"]) || command["args"].length > 127) fail("INVALID_SPEC", "verification args must be bounded");
     const args = Object.freeze(command["args"].map((arg, argIndex) => string(arg, `verification_commands[${index}].args[${argIndex}]`, 4096)));
     const cwd = string(command["cwd"], `verification_commands[${index}].cwd`); if (cwd === "." || cwd === "REPOSITORY_ROOT" || isAbsolute(cwd)) fail("INVALID_SPEC", "verification cwd must be a non-root canonical repository-relative path");
     try { assertM4CanonicalPath(cwd, `verification_commands[${index}].cwd`); } catch { fail("INVALID_SPEC", "verification cwd must be canonical and traversal-free"); }
+    const readable = v2 ? pathRules(command["readable_paths"], `verification_commands[${index}].readable_paths`) : undefined;
+    if (readable !== undefined && !readable.some((rule) => rule.kind === "PREFIX" && (cwd === rule.path || cwd.startsWith(`${rule.path}/`)))) fail("INVALID_SPEC", "verification cwd must be inside a verifier-readable prefix");
     const timeout = positiveSafeInteger(command["timeout_ms"], `verification_commands[${index}].timeout_ms`); if (timeout > STATIC_APPROVED_DAG_COMMAND_TIMEOUT_MAX_MS) fail("INVALID_SPEC", `verification timeout exceeds ${STATIC_APPROVED_DAG_COMMAND_TIMEOUT_MAX_MS}`);
-    return Object.freeze({ command_id: commandId, executable, args, cwd, timeout_ms: timeout });
+    return Object.freeze({ command_id: commandId, executable, args, cwd, timeout_ms: timeout, ...(readable === undefined ? {} : { readable_paths: readable }) });
   }));
 }
 
@@ -201,14 +218,14 @@ export function normalizeStaticApprovedDagLaunchSpec(value: unknown): StaticAppr
   if (budgets.worker_deadline_ms > budgets.node_wall_ms || budgets.node_wall_ms > budgets.workflow_wall_ms) fail("INVALID_SPEC", "static time budgets must satisfy worker <= node <= workflow");
   const attempts = input["static_max_attempts_per_leaf"]; if (attempts !== 1 && attempts !== 2) fail("INVALID_SPEC", "static_max_attempts_per_leaf must be 1 or 2");
   const expectedRoute = normalizeExpectedRoute(input["expected_route"], specVersion);
-  const spec: StaticApprovedDagLaunchSpec = { spec_version: specVersion, run_label: taskId(input["run_label"], "run_label"), expected_repository_branch: branch, expected_head: head, expected_tree: tree, goal: normalizeGoal(input["goal"]), verification_commands: normalizeCommands(input["verification_commands"]), static_time_budgets: budgets, static_max_attempts_per_leaf: attempts, expected_route: expectedRoute };
+  const spec: StaticApprovedDagLaunchSpec = { spec_version: specVersion, run_label: taskId(input["run_label"], "run_label"), expected_repository_branch: branch, expected_head: head, expected_tree: tree, goal: normalizeGoal(input["goal"]), verification_commands: normalizeCommands(input["verification_commands"], specVersion), static_time_budgets: budgets, static_max_attempts_per_leaf: attempts, expected_route: expectedRoute };
   for (const task of spec.goal.tasks) if (task.verification_command_ids?.some((id) => !spec.verification_commands.some((command) => command.command_id === id))) fail("INVALID_SPEC", "task selected an unknown verification command");
   return JSON.parse(canonicalize(spec)) as StaticApprovedDagLaunchSpec;
 }
 
 export function staticApprovedDagSpecSha256(value: unknown): Sha256Digest { return sha256Canonical(normalizeStaticApprovedDagLaunchSpec(value)); }
 
-export type StaticApprovedDagInspectionReport = Readonly<{ classification: "INSPECTED" | "INVALID"; spec_version: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2 | null; spec_sha256: Sha256Digest | null; run_label: string | null; reason: string; repository: Readonly<{ expected_branch: string; expected_head: string; expected_tree: string }> | null; graph: Readonly<{ node_count: number; edge_count: number; nodes: readonly Readonly<{ task_id: string; dependencies: readonly string[]; editable_paths: readonly string[]; required_outputs: readonly string[]; verification_command_ids: readonly string[] }>[]; edges: readonly Readonly<{ from: string; to: string }>[] }> | null; route: StaticApprovedDagLaunchSpec["expected_route"] | null; budgets: Readonly<StaticApprovedDagTimeBudgets & { max_attempts_per_leaf: 1 | 2 }> | null; verification_commands: readonly Readonly<{ command_id: string; cwd: string; timeout_ms: number }>[] | null }>;
+export type StaticApprovedDagInspectionReport = Readonly<{ classification: "INSPECTED" | "INVALID"; spec_version: typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION | typeof STATIC_APPROVED_DAG_LAUNCH_SPEC_VERSION_V2 | null; spec_sha256: Sha256Digest | null; run_label: string | null; reason: string; repository: Readonly<{ expected_branch: string; expected_head: string; expected_tree: string }> | null; graph: Readonly<{ node_count: number; edge_count: number; nodes: readonly Readonly<{ task_id: string; dependencies: readonly string[]; editable_paths: readonly string[]; required_outputs: readonly string[]; verification_command_ids: readonly string[] }>[]; edges: readonly Readonly<{ from: string; to: string }>[] }> | null; route: StaticApprovedDagLaunchSpec["expected_route"] | null; budgets: Readonly<StaticApprovedDagTimeBudgets & { max_attempts_per_leaf: 1 | 2 }> | null; verification_commands: readonly Readonly<{ command_id: string; cwd: string; timeout_ms: number; readable_paths?: readonly Readonly<{ path: string; kind: "EXACT" | "PREFIX" }>[] }>[] | null }>;
 
 /**
  * Provider-free owner inspection of a prospective frozen launch spec: normalize, compute the
@@ -231,7 +248,7 @@ export function inspectStaticApprovedDagSpec(value: unknown): StaticApprovedDagI
       graph: Object.freeze({ node_count: nodes.length, edge_count: edges.length, nodes: Object.freeze(nodes), edges: Object.freeze(edges) }),
       route: spec.expected_route,
       budgets: Object.freeze({ ...spec.static_time_budgets, max_attempts_per_leaf: spec.static_max_attempts_per_leaf }),
-      verification_commands: Object.freeze(spec.verification_commands.map(({ command_id, cwd, timeout_ms }) => Object.freeze({ command_id, cwd, timeout_ms }))),
+      verification_commands: Object.freeze(spec.verification_commands.map(({ command_id, cwd, timeout_ms, readable_paths }) => Object.freeze({ command_id, cwd, timeout_ms, ...(readable_paths === undefined ? {} : { readable_paths }) }))),
     });
   } catch (error: unknown) {
     return Object.freeze({ classification: "INVALID", spec_version: null, spec_sha256: null, run_label: null, reason: (error instanceof Error ? error.message : "inspection failed").slice(0, 4096), repository: null, graph: null, route: null, budgets: null, verification_commands: null });
@@ -303,6 +320,7 @@ function commandsMatch(spec: readonly StaticApprovedDagLaunchSpec["verification_
   return actual.every((entry, index) => {
     const command = spec[index]!; const actualRecord = entry as JsonRecord;
     if (actualRecord === null || typeof actualRecord !== "object" || Array.isArray(actualRecord) || actualRecord["command_id"] !== command.command_id || actualRecord["cwd"] !== command.cwd || actualRecord["timeout_ms"] !== command.timeout_ms || actualRecord["network"] !== "FORBIDDEN") return false;
+    if (command.readable_paths !== undefined && !same(actualRecord["readable_paths"], command.readable_paths)) return false;
     const argv = actualRecord["argv"]; if (!Array.isArray(argv) || argv.length !== command.args.length + 1 || argv[0] !== command.executable) return false;
     const direct = [command.executable, ...command.args];
     const scopedScript = command.args.length === 0 ? direct : [command.executable, join(repositoryRoot, command.cwd, command.args[0]!), ...command.args.slice(1)];

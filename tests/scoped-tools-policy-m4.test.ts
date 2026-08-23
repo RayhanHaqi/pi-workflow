@@ -30,9 +30,15 @@ test("M4 policy and catalog reject scope amplification and unsafe authority", as
       const policy = reidentify(base, { command_writable_paths: [{ path: "tracked.txt", kind: "PREFIX" }] });
       assert.throws(() => validate(policy), (error: unknown) => code(error) === "PATH_NOT_EDITABLE");
     });
-    await t.test("command read PREFIX cannot widen a readable EXACT rule", () => {
+    await t.test("command read PREFIX cannot widen an exact path authority", () => {
       const policy = reidentify(base, { command_readable_paths: [{ path: "tracked.txt", kind: "PREFIX" }] });
-      assert.throws(() => validate(policy), (error: unknown) => code(error) === "PATH_NOT_READABLE");
+      assert.throws(() => validate(policy), (error: unknown) => code(error) === "DATA_POLICY_FORBIDS_READ");
+    });
+    await t.test("verifier read authority may be broader than worker readable scope without widening it", () => {
+      const policy = reidentify(base, { command_readable_paths: [...base.command_readable_paths, { path: "created.txt", kind: "EXACT" }] });
+      const validated = validate(policy);
+      assert.ok(validated.commandReadable.some((rule) => rule.path === "created.txt"));
+      assert.ok(!validated.readable.some((rule) => rule.path === "created.txt"));
     });
     await t.test("command raw read cannot bypass SECRET projection", () => {
       const authorities = base.path_authorities.map((authority) => authority.path === "tracked.txt" ? { ...authority, data_class: "SECRET" as const, raw_read_approved: false } : authority);

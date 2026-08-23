@@ -70,7 +70,7 @@ function v2Spec(expectedRoute: Record<string, unknown>): Record<string, unknown>
       { task_id: "a", objective: "Write a.", editable_paths: ["out/a.txt"], required_outputs: ["out/a.txt"], dependencies: [] },
       { task_id: "b", objective: "Write b.", editable_paths: ["out/b.txt"], required_outputs: ["out/b.txt"], dependencies: ["a"] },
     ] },
-    verification_commands: [{ command_id: "tsx", executable: "/usr/bin/tsx", args: ["--version"], cwd: "node_modules", timeout_ms: 60_000 }],
+    verification_commands: [{ command_id: "tsx", executable: "/usr/bin/tsx", args: ["--version"], cwd: "node_modules", timeout_ms: 60_000, readable_paths: [{ path: "node_modules", kind: "PREFIX" }] }],
     static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }, static_max_attempts_per_leaf: 1,
     expected_route: expectedRoute,
   };

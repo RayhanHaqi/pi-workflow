@@ -99,6 +99,7 @@ export async function commandSpecification(
     cwd_realpath: cwdPhysical,
     cwd_device: cwdStats.dev,
     cwd_inode: cwdStats.ino,
+    execution_input_layout: "FLAT" as const,
     execution_inputs: executionInputs,
     environment: [],
     read_paths: [...(options.readPaths ?? [])],

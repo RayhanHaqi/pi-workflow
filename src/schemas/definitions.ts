@@ -237,6 +237,7 @@ export const VerificationCommandSchema = StrictObject({
   cwd: PathString(),
   timeout_ms: Type.Integer({ minimum: 1, maximum: 86_400_000 }),
   network: StringEnum(["FORBIDDEN", "OWNER_APPROVED"] as const),
+  readable_paths: Type.Optional(Type.Array(StrictObject({ path: PathString(), kind: StringEnum(["EXACT", "PREFIX"] as const) }), { maxItems: 128 })),
 });
 
 export const CommandPolicySchema = StrictObject({
@@ -1503,12 +1504,17 @@ export const M4CommandEnvironmentEntrySchema = StrictObject({ key: NonEmptyStrin
 export const M4ExecutionInputSchema = StrictObject({
   path: PathString(),
   realpath: PathString(),
+  capture_path: Type.Optional(PathString()),
   device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   mode: Type.Integer({ minimum: 0, maximum: 0o7777 }),
   size: Type.Integer({ minimum: 0, maximum: 67_108_864 }),
   digest: Digest(),
 });
+export const M4ExecutionInputLayoutSchema = Type.Union([
+  Type.Literal("FLAT"),
+  StrictObject({ kind: Type.Literal("PACKAGE_TREE"), source_root: PathString(), device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }) }),
+]);
 export const M4CommandSpecificationSchema = StrictObject({
   command_id: Identifier(),
   command_spec_sha256: Digest(),
@@ -1525,7 +1531,8 @@ export const M4CommandSpecificationSchema = StrictObject({
   cwd_realpath: PathString(),
   cwd_device: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
   cwd_inode: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
-  execution_inputs: Type.Array(M4ExecutionInputSchema, { maxItems: 128 }),
+  execution_input_layout: M4ExecutionInputLayoutSchema,
+  execution_inputs: Type.Array(M4ExecutionInputSchema, { maxItems: 1024 }),
   environment: Type.Array(M4CommandEnvironmentEntrySchema, { uniqueItems: true, maxItems: 256 }),
   read_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),
   write_paths: Type.Array(M4PathRuleSchema, { maxItems: 10_000 }),

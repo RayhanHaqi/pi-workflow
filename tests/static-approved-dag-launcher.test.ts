@@ -481,7 +481,11 @@ const V1_FROZEN_HIGH_DIGEST = "sha256:c557d053d284175ae8bd683341679f456a58ec7995
 const V1_FROZEN_XHIGH_DIGEST = "sha256:792fa269f752717023643b977307ef11cb0904952c6fcfb48104c2a842b58fbc";
 
 function v2Spec(expectedRoute: Record<string, unknown> = { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false }): Record<string, unknown> {
-  return { ...spec(), spec_version: "static-approved-dag-launch-v2", expected_route: expectedRoute };
+  const source = spec();
+  source["spec_version"] = "static-approved-dag-launch-v2";
+  source["expected_route"] = expectedRoute;
+  source["verification_commands"] = (source["verification_commands"] as Array<Record<string, unknown>>).map((command) => ({ ...command, readable_paths: [{ path: "node_modules", kind: "PREFIX" }] }));
+  return source;
 }
 
 test("V1 freeze: legacy Terra specs keep their exact historical digests and route semantics", () => {
@@ -493,6 +497,12 @@ test("V1 freeze: legacy Terra specs keep their exact historical digests and rout
   assert.deepEqual(normalized.expected_route, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false });
 });
 
+test("V1 freeze rejects verifier-specific readable authority without changing legacy normalization", () => {
+  const widened = structuredClone(V1_PIN_SPEC); (widened.verification_commands[0] as any).readable_paths = [{ path: "node_modules", kind: "PREFIX" }];
+  assert.throws(() => normalizeStaticApprovedDagLaunchSpec(widened), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "INVALID_SPEC");
+  assert.equal(Object.hasOwn(normalizeStaticApprovedDagLaunchSpec(V1_PIN_SPEC).verification_commands[0]!, "readable_paths"), false);
+});
+
 test("V2 CODING_EXECUTOR spec normalizes and inspects with its exact bounded route", () => {
   const normalized = normalizeStaticApprovedDagLaunchSpec(v2Spec());
   assert.equal(normalized.spec_version, "static-approved-dag-launch-v2");
@@ -502,7 +512,7 @@ test("V2 CODING_EXECUTOR spec normalizes and inspects with its exact bounded rou
   assert.equal(report.spec_version, "static-approved-dag-launch-v2");
   assert.deepEqual(report.route, { logical_role: "CODING_EXECUTOR", provider_id: "provider-a", model_id: "model-a", effort: "high", fallback: false });
   assert.equal(report.graph!.node_count, 2);
-  assert.deepEqual(report.verification_commands, [{ command_id: "tsx", cwd: "node_modules", timeout_ms: 60_000 }]);
+  assert.deepEqual(report.verification_commands, [{ command_id: "tsx", cwd: "node_modules", timeout_ms: 60_000, readable_paths: [{ path: "node_modules", kind: "PREFIX" }] }]);
 });
 
 test("V2 model identity is routing data: different provider/model produce different digests over an identical graph", () => {
@@ -511,6 +521,8 @@ test("V2 model identity is routing data: different provider/model produce differ
   assert.equal(first.classification, "INSPECTED"); assert.equal(second.classification, "INSPECTED");
   assert.notEqual(first.spec_sha256, second.spec_sha256);
   assert.deepEqual(first.graph, second.graph);
+  const widened = v2Spec(); ((widened["verification_commands"] as any[])[0].readable_paths as any[]).push({ path: "src", kind: "PREFIX" });
+  assert.notEqual(inspectStaticApprovedDagSpec(widened).spec_sha256, first.spec_sha256);
   assert.deepEqual(first.budgets, second.budgets);
 });
 

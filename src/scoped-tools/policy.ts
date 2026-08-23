@@ -63,7 +63,7 @@ export function validateToolPolicy(
       throw new ScopedToolGatewayError("PATH_NOT_EDITABLE", "Command write rule is outside editable authority");
     }
   }
-  for (const rule of commandReadable) if (!ruleWithinEnvelope(rule, readable)) throw new ScopedToolGatewayError("PATH_NOT_READABLE", "Command read rule is outside readable authority");
+  // Deterministic verifier reads are independently bounded by command_readable_paths and path_authorities; they do not widen worker readable_paths.
   if (!Array.isArray(policy.path_authorities) || policy.path_authorities.length > 100_000) throw new ScopedToolGatewayError("INVALID_ARGUMENT", "Path authority inventory is invalid");
   const authorities: M4PathAuthority[] = policy.path_authorities.map((authority) => {
     assertM4CanonicalPath(authority.path, "path authority");

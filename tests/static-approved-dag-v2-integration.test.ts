@@ -54,9 +54,10 @@ async function v2Spec(root: string, modelExecutionDefinition?: Record<string, un
       { task_id: "integration-b", objective: "Write b.", editable_paths: ["b.txt"], required_outputs: ["b.txt"], dependencies: ["integration-a"] },
     ],
   };
+  const verifierReads = [{ path: "verify", kind: "PREFIX" as const }];
   const authorityCommands = [
-    { command_id: "verify-a", executable: process.execPath, args: ["a.mjs"], cwd: "verify", timeout_ms: 60_000 },
-    { command_id: "verify-b", executable: process.execPath, args: ["b.mjs"], cwd: "verify", timeout_ms: 60_000 },
+    { command_id: "verify-a", executable: process.execPath, args: ["a.mjs"], cwd: "verify", timeout_ms: 60_000, readable_paths: verifierReads },
+    { command_id: "verify-b", executable: process.execPath, args: ["b.mjs"], cwd: "verify", timeout_ms: 60_000, readable_paths: verifierReads },
   ];
   return normalizeStaticApprovedDagLaunchSpec({
     spec_version: "static-approved-dag-launch-v2", run_label: "v2-integration", expected_repository_branch: branch, expected_head: head, expected_tree: tree,
