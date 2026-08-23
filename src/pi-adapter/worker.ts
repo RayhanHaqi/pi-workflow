@@ -217,6 +217,8 @@ interface PreparedRuntime {
   readonly pendingResponseCount: () => number;
 }
 
+export type DynamicPreparedRuntime = PreparedRuntime;
+
 export interface M6FauxRuntimeFactoryInput {
   readonly aiModule: JsonRecord;
   readonly providerId: string;
@@ -849,16 +851,34 @@ async function admitDynamicPiModelRuntime(boundary: RuntimeBoundary, providerId:
   if (digest !== expectedDigest) {
     fail("RUNTIME_CAPABILITY_INVALID", `resolved dynamic model execution definition ${digest} differs from the frozen authority ${expectedDigest}`, "RUNTIME_GUARD");
   }
+  // Compose the EXACT verified provider object (the same object this ModelRuntime streams
+  // through, remote-catalog overlay included) into a public pi-ai MutableModels collection.
+  // This gives the generic cleanup seam a genuine supported lifecycle primitive:
+  // MutableModels.clearProviders() actually empties the registry that served generation,
+  // while the raw ModelRuntime instance is dropped and never retained by the worker.
+  const providerObject = getProviderMethod(providerId);
+  if (!isJsonRecord(providerObject)) fail("RUNTIME_CAPABILITY_INVALID", "dynamic model provider registration is unavailable", "RUNTIME_GUARD");
+  exactString(providerObject["id"], providerId, "dynamic model provider ID");
+  const createModels = callable(readProperty(boundary.aiModule, "createModels", "AI module"), "AI module.createModels");
+  const collection = record(createModels({ credentials: credentialStore }), "composed dynamic model collection");
+  method(collection, "setProvider", "composed dynamic model collection")(providerObject);
+  const collectionGetModel = method(collection, "getModel", "composed dynamic model collection");
+  const admittedModel = collectionGetModel(providerId, modelId);
+  if (admittedModel !== model) fail("RUNTIME_CAPABILITY_INVALID", "composed dynamic model collection does not serve the exact admitted model", "RUNTIME_GUARD");
+  const collectionGetProviders = method(collection, "getProviders", "composed dynamic model collection");
+  const getCollectionProviderMethod = method(collection, "getProvider", "composed dynamic model collection");
+  const collectionStreamSimple = method(collection, "streamSimple", "composed dynamic model collection");
+  const clearProvidersMethod = method(collection, "clearProviders", "composed dynamic model collection");
   const models: ModelsRuntime = {
-    getProviders: () => array(getProvidersMethod(), "Pi runtime providers"),
-    getProvider: (provider) => getProviderMethod(provider),
-    getModel: (provider, candidate) => getModelMethod(provider, candidate),
+    getProviders: () => array(collectionGetProviders(), "composed dynamic model providers"),
+    getProvider: (provider) => getCollectionProviderMethod(provider),
+    getModel: (provider, candidate) => collectionGetModel(provider, candidate),
     getSupportedThinkingLevels: () => [],
-    streamSimple: (streamModel, context, options) => streamSimpleMethod(streamModel, context, options),
-    setProvider: () => fail("RUNTIME_CAPABILITY_INVALID", "provider mutation is forbidden on the dynamic Pi runtime", "RUNTIME_GUARD"),
-    clearProviders: () => undefined,
+    streamSimple: (streamModel, context, options) => collectionStreamSimple(streamModel, context, options),
+    setProvider: () => fail("RUNTIME_CAPABILITY_INVALID", "provider mutation is forbidden on the dynamic model runtime", "RUNTIME_GUARD"),
+    clearProviders: () => { clearProvidersMethod(); },
   };
-  return { models, model, projection, digest };
+  return { models, model: admittedModel, projection, digest };
 }
 
 /** Test-only hook: run the exact production dynamic-model admission without constructing an Agent or streaming. */
@@ -875,6 +895,27 @@ export async function admitDynamicPiModelForTests(input: DynamicModelAdmissionTe
   const boundary = await loadRuntimeBoundary();
   const admission = await admitDynamicPiModelRuntime(boundary, input.providerId, input.modelId, input.credentialStore, input.modelDefinitionSha256, input.modelsStore);
   return { projection: admission.projection, digest: admission.digest };
+}
+
+/** Test-only hook: run the exact production dynamic preparation (no faux runtime) for lifecycle verification. */
+export interface DynamicRuntimeLifecycleTestInput {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly effort?: "high" | "xhigh" | "max";
+  readonly modelDefinitionSha256: Sha256Digest;
+  readonly credentialStore: CredentialStoreRuntime;
+  /** Test-only in-memory Pi models store; production resolves through the Pi agent directory. */
+  readonly modelsStore?: unknown;
+}
+
+export async function prepareDynamicPiRuntimeForTests(input: DynamicRuntimeLifecycleTestInput): Promise<DynamicPreparedRuntime> {
+  const boundary = await loadRuntimeBoundary();
+  return prepareRuntime(boundary, input.providerId, input.modelId, input.credentialStore, undefined, input.effort ?? "high", input.modelDefinitionSha256, input.modelsStore);
+}
+
+/** Test-only hook: the exact production cleanup release used by every bounded worker path. */
+export function releasePreparedRuntimeForTests(runtime: PreparedRuntime): void {
+  releasePreparedRuntime(runtime);
 }
 
 async function prepareRuntime(boundary: RuntimeBoundary, providerId: string, modelId: string, credentialStore: CredentialStoreRuntime, fauxAuthority?: object, effort: "high" | "xhigh" | "max" = "high", modelDefinitionSha256?: Sha256Digest | null, modelsStoreOverride?: unknown): Promise<PreparedRuntime> {

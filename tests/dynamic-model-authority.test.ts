@@ -4,7 +4,7 @@ import test from "node:test";
 import { sha256Canonical } from "../src/identity/index.js";
 import { assertDocumentValid, identifyContractDocument } from "../src/schemas/index.js";
 import { normalizeStaticApprovedDagLaunchSpec, staticApprovedDagSpecSha256 } from "../src/static-approved-dag-launcher.js";
-import { admitDynamicPiModelForTests, M6WorkerError } from "../src/pi-adapter/worker.js";
+import { admitDynamicPiModelForTests, M6WorkerError, prepareDynamicPiRuntimeForTests, releasePreparedRuntimeForTests } from "../src/pi-adapter/worker.js";
 import { allRoutes } from "./helpers.js";
 
 const HEAD = "a".repeat(40);
@@ -264,4 +264,53 @@ test("a missing or stale dynamic model rejects before provider generation", asyn
   const stale = structuredClone(OX_RESOLVED_MODEL) as Record<string, unknown>;
   stale["id"] = "stealth/ox-beta";
   await expectDynamicAdmissionFailure([stale], OX_MODEL_DEFINITION_SHA256, /absent from the offline Pi runtime catalogue|differs from the frozen authority/);
+});
+
+// ---------------------------------------------------------------------------
+// Runtime lifecycle cleanup certainty (production prepare + production release)
+// ---------------------------------------------------------------------------
+
+test("dynamic runtime lifecycle reaches truthful clean settlement through the real Pi cleanup primitive", async () => {
+  const { store, writes } = modelsStoreFixture([structuredClone(OX_RESOLVED_MODEL)]);
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => { fetchCalls += 1; throw new Error("network is forbidden during the lifecycle"); }) as typeof fetch;
+  let runtime: Awaited<ReturnType<typeof prepareDynamicPiRuntimeForTests>> | undefined;
+  try {
+    runtime = await prepareDynamicPiRuntimeForTests({
+      providerId: "openrouter", modelId: "stealth/ox-alpha", effort: "high",
+      modelDefinitionSha256: OX_MODEL_DEFINITION_SHA256 as never,
+      credentialStore: credentialStoreFixture() as never, modelsStore: store,
+    });
+    // Dynamic ModelRuntime was created; the exact model is admitted by frozen digest.
+    const admitted = runtime.models.getModel("openrouter", "stealth/ox-alpha") as Record<string, unknown>;
+    assert.notEqual(admitted, undefined);
+    assert.equal(admitted["id"], "stealth/ox-alpha");
+    assert.equal(admitted["provider"], "openrouter");
+    assert.equal(admitted["baseUrl"], "https://openrouter.ai/api/v1");
+    assert.equal(runtime.models.getSupportedThinkingLevels(admitted).includes("high"), true);
+    // The provider registry is genuinely populated before cleanup (no synthetic empty view).
+    const providersBeforeCleanup = runtime.models.getProviders().length;
+    assert.ok(providersBeforeCleanup >= 1);
+    // No generation seam was touched.
+    assert.equal(typeof runtime.streamFn, "function");
+    // Exact production cleanup sequence from runBoundedPiAgentImpl:
+    //   clearProviderState(); clearProviders(); prove registry empty and no pending responses.
+    // Pre-repair, the no-op clearProviders left providersBeforeCleanup observable here and
+    // the same check produced CLEANUP_UNCERTAIN.
+    runtime.clearProviderState();
+    runtime.models.clearProviders();
+    const providerCollectionCleared = runtime.models.getProviders().length === 0 && runtime.pendingResponseCount() === 0;
+    assert.equal(providerCollectionCleared, true);
+    // Repeated cleanup (the production path can issue it on failure latches) is safe/idempotent.
+    releasePreparedRuntimeForTests(runtime);
+    assert.equal(runtime.models.getProviders().length, 0);
+    assert.equal(runtime.pendingResponseCount(), 0);
+    assert.equal(writes, 0);
+    assert.equal(fetchCalls, 0);
+    runtime = undefined;
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (runtime !== undefined) { try { releasePreparedRuntimeForTests(runtime); } catch { /* already settled above */ } }
+  }
 });
