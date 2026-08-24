@@ -2066,6 +2066,7 @@ export async function publishM5ManagedRecord(input: RunStorageLocation & {
 /** Package-internal immutable M5 record loader. */
 export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   readonly policies: readonly M5ControlPolicyDocument[];
+  readonly reducerPolicies: readonly ReducerPolicy[];
   readonly usage: readonly M5UsageEvidenceDocument[];
   readonly decisions: readonly M5ControlDecisionDocument[];
   readonly toolPolicies: readonly M4ScopedToolPolicyDocument[];
@@ -2104,6 +2105,7 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   };
   return detachedFrozen({
     policies: await load<M5ControlPolicyDocument>("M5_CONTROL_POLICY"),
+    reducerPolicies: await load<ReducerPolicy>("REDUCER_POLICY"),
     usage: await load<M5UsageEvidenceDocument>("M5_USAGE_EVIDENCE"),
     decisions: await load<M5ControlDecisionDocument>("M5_CONTROL_DECISION"),
     toolPolicies: await load<M4ScopedToolPolicyDocument>("M4_TOOL_POLICY"),

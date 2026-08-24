@@ -14,7 +14,9 @@ The package contains:
 - an M4 descriptor-relative secure filesystem and scoped tool gateway with exact-byte mutation, frozen structured commands, Landlock filesystem confinement, `no_new_privs`, seccomp network denial, and immutable operation evidence; and
 - an M5 deterministic control-decision kernel for typed usage budgets, evidence-backed progress, fixed failure actions, contract satisfiability, finite route eligibility/selection, and M2-bound immutable decision authority.
 
-M7 adds one approval-gated, ephemeral, read-only/report-only workflow surface: `pi-workflow <goal.json>` and the human-confirmed `/workflow <goal.json>` Pi command. It compiles the Goal into the existing canonical TaskDocument, revalidates the approved content identity, reuses M3/M4/M5, and invokes only the existing bounded M6 worker. It does not add Goal identity or persistence, a Goal schema/record, mutation, resume/recovery, retries, fallback, provider/model selection, or another worker.
+M7 adds one approval-gated, ephemeral, read-only/report-only workflow surface: `pi-workflow <goal.json>` and the human-confirmed `/workflow <goal.json>` Pi command. It compiles the Goal into the existing canonical TaskDocument, revalidates the approved content identity, reuses M3/M4/M5, and invokes only the existing bounded M6 worker. It does not add Goal identity or persistence, retries, fallback, provider/model selection, or another worker.
+
+V1-R1 adds `pi-workflow resume-inspect <retained-run-root>`. It is read-only and provider-free: it reports deterministic resume eligibility for a retained `STATIC_APPROVED_DAG` state, but never resumes, retries, or invokes a worker. Unsupported, in-flight, orphaned, drifted, or ambiguous state fails closed.
 
 ## Package foundation
 

@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { main as staticApprovedDagCliMain } from "../src/cli/static-approved-dag.js";
 import { readM5ManagedRecords } from "../src/persistence/store.js";
+import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 import {
   executeStaticApprovedDag,
@@ -178,6 +179,9 @@ test("launcher propagates retainedArtifactRoot: PASS returns a unique surviving 
     const stats = await lstat(evidence);
     assert.equal(stats.isDirectory(), true);
     // Bounded-worker invocation and result records remain readable and bound together.
+    assert.deepEqual(await inspectDeterministicResumeEligibility({ retainedRunRoot: evidence }), {
+      classification: "RESUME_REFUSED", run_id: "pre-m8-bounded", phase: "PASS", resume_point: null, reason: "RESUME_REFUSED_TERMINAL",
+    });
     const records = await readM5ManagedRecords({ stateRoot: join(evidence, "state"), runId: "pre-m8-bounded" });
     assert.equal(records.boundedWorkerInvocations.length, 2);
     assert.equal(records.boundedWorkerResults.length, 2);
@@ -215,6 +219,9 @@ test("BLOCKED untrusted-refusal worker results stay diagnosable under retention 
     assert.ok(typeof report.evidence_root === "string");
     const evidence = report.evidence_root!;
     await lstat(evidence);
+    assert.deepEqual(await inspectDeterministicResumeEligibility({ retainedRunRoot: evidence }), {
+      classification: "RESUME_REFUSED", run_id: "pre-m8-bounded", phase: "BLOCKED", resume_point: null, reason: "RESUME_REFUSED_TERMINAL",
+    });
     const records = await readM5ManagedRecords({ stateRoot: join(evidence, "state"), runId: "pre-m8-bounded" });
     assert.ok(records.boundedWorkerResults.length >= 1);
     const blocked = records.boundedWorkerResults.find((entry) => entry.outcome === "BLOCKED");

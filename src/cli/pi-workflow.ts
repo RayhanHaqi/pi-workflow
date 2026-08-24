@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 import { forceStopBoundedMutationWorkflow, runBoundedMutationWorkflow } from "../workflow-controller.js";
+import { inspectDeterministicResumeEligibility } from "../resume-inspection.js";
 import {
   approvalLine,
   prepareWorkflow,
@@ -86,9 +87,20 @@ async function runForceStopCommand(argv: readonly string[]): Promise<number> {
   return result.disposition === "BLOCKED_FORCE_STOP_CAPABILITY_INVALID" || result.disposition === "BLOCKED_FORCE_STOP_DESCENDANT_UNCERTAIN" || result.disposition === "BLOCKED_FORCE_STOP_RECONCILIATION_UNCERTAIN" ? 3 : 0;
 }
 
+async function runResumeInspectCommand(argv: readonly string[]): Promise<number> {
+  if (argv.length !== 2) {
+    output(JSON.stringify({ classification: "RESUME_REFUSED", run_id: null, phase: null, resume_point: null, reason: "RESUME_REFUSED_STATE_STORE" }));
+    return 2;
+  }
+  const result = await inspectDeterministicResumeEligibility({ retainedRunRoot: argv[1]! });
+  output(JSON.stringify(result));
+  return result.classification === "RESUMABLE" ? 0 : 3;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (argv[0] === "force-stop") return runForceStopCommand(argv);
   if (argv[0] === "mutate") return runMutationCommand(argv);
+  if (argv[0] === "resume-inspect") return runResumeInspectCommand(argv);
   if (argv.length !== 1) {
     output("BLOCKED (not started): usage is pi-workflow <goal.json>");
     return 2;
