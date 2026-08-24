@@ -163,6 +163,10 @@ test("resume point is deterministic at the reducer-settled static DAG ready boun
   assert.equal(deriveStaticDagResumePoint(staticState([{ task_id: "a", status: "PASS" }, { task_id: "b", status: "PENDING" }]), policy), "STATIC_DAG_SELECT_READY_LEAF:b");
   const active = { ...staticState([{ task_id: "a", status: "PENDING" }, { task_id: "b", status: "PENDING" }]), active_task_id: "a" } as WorkflowState;
   assert.equal(deriveStaticDagResumePoint(active, policy), null);
+  const selected = { ...staticState([{ task_id: "a", status: "PENDING" }, { task_id: "b", status: "PENDING" }]), phase: "LEAF_FAST_PREFLIGHT", active_task_id: "a" } as WorkflowState;
+  assert.equal(deriveStaticDagResumePoint(selected, policy), "STATIC_DAG_START_SELECTED_LEAF:a");
+  assert.equal(deriveStaticDagResumePoint({ ...selected, tasks: selected.tasks.map((task) => task.task_id === "a" ? { ...task, attempts: 1 } : task) } as WorkflowState, policy), null);
+  assert.equal(deriveStaticDagResumePoint({ ...selected, active_task_id: "b" } as WorkflowState, policy), null);
 });
 
 test("resume inspection fails closed without a retained state root and does not create one", async () => {
@@ -253,10 +257,12 @@ test("quiescent workflow-owned delta is resumable", async () => {
   } finally { await fixture.cleanup(); }
 });
 
-test("quiescent nonterminal static state outside READY is refused as ambiguous", async () => {
+test("quiescent selected static leaf before START_LEAF_ATTEMPT is resumable", async () => {
   const fixture = await interruptedStaticRun("AMBIGUOUS");
   try {
-    assert.equal((await eventuallyResumable(fixture.root)).reason, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+    assert.deepEqual(await eventuallyResumable(fixture.root), {
+      classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_FAST_PREFLIGHT", resume_point: "STATIC_DAG_START_SELECTED_LEAF:a", reason: null,
+    });
   } finally { await fixture.cleanup(); }
 });
 

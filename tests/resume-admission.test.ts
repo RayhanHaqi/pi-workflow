@@ -18,8 +18,11 @@ import {
 import {
   acquireDeterministicResumeAdmission,
   assertDeterministicResumeAdmissionHeld,
+  activateDeterministicResumeAdmission,
+  assertDeterministicResumeActivationHeld,
   DeterministicResumeAdmissionError,
   releaseDeterministicResumeAdmission,
+  releaseDeterministicResumeActivation,
 } from "../src/resume-admission.js";
 import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
 import { captureGitState } from "../src/repository/fingerprint.js";
@@ -154,7 +157,7 @@ test("under-lock repository drift and fresh state-pointer revalidation refuse st
     assert.deepEqual(stateAfter, stateBefore); assert.deepEqual(inventoryAfter, inventoryBefore);
   } finally { await drift.cleanup(); }
 
-  const stale = await interruptFixture("READY"); let lock: Awaited<ReturnType<typeof acquireWorktreeLock>> | undefined;
+  const stale = await interruptFixture("READY"); let lock: Awaited<ReturnType<typeof acquireWorktreeLock>> | undefined; let fresh: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
   try {
     assert.equal((await eventuallyResumable(stale.root)).classification, "RESUMABLE");
     const location = { stateRoot: join(stale.root, "state"), runId: "pre-m8-bounded" };
@@ -169,10 +172,13 @@ test("under-lock repository drift and fresh state-pointer revalidation refuse st
       event: transitionEvent("SELECT_READY_LEAF"), processMetadata,
     });
     await releaseWorktreeLock(lock); lock = undefined;
-    assert.equal((await eventuallyResumable(stale.root)).reason, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
-    await rejectsCode(acquireDeterministicResumeAdmission({ retainedRunRoot: stale.root }), "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+    assert.equal((await eventuallyResumable(stale.root)).resume_point, "STATIC_DAG_START_SELECTED_LEAF:a");
+    fresh = await acquireDeterministicResumeAdmission({ retainedRunRoot: stale.root });
+    assert.equal(fresh.binding.resume_point, "STATIC_DAG_START_SELECTED_LEAF:a");
+    await releaseDeterministicResumeAdmission(fresh); fresh = undefined;
   } finally {
     if (lock !== undefined) await releaseWorktreeLock(lock).catch(() => undefined);
+    if (fresh !== undefined) await releaseDeterministicResumeAdmission(fresh).catch(() => undefined);
     await stale.cleanup();
   }
 });
@@ -184,6 +190,102 @@ test("quiescent workflow-owned delta admits the fresh deterministic leaf", async
     admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
     assert.equal(admission.binding.resume_point, "STATIC_DAG_SELECT_READY_LEAF:b");
     await assertDeterministicResumeAdmissionHeld(admission);
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+
+test("READY activation commits one pre-worker selected leaf and transfers the same flock", async () => {
+  const fixture = await interruptFixture("READY"); let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined; let activation: Awaited<ReturnType<typeof activateDeterministicResumeAdmission>> | undefined;
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:a");
+    const location = { stateRoot: join(fixture.root, "state"), runId: "pre-m8-bounded" };
+    const prior = await inspectRunStorage(location); const recordsBefore = await readM5ManagedRecords(location);
+    const gitBefore = await captureGitState(await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }));
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    activation = await activateDeterministicResumeAdmission(admission);
+    assert.equal(activation.binding.selected_task_id, "a");
+    assert.equal(activation.binding.resume_point, "STATIC_DAG_START_SELECTED_LEAF:a");
+    await assertDeterministicResumeActivationHeld(activation);
+    await assert.rejects(assertDeterministicResumeAdmissionHeld(admission));
+    await assert.rejects(activateDeterministicResumeAdmission(admission));
+    await assert.rejects(releaseDeterministicResumeAdmission(admission)); admission = undefined;
+    const successor = await inspectRunStorage(location); const recordsAfter = await readM5ManagedRecords(location);
+    assert.equal(successor.revision, prior.revision! + 1); assert.equal(successor.workflowState?.phase, "LEAF_FAST_PREFLIGHT"); assert.equal(successor.workflowState?.active_task_id, "a");
+    assert.deepEqual(successor.workflowState?.counters.worker_invocations, prior.workflowState?.counters.worker_invocations);
+    assert.equal(successor.workflowState?.tasks.find((task) => task.task_id === "a")?.attempts, prior.workflowState?.tasks.find((task) => task.task_id === "a")?.attempts);
+    assert.equal(recordsAfter.boundedWorkerInvocations.length, recordsBefore.boundedWorkerInvocations.length);
+    assert.equal(recordsAfter.decisions.filter((decision) => decision.reservation !== null).length, recordsBefore.decisions.filter((decision) => decision.reservation !== null).length);
+    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    assert.equal(canonicalize(await captureGitState(await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }))), canonicalize(gitBefore));
+    await releaseDeterministicResumeActivation(activation); await releaseDeterministicResumeActivation(activation); activation = undefined;
+    assert.deepEqual(await eventuallyResumable(fixture.root), { classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_FAST_PREFLIGHT", resume_point: "STATIC_DAG_START_SELECTED_LEAF:a", reason: null });
+  } finally {
+    if (activation !== undefined) await releaseDeterministicResumeActivation(activation).catch(() => undefined);
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+test("workflow-owned delta activation selects b without worker activity", async () => {
+  const fixture = await interruptFixture("DELTA"); let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined; let activation: Awaited<ReturnType<typeof activateDeterministicResumeAdmission>> | undefined;
+  try {
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    activation = await activateDeterministicResumeAdmission(admission); admission = undefined;
+    assert.equal(activation.binding.selected_task_id, "b"); assert.equal(activation.binding.resume_point, "STATIC_DAG_START_SELECTED_LEAF:b");
+    const state = (await inspectRunStorage({ stateRoot: join(fixture.root, "state"), runId: "pre-m8-bounded" })).workflowState;
+    assert.equal(state?.phase, "LEAF_FAST_PREFLIGHT"); assert.equal(state?.active_task_id, "b"); assert.equal(state?.tasks.find((task) => task.task_id === "b")?.attempts, 0);
+  } finally {
+    if (activation !== undefined) await releaseDeterministicResumeActivation(activation).catch(() => undefined);
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+
+test("crashed activation owner leaves a resumable selected pre-worker leaf", async () => {
+  const fixture = await interruptFixture("READY"); let fresh: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  const child = fork(new URL("./resume-activation-child.ts", import.meta.url), [fixture.root], { execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  try {
+    const activated = await new Promise<{ readonly binding: { readonly selected_task_id: string; readonly resume_point: string } }>((resolve, reject) => {
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => reject(new Error(`activation child exited early: code=${code} signal=${signal}`));
+      child.once("exit", onExit);
+      child.once("message", (value: unknown) => {
+        child.off("exit", onExit);
+        if (value !== null && typeof value === "object" && (value as { readonly type?: unknown }).type === "ACTIVATED") resolve(value as { readonly binding: { readonly selected_task_id: string; readonly resume_point: string } });
+        else reject(new Error(`activation child failed: ${JSON.stringify(value)}`));
+      });
+    });
+    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    await new Promise<void>((resolve, reject) => { child.once("exit", (_code, signal) => signal === "SIGKILL" ? resolve() : reject(new Error(`activation child exit ${signal}`))); child.kill("SIGKILL"); });
+    assert.deepEqual(await eventuallyResumable(fixture.root), { classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_FAST_PREFLIGHT", resume_point: activated.binding.resume_point, reason: null });
+    fresh = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    assert.equal(fresh.binding.resume_point, activated.binding.resume_point);
+  } finally {
+    if (fresh !== undefined) await releaseDeterministicResumeAdmission(fresh).catch(() => undefined);
+    child.kill("SIGKILL"); await fixtureExit(child); await fixture.cleanup();
+  }
+});
+
+
+test("stale admission cannot commit a second SELECT_READY_LEAF transition", async () => {
+  const fixture = await interruptFixture("READY"); let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  try {
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    const location = { stateRoot: join(fixture.root, "state"), runId: "pre-m8-bounded" };
+    const prior = await inspectRunStorage(location); const records = await readM5ManagedRecords(location);
+    const policy = records.reducerPolicies.find((entry) => entry.content_sha256 === prior.workflowState!.frozen_policy_content_sha256)!;
+    await commitTransition({
+      ...location, expectedRevision: prior.revision!, expectedStatePointerContentSha256: prior.statePointer!.content_sha256 as Sha256Digest,
+      expectedWorkflowStateContentSha256: prior.workflowState!.content_sha256 as Sha256Digest, transitionId: "resume-activation-stale-admission", policy,
+      event: transitionEvent("SELECT_READY_LEAF"), processMetadata,
+    });
+    await rejectsCode(activateDeterministicResumeAdmission(admission), "RESUME_REFUSED_STATE_STORE"); admission = undefined;
+    const successor = await inspectRunStorage(location);
+    assert.equal(successor.revision, prior.revision! + 1); assert.equal(successor.workflowState?.phase, "LEAF_FAST_PREFLIGHT");
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_START_SELECTED_LEAF:a");
   } finally {
     if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
     await fixture.cleanup();

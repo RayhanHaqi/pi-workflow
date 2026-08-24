@@ -86,14 +86,22 @@ function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3Reposito
   return tips.length === 1 ? tips[0]! : null;
 }
 
-/** The only V1-R1 supported point is a reducer-settled static DAG ready-leaf boundary. */
-export function deriveStaticDagResumePoint(state: WorkflowState, policy: ReducerPolicy): string | null {
-  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.phase !== "READY" || state.active_task_id !== null) return null;
+/** The only V1-R2B supported points are static READY selection and pre-worker selected-leaf start. */
+function selectStaticDagReadyLeaf(state: WorkflowState, policy: ReducerPolicy): string | null {
   const complete = new Set(state.tasks.filter((task) => task.status === "PASS").map((task) => task.task_id));
   const candidates = policy.tasks.filter((task) => state.tasks.some((runtime) => runtime.task_id === task.task_id && runtime.status === "PENDING") &&
     task.dependencies.every((dependency) => complete.has(dependency)))
     .sort((left, right) => left.topological_rank - right.topological_rank || left.priority - right.priority || left.task_id.localeCompare(right.task_id));
-  return candidates.length > 0 ? `STATIC_DAG_SELECT_READY_LEAF:${candidates[0]!.task_id}` : null;
+  return candidates.length > 0 ? candidates[0]!.task_id : null;
+}
+
+export function deriveStaticDagResumePoint(state: WorkflowState, policy: ReducerPolicy): string | null {
+  if (state.execution_mode !== "STATIC_APPROVED_DAG") return null;
+  const selected = selectStaticDagReadyLeaf(state, policy);
+  if (state.phase === "READY" && state.active_task_id === null) return selected === null ? null : `STATIC_DAG_SELECT_READY_LEAF:${selected}`;
+  if (state.phase !== "LEAF_FAST_PREFLIGHT" || state.active_task_id === null || selected !== state.active_task_id) return null;
+  const task = state.tasks.find((candidate) => candidate.task_id === selected);
+  return task?.status === "PENDING" && task.attempts === 0 ? `STATIC_DAG_START_SELECTED_LEAF:${selected}` : null;
 }
 
 function executionAuthorityComplete(
@@ -155,6 +163,13 @@ function settledOperations(
   }
   // STATIC_APPROVED_DAG V1-R1 does not adopt legacy worker evidence, authoritative or otherwise.
   return !classifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" || entry.object.kind === "M6_WORKER_RESULT");
+}
+
+function hasSelectedLeafWorkerEvidence(resumePoint: string, state: WorkflowState, policy: ReducerPolicy, records: Awaited<ReturnType<typeof readM5ManagedRecords>>): boolean {
+  if (!resumePoint.startsWith("STATIC_DAG_START_SELECTED_LEAF:")) return false;
+  const taskId = resumePoint.slice("STATIC_DAG_START_SELECTED_LEAF:".length);
+  const task = policy.tasks.find((candidate) => candidate.task_id === taskId);
+  return task === undefined || state.active_task_id !== taskId || records.boundedWorkerInvocations.some((invocation) => invocation.task_content_sha256 === task.task_sha256);
 }
 
 /**
@@ -232,9 +247,9 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
     return refused(runId, state, "RESUME_REFUSED_REPOSITORY_IDENTITY");
   }
   const resumePoint = deriveStaticDagResumePoint(state, authority.policy);
-  return resumePoint === null
-    ? refused(runId, state, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT")
-    : report("RESUMABLE", runId, state.phase, resumePoint, null);
+  if (resumePoint === null) return refused(runId, state, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+  if (hasSelectedLeafWorkerEvidence(resumePoint, state, authority.policy, records)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  return report("RESUMABLE", runId, state.phase, resumePoint, null);
 }
 
 
