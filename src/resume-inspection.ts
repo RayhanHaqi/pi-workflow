@@ -62,6 +62,10 @@ function exactOne<T extends { readonly content_sha256: string }>(values: readonl
   return matches.length === 1 ? matches[0]! : null;
 }
 
+function exactOneBy<T>(values: readonly T[], predicate: (value: T) => boolean): T | null {
+  const matches = values.filter(predicate); return matches.length === 1 ? matches[0]! : null;
+}
+
 function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3RepositoryStateTokenDocument | null {
   const predecessors = new Set(tokens.map((token) => token.prior_token_content_sha256).filter((value): value is string => value !== null));
   const tips = tokens.filter((token) => !predecessors.has(token.content_sha256));
@@ -84,14 +88,14 @@ function executionAuthorityComplete(
   classifications: readonly ManagedRecordClassification[],
 ): { readonly policy: ReducerPolicy; readonly baseline: M3BaselineRuntimeDocument } | null {
   const reducerPolicy = exactOne(records.reducerPolicies, state.frozen_policy_content_sha256);
-  const contract = exactOne(records.contracts, state.identities.contract_sha256);
-  const budget = exactOne(records.budgets, state.identities.budget_sha256);
-  const plan = state.identities.plan_approval_sha256 === null ? null : exactOne(records.planApprovals, state.identities.plan_approval_sha256);
-  const graph = state.identities.task_graph_sha256 === null ? null : exactOne(records.taskGraphs, state.identities.task_graph_sha256);
+  const contract = exactOneBy(records.contracts, (entry) => entry.contract_sha256 === state.identities.contract_sha256);
+  const budget = exactOneBy(records.budgets, (entry) => entry.budget_sha256 === state.identities.budget_sha256);
+  const plan = state.identities.plan_approval_sha256 === null ? null : exactOneBy(records.planApprovals, (entry) => entry.plan_approval_sha256 === state.identities.plan_approval_sha256);
+  const graph = state.identities.task_graph_sha256 === null ? null : exactOneBy(records.taskGraphs, (entry) => entry.task_graph_sha256 === state.identities.task_graph_sha256);
   const m5 = records.policies.filter((entry) => entry.reducer_policy_content_sha256 === state.frozen_policy_content_sha256 &&
     entry.contract_sha256 === state.identities.contract_sha256 && entry.budget_sha256 === state.identities.budget_sha256);
-  const route = m5.length === 1 ? exactOne(records.routeMaps, m5[0]!.route_map_sha256) : null;
-  const routeApproval = exactOne(records.routeMapApprovals, contract?.route_map_approval_sha256 ?? "");
+  const route = m5.length === 1 ? exactOneBy(records.routeMaps, (entry) => entry.route_map_sha256 === m5[0]!.route_map_sha256) : null;
+  const routeApproval = contract === null ? null : exactOneBy(records.routeMapApprovals, (entry) => entry.route_map_approval_sha256 === contract.route_map_approval_sha256);
   const toolPolicy = m5.length === 1 ? exactOne(records.toolPolicies, m5[0]!.tool_policy_content_sha256) : null;
   const commandCatalog = m5.length === 1 ? exactOne(records.commandCatalogs, m5[0]!.command_catalog_content_sha256) : null;
   if (reducerPolicy === null || contract === null || budget === null || route === null || routeApproval === null || toolPolicy === null || commandCatalog === null || m5.length !== 1 ||
@@ -102,9 +106,11 @@ function executionAuthorityComplete(
     routeApproval.route_map_sha256 !== route.route_map_sha256 ||
     plan?.bindings.dag.task_graph_sha256 !== graph?.task_graph_sha256 ||
     plan?.bindings.contract_sha256 !== contract.contract_sha256 ||
-    !authoritative(classifications, "M5_CONTROL_POLICY", m5[0]!.content_sha256) ||
-    !authoritative(classifications, "M4_TOOL_POLICY", toolPolicy.content_sha256) ||
-    !authoritative(classifications, "M4_COMMAND_CATALOG", commandCatalog.content_sha256)) return null;
+    // Before the first worker admission, M4 policy/catalog records are valid immutable
+    // sources but intentionally have no M4 consumer edge yet. The authoritative M5 policy
+    // above binds their exact identities; requiring a later M4 classification would make the
+    // only safe READY boundary impossible to inspect.
+    !authoritative(classifications, "M5_CONTROL_POLICY", m5[0]!.content_sha256)) return null;
   const baseline = exactOne(records.baselines, state.identities.baseline_approval_sha256) ??
     records.baselines.find((entry) => entry.baseline_mode === "APPROVED_BASELINE_DIRTY" &&
       records.approvals.some((approval) => approval.content_sha256 === state.identities.baseline_approval_sha256 && approval.baseline_runtime_content_sha256 === entry.content_sha256)) ?? null;
@@ -162,9 +168,6 @@ export async function inspectDeterministicResumeEligibility(input: ResumeInspect
   if (inspection.status !== "HEALTHY" || inspection.statePointer === null || inspection.workflowState === null || inspection.revision === null || inspection.transitionCommit === null) {
     return refused(runId, inspection.workflowState, "RESUME_REFUSED_STATE_STORE");
   }
-  if (inspection.managedRecordClassifications.some((entry) => entry.classification === "INVALID_MANAGED_RECORD" || entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION")) {
-    return refused(runId, inspection.workflowState, "RESUME_REFUSED_STATE_STORE");
-  }
   const state = inspection.workflowState;
   if (state.phase === "PASS" || state.phase === "BLOCKED") return refused(runId, state, "RESUME_REFUSED_TERMINAL");
   if (state.execution_mode !== "STATIC_APPROVED_DAG") return refused(runId, state, "RESUME_REFUSED_EXECUTION_AUTHORITY");
@@ -172,6 +175,17 @@ export async function inspectDeterministicResumeEligibility(input: ResumeInspect
   let records: Awaited<ReturnType<typeof readM5ManagedRecords>>;
   try { records = await readM5ManagedRecords(location); }
   catch { return refused(runId, state, "RESUME_REFUSED_STATE_STORE"); }
+  const baseline = exactOne(records.baselines, state.identities.baseline_approval_sha256) ?? records.baselines.find((entry) =>
+    entry.baseline_mode === "APPROVED_BASELINE_DIRTY" && records.approvals.some((approval) =>
+      approval.content_sha256 === state.identities.baseline_approval_sha256 && approval.baseline_runtime_content_sha256 === entry.content_sha256));
+  if (baseline === undefined || !authoritative(inspection.managedRecordClassifications, "M3_BASELINE", baseline.content_sha256) ||
+    (baseline.baseline_mode === "APPROVED_BASELINE_DIRTY" && !authoritative(inspection.managedRecordClassifications, "M3_BASELINE_APPROVAL", state.identities.baseline_approval_sha256))) {
+    return refused(runId, state, "RESUME_REFUSED_BASELINE_AUTHORITY");
+  }
+  if (inspection.managedRecordClassifications.some((entry) => (entry.classification === "INVALID_MANAGED_RECORD" || entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION") &&
+    entry.object.kind !== "M3_BASELINE" && entry.object.kind !== "M3_BASELINE_APPROVAL" && entry.object.kind !== "M3_BASELINE_BLOB")) {
+    return refused(runId, state, "RESUME_REFUSED_STATE_STORE");
+  }
   const authority = executionAuthorityComplete(state, records, inspection.managedRecordClassifications);
   if (authority === null) return refused(runId, state, "RESUME_REFUSED_EXECUTION_AUTHORITY");
   if (!settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
