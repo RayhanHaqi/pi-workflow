@@ -42,3 +42,17 @@ export function pathMatchesRule(path: string, rule: M4PathRule): boolean {
 export function pathMatchesRules(path: string, rules: readonly M4PathRule[]): boolean {
   return rules.some((rule) => pathMatchesRule(path, rule));
 }
+
+/**
+ * Canonical semantic union of path rules: identical rules collapse to one, and every rule covered
+ * by a PREFIX rule (the prefix itself, a descendant exact, or a nested prefix) is represented by
+ * that PREFIX alone. Unrelated rules are preserved. Deterministic and input-order independent; the
+ * result passes validatePathRules whenever each input collection does.
+ */
+export function canonicalPathRuleUnion(rules: readonly M4PathRule[]): readonly M4PathRule[] {
+  const unique = [...new Map(rules.map((rule) => [`${rule.kind}\u0000${rule.path}`, rule] as const).values()).values()];
+  const reduced = unique.filter((rule) => !unique.some((other) => other.kind === "PREFIX" &&
+    (rule.kind === "EXACT" || other.path !== rule.path) && pathWithin(rule.path, other.path)));
+  reduced.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : a.kind < b.kind ? -1 : 1);
+  return Object.freeze(reduced.map((entry) => Object.freeze({ ...entry })));
+}

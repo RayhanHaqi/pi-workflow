@@ -34,7 +34,7 @@ import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/prefl
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
 import { freezePackageExecutionInputs, isInterpreterExecutablePath } from "./scoped-tools/commands.js";
-import { assertM4CanonicalPath, pathMatchesRules, validatePathRules } from "./secure-fs/path.js";
+import { assertM4CanonicalPath, canonicalPathRuleUnion, pathMatchesRules, validatePathRules } from "./secure-fs/path.js";
 import { isBoundedRoutingIdentity } from "./schemas/definitions.js";
 import {
   assertDocumentValid,
@@ -1012,6 +1012,15 @@ export async function freezeControllerVerificationCommandsForTests(
 ): Promise<readonly M4CommandSpecification[]> {
   return commandSpecs(repository, commands, scope);
 }
+/** Package-internal test seam over the production controller aggregate tool-policy constructor. */
+export async function scopedToolPolicyForTests(
+  repository: M3RepositoryIdentityDocument,
+  taskScopeIdentity: Sha256Digest,
+  goal: BoundedMutationGoal,
+  specs: readonly M4CommandSpecification[],
+): Promise<M4ScopedToolPolicyDocument> {
+  return toolPolicy(repository, { task_scope_identity: taskScopeIdentity } as M3RepositoryStateTokenDocument, normalizeGoal(goal), specs);
+}
 async function toolPolicy(repository: M3RepositoryIdentityDocument, token: M3RepositoryStateTokenDocument, goal: ReturnType<typeof normalizeGoal>, specs: readonly M4CommandSpecification[]): Promise<M4ScopedToolPolicyDocument> {
   const workerReadableCandidates = await Promise.all(goal.scope.readable_paths.map(async (path) => {
     try { return (await lstat(join(repository.worktree_root, path))).isDirectory() ? { path, kind: "PREFIX" as const } : { path, kind: "EXACT" as const }; }
@@ -1019,7 +1028,9 @@ async function toolPolicy(repository: M3RepositoryIdentityDocument, token: M3Rep
   }));
   const workerReadable = workerReadableCandidates.filter((entry, index) => !workerReadableCandidates.slice(0, index).some((prior) => prior.kind === "PREFIX" && (entry.path === prior.path || entry.path.startsWith(`${prior.path}/`))));
   const commandReadableCandidates = specs.flatMap((spec) => spec.read_paths);
-  const commandReadable = commandReadableCandidates.filter((entry, index) => !commandReadableCandidates.slice(0, index).some((prior) => prior.path === entry.path && prior.kind === entry.kind));
+  // Aggregate controller envelope: canonical semantic union across all verifier commands. Per-command
+  // specification.read_paths stay exact; the union only prevents cross-command overlap rejections.
+  const commandReadable = canonicalPathRuleUnion(commandReadableCandidates);
   const authorityRules: M4PathRule[] = [];
   for (const path of [...new Set([...goal.scope.readable_paths, ...goal.scope.editable_paths, ...goal.scope.frozen_paths])]) {
     let kind: "EXACT" | "PREFIX" = "EXACT";
@@ -1031,7 +1042,7 @@ async function toolPolicy(repository: M3RepositoryIdentityDocument, token: M3Rep
     create: goal.scope.editable_paths.includes(rule.path), replace: goal.scope.editable_paths.includes(rule.path), delete: goal.scope.editable_paths.includes(rule.path), mode_change: false }));
   return identifyContractDocument("pi_gacw_scoped_tool_policy_v0", { schema_id: "pi_gacw_scoped_tool_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID, policy_id: "pre-m8-bounded-policy", repository_identity_content_sha256: repository.content_sha256, worktree_key: repository.worktree_key, task_scope_identity: token.task_scope_identity,
     readable_paths: workerReadable, editable_paths: goal.scope.editable_paths.map((path) => ({ path, kind: "EXACT" as const })), frozen_paths: goal.scope.frozen_paths.map((path) => ({ path, kind: "EXACT" as const })),
-    command_readable_paths: commandReadable, command_writable_paths: [], path_authorities: pathAuthorities,
+    command_readable_paths: [...commandReadable], command_writable_paths: [], path_authorities: pathAuthorities,
     evidence_readable_kinds: ["M3_REPOSITORY_STATE_TOKEN", "M3_POSTFLIGHT", "M4_TOOL_RESULT", "M4_MUTATION_RECEIPT", "M4_COMMAND_RESULT", "BOUNDED_WORKER_RESULT"],
     limits: { maximum_patch_bytes: 1_048_576, maximum_read_bytes: 65_536, maximum_hash_bytes: 1_048_576, maximum_search_input_bytes: 65_536, maximum_search_matches: 1_000, maximum_list_entries: 1_000, maximum_list_metadata_bytes: 1_048_576, maximum_command_stdout_bytes: 65_536, maximum_command_stderr_bytes: 65_536, maximum_command_duration_ms: 60_000 } }) as M4ScopedToolPolicyDocument;
 }
