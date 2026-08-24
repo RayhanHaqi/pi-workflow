@@ -10,7 +10,7 @@ import { resolveRepositoryIdentity } from "./repository/index.js";
 import { probeWorktreeLockAvailability } from "./repository/lock.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import type { ManagedRecordClassification } from "./persistence/types.js";
-import type { M3BaselineRuntimeDocument, M3RepositoryStateTokenDocument, ReducerPolicy, WorkflowState } from "./schemas/index.js";
+import type { M3BaselineRuntimeDocument, M3RepositoryIdentityDocument, M3RepositoryStateTokenDocument, ReducerPolicy, WorkflowState } from "./schemas/index.js";
 
 export type ResumeRefusalReason =
   | "RESUME_REFUSED_TERMINAL"
@@ -33,6 +33,13 @@ export interface ResumeEligibilityReport {
 export interface ResumeInspectionInput {
   /** The retained controller workspace containing exactly one state/runs/<run-id> directory. */
   readonly retainedRunRoot: string;
+}
+
+/** Minimal pre-lock target derivation; complete authority is always revalidated under lock. */
+export interface DeterministicResumeLockTarget {
+  readonly stateRoot: string;
+  readonly runId: string;
+  readonly repository: M3RepositoryIdentityDocument;
 }
 
 function report(
@@ -65,6 +72,12 @@ function exactOne<T extends { readonly content_sha256: string }>(values: readonl
 
 function exactOneBy<T>(values: readonly T[], predicate: (value: T) => boolean): T | null {
   const matches = values.filter(predicate); return matches.length === 1 ? matches[0]! : null;
+}
+
+function baselineForState(state: WorkflowState, records: Awaited<ReturnType<typeof readM5ManagedRecords>>): M3BaselineRuntimeDocument | undefined {
+  return exactOne(records.baselines, state.identities.baseline_approval_sha256) ?? records.baselines.find((entry) =>
+    entry.baseline_mode === "APPROVED_BASELINE_DIRTY" && records.approvals.some((approval) =>
+      approval.content_sha256 === state.identities.baseline_approval_sha256 && approval.baseline_runtime_content_sha256 === entry.content_sha256));
 }
 
 function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3RepositoryStateTokenDocument | null {
@@ -112,9 +125,7 @@ function executionAuthorityComplete(
     // above binds their exact identities; requiring a later M4 classification would make the
     // only safe READY boundary impossible to inspect.
     !authoritative(classifications, "M5_CONTROL_POLICY", m5[0]!.content_sha256)) return null;
-  const baseline = exactOne(records.baselines, state.identities.baseline_approval_sha256) ??
-    records.baselines.find((entry) => entry.baseline_mode === "APPROVED_BASELINE_DIRTY" &&
-      records.approvals.some((approval) => approval.content_sha256 === state.identities.baseline_approval_sha256 && approval.baseline_runtime_content_sha256 === entry.content_sha256)) ?? null;
+  const baseline = baselineForState(state, records) ?? null;
   if (baseline === null || !authoritative(classifications, "M3_BASELINE", baseline.content_sha256)) return null;
   if (baseline.baseline_mode === "APPROVED_BASELINE_DIRTY" && !authoritative(classifications, "M3_BASELINE_APPROVAL", state.identities.baseline_approval_sha256)) return null;
   if (baseline.baseline_mode === "CLEAN_REQUIRED" && baseline.content_sha256 !== state.identities.baseline_approval_sha256) return null;
@@ -150,7 +161,7 @@ function settledOperations(
  * Read-only eligibility inspection. It never acquires durable M3 lock authority or publishes
  * records; its kernel-flock availability probe releases before returning.
  */
-export async function inspectDeterministicResumeEligibility(input: ResumeInspectionInput): Promise<ResumeEligibilityReport> {
+async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspectionInput, requireQuiescence: boolean): Promise<ResumeEligibilityReport> {
   if (!isAbsolute(input.retainedRunRoot)) return refused(null, null, "RESUME_REFUSED_STATE_STORE");
   let root: string;
   let runId: string;
@@ -176,9 +187,7 @@ export async function inspectDeterministicResumeEligibility(input: ResumeInspect
   let records: Awaited<ReturnType<typeof readM5ManagedRecords>>;
   try { records = await readM5ManagedRecords(location); }
   catch { return refused(runId, state, "RESUME_REFUSED_STATE_STORE"); }
-  const baseline = exactOne(records.baselines, state.identities.baseline_approval_sha256) ?? records.baselines.find((entry) =>
-    entry.baseline_mode === "APPROVED_BASELINE_DIRTY" && records.approvals.some((approval) =>
-      approval.content_sha256 === state.identities.baseline_approval_sha256 && approval.baseline_runtime_content_sha256 === entry.content_sha256));
+  const baseline = baselineForState(state, records);
   if (baseline === undefined || !authoritative(inspection.managedRecordClassifications, "M3_BASELINE", baseline.content_sha256) ||
     (baseline.baseline_mode === "APPROVED_BASELINE_DIRTY" && !authoritative(inspection.managedRecordClassifications, "M3_BASELINE_APPROVAL", state.identities.baseline_approval_sha256))) {
     return refused(runId, state, "RESUME_REFUSED_BASELINE_AUTHORITY");
@@ -206,12 +215,14 @@ export async function inspectDeterministicResumeEligibility(input: ResumeInspect
   } catch {
     return refused(runId, state, "RESUME_REFUSED_REPOSITORY_IDENTITY");
   }
-  try {
-    if (await probeWorktreeLockAvailability({ stateRoot: location.stateRoot, repository: currentRepository }) !== "LOCK_AVAILABLE") {
+  if (requireQuiescence) {
+    try {
+      if (await probeWorktreeLockAvailability({ stateRoot: location.stateRoot, repository: currentRepository }) !== "LOCK_AVAILABLE") {
+        return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+      }
+    } catch {
       return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
     }
-  } catch {
-    return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
   }
   try {
     const currentFingerprint = await captureGitState(currentRepository);
@@ -224,4 +235,29 @@ export async function inspectDeterministicResumeEligibility(input: ResumeInspect
   return resumePoint === null
     ? refused(runId, state, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT")
     : report("RESUMABLE", runId, state.phase, resumePoint, null);
+}
+
+
+/** Observational V1-R1 inspection; it probes and releases kernel flock availability. */
+export async function inspectDeterministicResumeEligibility(input: ResumeInspectionInput): Promise<ResumeEligibilityReport> {
+  return inspectDeterministicResumeEligibilityInternal(input, true);
+}
+
+/** V1-R2A uses this only after it owns the matching M3 WorktreeLock. */
+export async function revalidateDeterministicResumeEligibilityWhileLocked(input: ResumeInspectionInput): Promise<ResumeEligibilityReport> {
+  return inspectDeterministicResumeEligibilityInternal(input, false);
+}
+
+export async function loadDeterministicResumeLockTarget(input: ResumeInspectionInput): Promise<DeterministicResumeLockTarget> {
+  if (!isAbsolute(input.retainedRunRoot)) throw new Error("retained run root must be absolute");
+  const root = await realpath(input.retainedRunRoot);
+  const runs = (await readdir(join(root, "state", "runs"), { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  if (runs.length !== 1) throw new Error("retained run must contain exactly one run");
+  const runId = runs[0]!; const stateRoot = join(root, "state");
+  const inspection = await inspectRunStorage({ stateRoot, runId });
+  if (inspection.status !== "HEALTHY" || inspection.workflowState === null) throw new Error("retained run state is not healthy");
+  const records = await readM5ManagedRecords({ stateRoot, runId });
+  const baseline = baselineForState(inspection.workflowState, records);
+  if (baseline === undefined) throw new Error("retained run baseline is unavailable");
+  return Object.freeze({ stateRoot, runId, repository: baseline.repository });
 }

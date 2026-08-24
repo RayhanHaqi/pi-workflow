@@ -31,7 +31,8 @@
     "./schemas": "./dist/src/schemas/index.js",
     "./secure-fs": "./dist/src/secure-fs/index.js",
     "./scoped-tools": "./dist/src/scoped-tools/index.js",
-    "./state-machine": "./dist/src/state-machine/index.js"
+    "./state-machine": "./dist/src/state-machine/index.js",
+    "./resume-admission": "./dist/src/resume-admission.js"
   },
   "files": [
     "dist/src",
