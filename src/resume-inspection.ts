@@ -10,7 +10,7 @@ import { resolveRepositoryIdentity } from "./repository/index.js";
 import { probeWorktreeLockAvailability } from "./repository/lock.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import type { ManagedRecordClassification } from "./persistence/types.js";
-import type { M3BaselineRuntimeDocument, M3RepositoryIdentityDocument, M3RepositoryStateTokenDocument, ReducerPolicy, WorkflowState } from "./schemas/index.js";
+import type { M3BaselineRuntimeDocument, M3RepositoryIdentityDocument, M3RepositoryStateTokenDocument, LogicalModelRole, M5ControlDecisionDocument, M5ControlPolicyDocument, ReducerPolicy, WorkflowState } from "./schemas/index.js";
 
 export type ResumeRefusalReason =
   | "RESUME_REFUSED_TERMINAL"
@@ -102,6 +102,108 @@ export function deriveStaticDagResumePoint(state: WorkflowState, policy: Reducer
   if (state.phase !== "LEAF_FAST_PREFLIGHT" || state.active_task_id === null || selected !== state.active_task_id) return null;
   const task = state.tasks.find((candidate) => candidate.task_id === selected);
   return task?.status === "PENDING" && task.attempts === 0 ? `STATIC_DAG_START_SELECTED_LEAF:${selected}` : null;
+}
+
+export function staticLeafOperationId(taskId: string): string { return `static-leaf-${taskId}-attempt-1`; }
+export function staticLeafTransitionId(operationId: string): string { return `pre-m8-authorize-${operationId}`; }
+
+/** Historical frozen product-role inventory; must stay canonically equal to workflow-controller's PRODUCT_ROLES (drift-guarded by resume-work-admission.test). */
+export const RESUMED_PRODUCT_LOGICAL_ROLES = Object.freeze(["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const);
+
+/** Exact production availableLogicalRoles semantics: V2 coding runs reserve only CODING_EXECUTOR; legacy V1 keeps the full inventory. */
+export function resumedAvailableLogicalRoles(policy: M5ControlPolicyDocument): readonly LogicalModelRole[] {
+  return policy.role_reservation_envelopes.some((entry) => entry.logical_role === "CODING_EXECUTOR")
+    ? ["CODING_EXECUTOR" as const]
+    : [...RESUMED_PRODUCT_LOGICAL_ROLES];
+}
+
+/** Exactly one M5 control policy may own this state's frozen identities; ambiguity refuses. */
+export function resolveExactStaticM5Policy(
+  state: WorkflowState,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+): M5ControlPolicyDocument | null {
+  const matches = records.policies.filter((entry) => entry.run_id === state.run_id && entry.reducer_policy_content_sha256 === state.frozen_policy_content_sha256 &&
+    entry.contract_sha256 === state.identities.contract_sha256 && entry.budget_sha256 === state.identities.budget_sha256 &&
+    entry.scope_sha256 === state.identities.scope_sha256 && entry.acceptance_sha256 === state.identities.acceptance_sha256 &&
+    entry.plan_approval_sha256 === state.identities.plan_approval_sha256 && entry.task_graph_sha256 === state.identities.task_graph_sha256);
+  return matches.length === 1 ? matches[0]! : null;
+}
+function classificationOf(classifications: readonly ManagedRecordClassification[], kind: string, digest: string): string | null {
+  return classifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest)?.classification ?? null;
+}
+
+function staticWorkDecisionCandidateList(
+  state: WorkflowState,
+  policy: ReducerPolicy,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+): readonly M5ControlDecisionDocument[] {
+  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id === null || records.boundedWorkerInvocations.length !== 0 || records.boundedWorkerResults.length !== 0) return [];
+  const task = state.tasks.find((entry) => entry.task_id === state.active_task_id);
+  const frozenTask = policy.tasks.find((entry) => entry.task_id === state.active_task_id);
+  const m5Policy = resolveExactStaticM5Policy(state, records);
+  if (task === undefined || frozenTask === undefined || m5Policy === null) return [];
+  const operationId = staticLeafOperationId(task.task_id);
+  const transitionId = staticLeafTransitionId(operationId);
+  return records.decisions.filter((decision) => decision.intent === "AUTHORIZE_WORK" && decision.outcome === "AUTHORIZE" &&
+    decision.operation_id === operationId && decision.transition_id === transitionId && decision.policy_content_sha256 === m5Policy.content_sha256 &&
+    decision.reducer_policy_content_sha256 === state.frozen_policy_content_sha256 &&
+    decision.transition_event?.event_type === "START_LEAF_ATTEMPT" && decision.reservation?.status === "ACTIVE" &&
+    decision.reservation.future_operation_id === operationId && decision.reservation.reserved_policy_content_sha256 === decision.policy_content_sha256 &&
+    decision.reservation.reserved_route === "STATIC_APPROVED_DAG");
+}
+
+/** Package-internal exact pre-provider AUTHORIZE_WORK decision match under a required managed-record classification. */
+export function exactStaticWorkDecision(
+  state: WorkflowState,
+  policy: ReducerPolicy,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+  requiredClassification: "UNREFERENCED_MANAGED_RECORD" | "AUTHORITATIVE_MANAGED_RECORD",
+): M5ControlDecisionDocument | null {
+  if (classifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" || entry.object.kind === "M6_WORKER_RESULT")) return null;
+  const candidates = staticWorkDecisionCandidateList(state, policy, records).filter((decision) =>
+    classificationOf(classifications, "M5_CONTROL_DECISION", decision.content_sha256) === requiredClassification);
+  if (candidates.length !== 1 || records.decisions.filter((entry) => entry.reservation !== null).length !== 1) return null;
+  return candidates[0]!;
+}
+
+/** Candidates without a classification requirement; distinguishes a clean first admission from contradictory authority. */
+export function staticWorkDecisionCandidates(
+  state: WorkflowState,
+  policy: ReducerPolicy,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+): readonly M5ControlDecisionDocument[] {
+  if (classifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" || entry.object.kind === "M6_WORKER_RESULT")) return [];
+  return staticWorkDecisionCandidateList(state, policy, records);
+}
+
+export function deriveStaticDagPreProviderResumePoint(
+  state: WorkflowState,
+  policy: ReducerPolicy,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+  transitionCommit: NonNullable<Awaited<ReturnType<typeof inspectRunStorage>>["transitionCommit"]>,
+): string | null {
+  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id === null) return null;
+  const task = state.tasks.find((entry) => entry.task_id === state.active_task_id);
+  if (task === undefined || task.attempts > 1) return null;
+  if (state.phase === "LEAF_FAST_PREFLIGHT" && task.status === "PENDING" && task.attempts === 0) {
+    const decision = exactStaticWorkDecision(state, policy, records, classifications, "UNREFERENCED_MANAGED_RECORD");
+    if (decision !== null && decision.current_state_content_sha256 === state.content_sha256 && decision.predicted_next_state_content_sha256 !== null) {
+      return `STATIC_DAG_REDRIVE_WORK_ADMISSION:${task.task_id}`;
+    }
+  }
+  if (state.phase === "LEAF_RUNNING" && task.status === "RUNNING" && task.attempts === 1) {
+    const decision = exactStaticWorkDecision(state, policy, records, classifications, "AUTHORITATIVE_MANAGED_RECORD");
+    const predecessor = decision === null ? null : records.workflowStates.filter((entry) => entry.content_sha256 === decision.current_state_content_sha256);
+    if (decision !== null && predecessor?.length === 1 && decision.predicted_next_state_content_sha256 === state.content_sha256 &&
+        transitionCommit.previous_workflow_state_content_sha256 === decision.current_state_content_sha256 &&
+        transitionCommit.transition_event_content_sha256 === decision.transition_event?.content_sha256 && transitionCommit.transition_id === decision.transition_id) {
+      return `STATIC_DAG_INVOKE_RESERVED_LEAF:${task.task_id}`;
+    }
+  }
+  return null;
 }
 
 function executionAuthorityComplete(
@@ -213,7 +315,8 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
   }
   const authority = executionAuthorityComplete(state, records, inspection.managedRecordClassifications);
   if (authority === null) return refused(runId, state, "RESUME_REFUSED_EXECUTION_AUTHORITY");
-  if (!settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  const preProviderPoint = deriveStaticDagPreProviderResumePoint(state, authority.policy, records, inspection.managedRecordClassifications, inspection.transitionCommit);
+  if (preProviderPoint === null && !settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
 
   const authoritativeTokens = records.stateTokens.filter((token) => authoritative(inspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", token.content_sha256));
   const token = tokenTip(authoritativeTokens);
@@ -246,9 +349,9 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
   } catch {
     return refused(runId, state, "RESUME_REFUSED_REPOSITORY_IDENTITY");
   }
-  const resumePoint = deriveStaticDagResumePoint(state, authority.policy);
+  const resumePoint = preProviderPoint ?? deriveStaticDagResumePoint(state, authority.policy);
   if (resumePoint === null) return refused(runId, state, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
-  if (hasSelectedLeafWorkerEvidence(resumePoint, state, authority.policy, records)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  if (preProviderPoint === null && hasSelectedLeafWorkerEvidence(resumePoint, state, authority.policy, records)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
   return report("RESUMABLE", runId, state.phase, resumePoint, null);
 }
 

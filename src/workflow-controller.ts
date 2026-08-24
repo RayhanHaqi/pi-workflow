@@ -73,6 +73,8 @@ const MAX_TOOL_CALLS_PER_WORKER = 32;
 const MAX_WALL_TIME_MS = 120_000;
 type StaticTerraEffort = "high" | "xhigh";
 const PRODUCT_ROLES = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
+/** Historical frozen product-role inventory under its exported identity name; resume admission drift-guards against this list. */
+export const PRODUCT_LOGICAL_ROLES = PRODUCT_ROLES;
 
 type GoalMode = ConcreteExecutionMode;
 type GoalScope = { readonly readable_paths: readonly string[]; readonly editable_paths: readonly string[]; readonly frozen_paths: readonly string[] };

@@ -28,6 +28,8 @@ test("built repository package exposes only the explicit M3 guard boundary", asy
     "createTerminalRetentionAuthority",
     "deriveWorktreeKey",
     "inspectRetention",
+    // V1-R2A added the quiescence probe to the committed guard boundary; this frozen list now records it.
+    "probeWorktreeLockAvailability",
     "releaseWorktreeLock",
     "resolveRepositoryIdentity",
     "runFastPreflight",

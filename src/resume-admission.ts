@@ -1,4 +1,6 @@
 import { canonicalize } from "./canonical-json/index.js";
+import { createControlDecisionKernel } from "./control/kernel.js";
+import type { M5AuthoritativeSources } from "./control/types.js";
 import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { commitTransition, inspectRunStorage } from "./persistence/index.js";
 import { readM5ManagedRecords } from "./persistence/store.js";
@@ -9,13 +11,40 @@ import {
   type WorktreeLockHandle,
 } from "./repository/index.js";
 import {
+  deriveStaticDagPreProviderResumePoint,
   deriveStaticDagResumePoint,
+  exactStaticWorkDecision,
   loadDeterministicResumeLockTarget,
+  resolveExactStaticM5Policy,
+  resumedAvailableLogicalRoles,
   revalidateDeterministicResumeEligibilityWhileLocked,
+  staticLeafOperationId,
+  staticLeafTransitionId,
+  staticWorkDecisionCandidates,
   type ResumeInspectionInput,
   type ResumeRefusalReason,
 } from "./resume-inspection.js";
-import { identifyContractDocument, type ReducerPolicy, type TransitionEvent, type WorkflowState } from "./schemas/index.js";
+import { captureGitState } from "./repository/fingerprint.js";
+import {
+  identifyContractDocument,
+  type BudgetDocument,
+  type ContractDocument,
+  type M3BaselineApprovalRuntimeDocument,
+  type M3RepositoryIdentityDocument,
+  type M3RepositoryStateTokenDocument,
+  type M4CommandCatalogDocument,
+  type M4ScopedToolPolicyDocument,
+  type M5ControlPolicyDocument,
+  type PlanApprovalDocument,
+  type ReducerPolicy,
+  type RouteMapApprovalDocument,
+  type RouteMapDocument,
+  type TaskDocument,
+  type TaskGraphDocument,
+  type TransitionEvent,
+  type WorkflowState,
+} from "./schemas/index.js";
+import type { ManagedRecordClassification } from "./persistence/types.js";
 
 export type ResumeAdmissionRefusalCode = ResumeRefusalReason | "LOCK_BUSY";
 
@@ -70,7 +99,10 @@ interface OwnedLockState {
   readonly lock: WorktreeLockHandle;
   readonly stateRoot: string;
   released: boolean;
+  /** Set when an activation consumed this admission (R2B transfer); the shared state stays live for the activation. */
   consumed: boolean;
+  /** Set only by a completed V1-R2C work-admission flock transfer. */
+  workTransferred: boolean;
 }
 
 const admissions = new WeakMap<object, OwnedLockState>();
@@ -164,7 +196,7 @@ export async function acquireDeterministicResumeAdmission(input: ResumeInspectio
       frozen_policy_content_sha256: inspection.workflowState.frozen_policy_content_sha256,
       state_identities: Object.freeze({ ...inspection.workflowState.identities }), resume_point: report.resume_point,
     });
-    const admission = new DeterministicResumeAdmissionImpl(binding, { lock, stateRoot: target.stateRoot, released: false, consumed: false });
+    const admission = new DeterministicResumeAdmissionImpl(binding, { lock, stateRoot: target.stateRoot, released: false, consumed: false, workTransferred: false });
     lock = undefined;
     return admission;
   } finally {
@@ -241,10 +273,317 @@ export async function activateDeterministicResumeAdmission(admission: Determinis
 
 export async function assertDeterministicResumeActivationHeld(activation: DeterministicResumeActivation): Promise<void> {
   const state = activationState(activation);
-  if (state.released) throw new Error("resume activation has been released");
+  if (state.released || state.workTransferred) throw new Error("resume activation is no longer active");
   await assertWorktreeLockHeld(state.lock);
 }
 
 export async function releaseDeterministicResumeActivation(activation: DeterministicResumeActivation): Promise<void> {
-  await releaseOwnedLock(activationState(activation));
+  const state = activationState(activation);
+  if (state.workTransferred) throw new Error("resume activation ownership was transferred");
+  await releaseOwnedLock(state);
+}
+
+export interface DeterministicResumeWorkAdmissionBinding {
+  readonly run_id: string;
+  readonly selected_task_id: string;
+  readonly selected_task_content_sha256: Sha256Digest;
+  readonly task_graph_sha256: Sha256Digest | null;
+  readonly plan_approval_sha256: Sha256Digest | null;
+  readonly operation_id: string;
+  readonly attempt_number: 1;
+  readonly reducer_policy_content_sha256: Sha256Digest;
+  readonly m5_policy_content_sha256: Sha256Digest;
+  readonly m5_decision_content_sha256: Sha256Digest;
+  readonly reservation_decision_key: Sha256Digest | null;
+  readonly frozen_logical_role: "TERRA_EXECUTOR" | "CODING_EXECUTOR";
+  readonly provider_id: string;
+  readonly model_id: string;
+  readonly effort: string;
+  readonly model_definition_sha256: Sha256Digest | null;
+  readonly repository_identity_content_sha256: Sha256Digest;
+  readonly worktree_key: Sha256Digest;
+  readonly worktree_root: string;
+  readonly git_common_dir: string;
+  readonly input_m3_state_token_content_sha256: Sha256Digest;
+  readonly predecessor_revision: number;
+  readonly predecessor_workflow_state_content_sha256: Sha256Digest;
+  readonly predecessor_state_pointer_content_sha256: Sha256Digest;
+  readonly successor_revision: number;
+  readonly successor_workflow_state_content_sha256: Sha256Digest;
+  readonly successor_state_pointer_content_sha256: Sha256Digest;
+  readonly successor_transition_commit_content_sha256: Sha256Digest;
+}
+
+export interface DeterministicResumeWorkAdmission {
+  readonly binding: DeterministicResumeWorkAdmissionBinding;
+}
+
+const workAdmissions = new WeakMap<object, OwnedLockState>();
+
+class DeterministicResumeWorkAdmissionImpl implements DeterministicResumeWorkAdmission {
+  public constructor(public readonly binding: DeterministicResumeWorkAdmissionBinding, state: OwnedLockState) {
+    workAdmissions.set(this, state); Object.freeze(this);
+  }
+}
+
+function classificationOf(classifications: readonly ManagedRecordClassification[], kind: string, digest: string): string | null {
+  return classifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest)?.classification ?? null;
+}
+
+function workAdmissionState(admission: DeterministicResumeWorkAdmission): OwnedLockState {
+  if (admission === null || typeof admission !== "object") throw new Error("resume work admission is invalid");
+  const state = workAdmissions.get(admission as object);
+  if (state === undefined) throw new Error("resume work admission was not created by this package instance");
+  return state;
+}
+
+const SELECTED_LEAF_RESUME_PREFIXES = ["STATIC_DAG_START_SELECTED_LEAF:", "STATIC_DAG_REDRIVE_WORK_ADMISSION:", "STATIC_DAG_INVOKE_RESERVED_LEAF:"] as const;
+
+function selectedLeafTaskId(resumePoint: string): string | null {
+  const prefix = SELECTED_LEAF_RESUME_PREFIXES.find((entry) => resumePoint.startsWith(entry));
+  return prefix === undefined ? null : resumePoint.slice(prefix.length);
+}
+
+function resumeCapabilityState(capability: DeterministicResumeActivation | DeterministicResumeAdmission): OwnedLockState | undefined {
+  if (capability === null || typeof capability !== "object") return undefined;
+  if (workAdmissions.has(capability as object)) return undefined;
+  return activations.get(capability as object) ?? admissions.get(capability as object);
+}
+
+function uniqueBy<T>(values: readonly T[], identity: (value: T) => string, expected: string): T | null {
+  const matches = values.filter((value) => identity(value) === expected);
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+interface RehydratedStaticLeafAuthority {
+  readonly policy: M5ControlPolicyDocument;
+  readonly reducerPolicy: ReducerPolicy;
+  readonly repositoryIdentity: M3RepositoryIdentityDocument;
+  readonly contract: ContractDocument;
+  readonly budget: BudgetDocument;
+  readonly routeMap: RouteMapDocument;
+  readonly routeMapApproval: RouteMapApprovalDocument;
+  readonly toolPolicy: M4ScopedToolPolicyDocument;
+  readonly commandCatalog: M4CommandCatalogDocument;
+  readonly planApprovals: readonly PlanApprovalDocument[];
+  readonly taskGraphs: readonly TaskGraphDocument[];
+  readonly tasks: readonly TaskDocument[];
+  readonly selectedTask: TaskDocument;
+  readonly stateToken: M3RepositoryStateTokenDocument;
+}
+
+const preProviderM4Classification = (classifications: readonly ManagedRecordClassification[], kind: "M4_TOOL_POLICY" | "M4_COMMAND_CATALOG", digest: string): boolean =>
+  classifications.some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest &&
+    (entry.classification === "AUTHORITATIVE_MANAGED_RECORD" || entry.classification === "UNREFERENCED_MANAGED_RECORD"));
+
+/** Reconstructs execution authority exactly and uniquely from retained durable records; never from caller-supplied data. */
+function rehydrateStaticLeafAuthority(
+  state: WorkflowState,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+): RehydratedStaticLeafAuthority | null {
+  const reducerPolicies = records.reducerPolicies.filter((entry) => entry.content_sha256 === state.frozen_policy_content_sha256);
+  if (reducerPolicies.length !== 1) return null;
+  const policy = resolveExactStaticM5Policy(state, records);
+  if (policy === null) return null;
+  const contract = uniqueBy(records.contracts, (entry) => entry.contract_sha256, policy.contract_sha256);
+  const budget = uniqueBy(records.budgets, (entry) => entry.budget_sha256, policy.budget_sha256);
+  const routeMap = uniqueBy(records.routeMaps, (entry) => entry.route_map_sha256, policy.route_map_sha256);
+  const routeMapApproval = uniqueBy(records.routeMapApprovals, (entry) => entry.route_map_approval_sha256, policy.route_map_approval_sha256);
+  const toolPolicyCandidates = records.toolPolicies.filter((entry) => entry.content_sha256 === policy.tool_policy_content_sha256 && preProviderM4Classification(classifications, "M4_TOOL_POLICY", entry.content_sha256));
+  const catalogCandidates = records.commandCatalogs.filter((entry) => entry.content_sha256 === policy.command_catalog_content_sha256 && preProviderM4Classification(classifications, "M4_COMMAND_CATALOG", entry.content_sha256));
+  const planApprovals = records.planApprovals.filter((entry) => entry.plan_approval_sha256 === policy.plan_approval_sha256);
+  const taskGraphs = records.taskGraphs.filter((entry) => entry.task_graph_sha256 === policy.task_graph_sha256);
+  if (contract === null || budget === null || routeMap === null || routeMapApproval === null || toolPolicyCandidates.length !== 1 || catalogCandidates.length !== 1 || planApprovals.length !== 1 || taskGraphs.length !== 1) return null;
+  const approval = uniqueBy(records.approvals, (entry) => entry.content_sha256, policy.baseline_approval_sha256);
+  const baseline = approval === null
+    ? uniqueBy(records.baselines, (entry) => entry.content_sha256, policy.baseline_approval_sha256)
+    : uniqueBy(records.baselines, (entry) => entry.content_sha256, approval.baseline_runtime_content_sha256);
+  if (baseline === null || baseline.repository.content_sha256 !== policy.repository_identity_content_sha256 || baseline.repository.worktree_key !== policy.worktree_key) return null;
+  const stateTokens = records.stateTokens.filter((entry) => entry.run_id === policy.run_id &&
+    entry.repository_identity_content_sha256 === policy.repository_identity_content_sha256 && entry.worktree_key === policy.worktree_key &&
+    entry.task_scope_identity === policy.scope_sha256 && classifications.some((classification) => classification.object.kind === "M3_REPOSITORY_STATE_TOKEN" &&
+      classification.object.contentSha256 === entry.content_sha256 && classification.classification === "AUTHORITATIVE_MANAGED_RECORD"));
+  const selectedTasks = records.tasks.filter((entry) => state.active_task_id !== null && entry.task_id === state.active_task_id);
+  if (stateTokens.length !== 1 || selectedTasks.length !== 1 || state.active_task_id === null) return null;
+  return Object.freeze({
+    policy, reducerPolicy: reducerPolicies[0]!, repositoryIdentity: baseline.repository, contract, budget, routeMap, routeMapApproval,
+    toolPolicy: toolPolicyCandidates[0]!, commandCatalog: catalogCandidates[0]!, planApprovals, taskGraphs, tasks: records.tasks,
+    selectedTask: selectedTasks[0]!, stateToken: stateTokens[0]!,
+  });
+}
+
+/**
+ * V1-R2C: crash-safe pre-provider work admission under the SAME M3 flock.
+ *
+ * Accepts only genuine package-created resume capabilities (an R2B activation or a resume admission bound to the exact
+ * quiescent selected-leaf / redrive / reserved-leaf point), rereads and re-verifies the live state under the held lock,
+ * rehydrates existing M5 authority from retained records, replays the existing AUTHORIZE_WORK decision for
+ * static-leaf-<task>-attempt-1 through the production kernel, and transfers the flock into a new opaque pre-provider
+ * work capability. Stops strictly before any BOUNDED_WORKER_INVOCATION publication.
+ */
+export async function authorizeDeterministicResumedLeafWork(resume: DeterministicResumeActivation | DeterministicResumeAdmission): Promise<DeterministicResumeWorkAdmission> {
+  const owned = resumeCapabilityState(resume);
+  if (owned === undefined) throw new Error("resume capability was not created by this package instance");
+  // An activation shares its admission's lock state whose consumed flag was set by the R2B transfer itself;
+  // only an explicit work transfer (or release) retires an activation.
+  if (owned.released || owned.workTransferred || (!activations.has(resume as object) && owned.consumed)) {
+    throw new Error("resume capability is no longer active");
+  }
+  const taskId = selectedLeafTaskId(resume.binding.resume_point);
+  if (taskId === null) return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+  try {
+    await assertWorktreeLockHeld(owned.lock);
+    const location = { stateRoot: owned.stateRoot, runId: resume.binding.run_id };
+    const current = await inspectRunStorage(location);
+    if (current.status !== "HEALTHY" || current.revision === null || current.statePointer === null || current.workflowState === null || current.transitionCommit === null) return refused("RESUME_REFUSED_STATE_STORE");
+    const state = current.workflowState;
+    if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id !== taskId) return refused("RESUME_REFUSED_STATE_STORE");
+    // Capability-bound live-state verification: the reread state must be exactly the bound one.
+    if (activations.has(resume as object)) {
+      const binding = (resume as DeterministicResumeActivation).binding;
+      if (current.revision !== binding.successor_revision || state.content_sha256 !== binding.successor_workflow_state_content_sha256 ||
+        current.statePointer?.content_sha256 !== binding.successor_state_pointer_content_sha256 ||
+        current.transitionCommit?.content_sha256 !== binding.successor_transition_commit_content_sha256 ||
+        state.frozen_policy_content_sha256 !== binding.frozen_policy_content_sha256 || canonicalize(state.identities) !== canonicalize(binding.state_identities)) {
+        return refused("RESUME_REFUSED_STATE_STORE");
+      }
+      if (binding.resume_point !== `STATIC_DAG_START_SELECTED_LEAF:${taskId}`) return refused("RESUME_REFUSED_STATE_STORE");
+    } else {
+      const binding = (resume as DeterministicResumeAdmission).binding;
+      if (current.revision !== binding.state_revision || state.content_sha256 !== binding.workflow_state_content_sha256 ||
+        current.statePointer?.content_sha256 !== binding.state_pointer_content_sha256 ||
+        current.transitionCommit?.content_sha256 !== binding.transition_commit_content_sha256 ||
+        state.frozen_policy_content_sha256 !== binding.frozen_policy_content_sha256 || canonicalize(state.identities) !== canonicalize(binding.state_identities)) {
+        return refused("RESUME_REFUSED_STATE_STORE");
+      }
+    }
+    const records = await readM5ManagedRecords(location);
+    const authority = rehydrateStaticLeafAuthority(state, records, current.managedRecordClassifications);
+    if (authority === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    // Live resume-point re-derivation must reproduce the capability's exact point.
+    const livePreProvider = deriveStaticDagPreProviderResumePoint(state, authority.reducerPolicy, records, current.managedRecordClassifications, current.transitionCommit);
+    const livePlain = deriveStaticDagResumePoint(state, authority.reducerPolicy);
+    if (livePreProvider !== resume.binding.resume_point && livePlain !== resume.binding.resume_point) return refused("RESUME_REFUSED_STATE_STORE");
+    const runningAlready = state.phase === "LEAF_RUNNING";
+    const candidates = staticWorkDecisionCandidates(state, authority.reducerPolicy, records, current.managedRecordClassifications);
+    if (runningAlready) {
+      // WINDOW B only: exactly the committed authoritative reservation may be replayed.
+      if (livePreProvider !== `STATIC_DAG_INVOKE_RESERVED_LEAF:${taskId}` || candidates.length !== 1 ||
+        exactStaticWorkDecision(state, authority.reducerPolicy, records, current.managedRecordClassifications, "AUTHORITATIVE_MANAGED_RECORD") === null) {
+        return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+      }
+    } else if (candidates.length > 1 || records.decisions.filter((entry) => entry.reservation !== null).length > 1) {
+      // Contradictory authority: multiple matching decisions or conflicting reservations refuse.
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    const operationId = staticLeafOperationId(taskId);
+    const transitionId = staticLeafTransitionId(operationId);
+    // Predecessor authority: the exact state the AUTHORIZE_WORK request is keyed against. Window B replays against
+    // the committed START_LEAF_ATTEMPT predecessor so the existing lost-response recovery path applies.
+    const expectedRevision = runningAlready ? current.transitionCommit.previous_revision : current.revision;
+    const expectedPointer = runningAlready ? current.transitionCommit.previous_state_pointer_content_sha256 : current.statePointer?.content_sha256;
+    const expectedWorkflow = runningAlready ? current.transitionCommit.previous_workflow_state_content_sha256 : state.content_sha256;
+    if (expectedRevision === null || expectedPointer === null || expectedPointer === undefined || expectedWorkflow === null) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const gitBefore = await captureGitState(authority.repositoryIdentity);
+    const authoritativeSources: M5AuthoritativeSources = {
+      boundedStaticPreM8: true, contract: authority.contract, budget: authority.budget, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval,
+      m4ToolPolicy: authority.toolPolicy, m4CommandCatalog: authority.commandCatalog, planApprovals: authority.planApprovals,
+      taskGraphs: authority.taskGraphs, tasks: authority.tasks,
+    };
+    const kernel = createControlDecisionKernel({
+      stateRoot: owned.stateRoot, runId: resume.binding.run_id, policy: authority.policy, reducerPolicy: authority.reducerPolicy,
+      runAuthority: { repositoryIdentity: authority.repositoryIdentity, contract: authority.contract, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval },
+      authoritativeSources, production: false,
+    });
+    let result: Awaited<ReturnType<typeof kernel.evaluateControlDecision>>;
+    try {
+      result = await kernel.evaluateControlDecision({
+        intent: "AUTHORIZE_WORK", expectedRevision, expectedStatePointerContentSha256: expectedPointer as Sha256Digest,
+        expectedWorkflowStateContentSha256: expectedWorkflow as Sha256Digest, transitionId, operationId,
+        processMetadata: resumeProcessMetadata(), authoritativeSources, usageEvidence: [],
+        availableLogicalRoles: resumedAvailableLogicalRoles(authority.policy),
+      });
+    } catch {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    if (!result.committed || result.decision.outcome !== "AUTHORIZE" || result.decision.reservation === null || result.decision.operation_id !== operationId) {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    if (candidates.length === 1 && result.decision.content_sha256 !== candidates[0]!.content_sha256) return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    // Post-commit verification against freshly reread state and records.
+    const successor = await inspectRunStorage(location);
+    if (successor.status !== "HEALTHY" || successor.revision === null || successor.statePointer === null || successor.workflowState === null || successor.transitionCommit === null) return refused("RESUME_REFUSED_STATE_STORE");
+    const after = successor.workflowState;
+    const afterTask = after.tasks.find((entry) => entry.task_id === taskId);
+    const countersBefore = state.counters.worker_invocations;
+    const countersAfter = after.counters.worker_invocations;
+    const expectedDelta = runningAlready ? 0 : 1;
+    if (after.phase !== "LEAF_RUNNING" || after.active_task_id !== taskId || afterTask === undefined || afterTask.status !== "RUNNING" || afterTask.attempts !== 1 ||
+      countersAfter.terra_executor !== countersBefore.terra_executor + expectedDelta || countersAfter.total !== countersBefore.total + expectedDelta ||
+      countersAfter.sol_owner !== countersBefore.sol_owner || countersAfter.sol_planner !== countersBefore.sol_planner ||
+      countersAfter.sol_replan !== countersBefore.sol_replan || countersAfter.sol_closeout !== countersBefore.sol_closeout ||
+      countersAfter.luna_executor !== countersBefore.luna_executor) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    if (runningAlready) {
+      if (successor.revision !== current.revision || successor.transitionCommit.content_sha256 !== current.transitionCommit.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    } else if (successor.revision !== current.revision + 1 || successor.transitionCommit.previous_workflow_state_content_sha256 !== expectedWorkflow ||
+      successor.transitionCommit.previous_revision !== current.revision || successor.transitionCommit.transition_id !== transitionId) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const recordsAfter = await readM5ManagedRecords(location);
+    const afterCandidates = staticWorkDecisionCandidates(after, authority.reducerPolicy, recordsAfter, successor.managedRecordClassifications);
+    if (afterCandidates.length !== 1 || afterCandidates[0]!.content_sha256 !== result.decision.content_sha256 ||
+      recordsAfter.boundedWorkerInvocations.length !== 0 || recordsAfter.boundedWorkerResults.length !== 0 ||
+      recordsAfter.decisions.filter((entry) => entry.reservation !== null).length !== 1 ||
+      classificationOf(successor.managedRecordClassifications, "M5_CONTROL_DECISION", result.decision.content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD") {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    const gitAfter = await captureGitState(authority.repositoryIdentity);
+    if (canonicalize(gitAfter) !== canonicalize(gitBefore)) return refused("RESUME_REFUSED_STATE_DRIFT");
+    await assertWorktreeLockHeld(owned.lock);
+    const reservation = result.decision.reservation;
+    if (reservation.logical_role !== "TERRA_EXECUTOR" && reservation.logical_role !== "CODING_EXECUTOR") return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    const frozenRole = reservation.logical_role;
+    const roleRoutes = authority.routeMap.routes.filter((entry) => entry.logical_role === frozenRole);
+    if (roleRoutes.length !== 1) return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    const roleRoute = roleRoutes[0]!;
+    const binding: DeterministicResumeWorkAdmissionBinding = Object.freeze({
+      run_id: resume.binding.run_id, selected_task_id: taskId, selected_task_content_sha256: authority.selectedTask.content_sha256 as Sha256Digest,
+      task_graph_sha256: (authority.policy.task_graph_sha256 ?? null) as Sha256Digest | null,
+      plan_approval_sha256: (authority.policy.plan_approval_sha256 ?? null) as Sha256Digest | null,
+      operation_id: operationId, attempt_number: 1, reducer_policy_content_sha256: authority.reducerPolicy.content_sha256 as Sha256Digest,
+      m5_policy_content_sha256: authority.policy.content_sha256 as Sha256Digest, m5_decision_content_sha256: result.decision.content_sha256 as Sha256Digest,
+      reservation_decision_key: (reservation.reservation_decision_key ?? null) as Sha256Digest | null,
+      frozen_logical_role: frozenRole, provider_id: roleRoute.provider_id, model_id: roleRoute.model_id, effort: roleRoute.effort,
+      model_definition_sha256: (("model_definition_sha256" in roleRoute ? roleRoute.model_definition_sha256 : null) ?? null) as Sha256Digest | null,
+      repository_identity_content_sha256: authority.repositoryIdentity.content_sha256 as Sha256Digest, worktree_key: authority.repositoryIdentity.worktree_key as Sha256Digest,
+      worktree_root: authority.repositoryIdentity.worktree_root, git_common_dir: authority.repositoryIdentity.git_common_dir,
+      input_m3_state_token_content_sha256: authority.stateToken.content_sha256 as Sha256Digest,
+      predecessor_revision: expectedRevision, predecessor_workflow_state_content_sha256: expectedWorkflow as Sha256Digest,
+      predecessor_state_pointer_content_sha256: expectedPointer as Sha256Digest, successor_revision: successor.revision,
+      successor_workflow_state_content_sha256: after.content_sha256 as Sha256Digest, successor_state_pointer_content_sha256: successor.statePointer.content_sha256 as Sha256Digest,
+      successor_transition_commit_content_sha256: successor.transitionCommit.content_sha256 as Sha256Digest,
+    });
+    owned.consumed = true; owned.workTransferred = true;
+    return new DeterministicResumeWorkAdmissionImpl(binding, { lock: owned.lock, stateRoot: owned.stateRoot, released: false, consumed: false, workTransferred: false });
+  } catch (error: unknown) {
+    try { await releaseOwnedLock(owned); } catch (releaseError: unknown) { throw releaseError; }
+    throw error;
+  }
+}
+
+export async function assertDeterministicResumeWorkAdmissionHeld(admission: DeterministicResumeWorkAdmission): Promise<void> {
+  const state = workAdmissionState(admission);
+  if (state.released || state.consumed) throw new Error("resume work admission is no longer active");
+  await assertWorktreeLockHeld(state.lock);
+}
+
+export async function releaseDeterministicResumeWorkAdmission(admission: DeterministicResumeWorkAdmission): Promise<void> {
+  const state = workAdmissionState(admission);
+  if (state.consumed) throw new Error("resume work admission ownership was transferred");
+  await releaseOwnedLock(state);
 }

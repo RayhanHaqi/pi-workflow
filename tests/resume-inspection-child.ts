@@ -6,12 +6,13 @@ import { promisify } from "node:util";
 
 import { inspectRunStorage } from "../src/persistence/index.js";
 import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hooks.js";
+import { readM5ManagedRecords } from "../src/persistence/store.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type BoundedMutationGoal } from "../src/workflow-controller.js";
 
 const execFileAsync = promisify(execFile);
 const mode = process.argv[2];
-if (process.send === undefined || !["READY", "DELTA", "M5", "WORKER", "AMBIGUOUS"].includes(mode ?? "")) {
+if (process.send === undefined || !["READY", "DELTA", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT"].includes(mode ?? "")) {
   throw new Error("resume-inspection-child requires a fixture mode and IPC");
 }
 
@@ -45,14 +46,29 @@ async function main(): Promise<void> {
     } };
   });
   configureM5PersistenceTestHooks({ checkpoint: async (checkpoint) => {
-    if (announced || checkpoint !== "AFTER_STATE_POINTER_UPDATE") return;
+    if (announced) return;
     const entries = await readdir(parent); if (entries.length !== 1) return;
     const stateRoot = join(parent, entries[0]!, "state"); const inspection = await inspectRunStorage({ stateRoot, runId: "pre-m8-bounded" }); const state = inspection.workflowState;
-    const ready = mode === "READY" && state?.phase === "READY" && state.tasks.every((task) => task.status === "PENDING");
-    const delta = mode === "DELTA" && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
-    const reservation = mode === "M5" && state?.phase === "LEAF_RUNNING";
-    const ambiguous = mode === "AMBIGUOUS" && state?.phase === "LEAF_FAST_PREFLIGHT";
-    if (!ready && !delta && !reservation && !ambiguous) return;
+    let pause = false;
+    if (checkpoint === "AFTER_STATE_POINTER_UPDATE") {
+      const ready = mode === "READY" && state?.phase === "READY" && state.tasks.every((task) => task.status === "PENDING");
+      const delta = mode === "DELTA" && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
+      const reservation = mode === "M5" && state?.phase === "LEAF_RUNNING";
+      const ambiguous = mode === "AMBIGUOUS" && state?.phase === "LEAF_FAST_PREFLIGHT";
+      pause = ready || delta || reservation || ambiguous;
+    } else if (mode === "WINDOW_A" && checkpoint === "AFTER_DECISION_PUBLICATION" && state?.phase === "LEAF_FAST_PREFLIGHT") {
+      // Exact WINDOW A seam: the AUTHORIZE_WORK decision is durably published but its M2 transition is not yet committed.
+      const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
+      pause = records.decisions.some((decision) => decision.intent === "AUTHORIZE_WORK" && decision.operation_id?.startsWith("static-leaf-") === true);
+    } else if (mode === "WINDOW_B" && checkpoint === "AFTER_COMMITTED_STATE_BEFORE_RESPONSE" && state?.phase === "LEAF_RUNNING") {
+      // Exact WINDOW B seam: START_LEAF_ATTEMPT committed and classified, response not yet returned to the caller.
+      pause = true;
+    } else if (mode === "RESULT" && checkpoint === "BEFORE_TRANSITION_EVIDENCE_PUBLICATION" && state?.phase === "LEAF_RUNNING") {
+      // Result exists while the reducer remains LEAF_RUNNING: the exact refusal seam for existing worker evidence.
+      const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
+      pause = records.boundedWorkerInvocations.length === 1 && records.boundedWorkerResults.length === 1;
+    }
+    if (!pause) return;
     await announce(); await new Promise<void>(() => {});
   } });
   const goal: BoundedMutationGoal = {

@@ -266,12 +266,22 @@ test("quiescent selected static leaf before START_LEAF_ATTEMPT is resumable", as
   } finally { await fixture.cleanup(); }
 });
 
-test("quiescent M5 reservation and bounded-worker invocation without a result both refuse resume", async () => {
-  for (const mode of ["M5", "WORKER"] as const) {
-    const fixture = await interruptedStaticRun(mode);
-    try { assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION"); }
-    finally { await fixture.cleanup(); }
-  }
+// V1-R2C: a committed AUTHORIZE_WORK reservation with no worker invocation is now the exact
+// STATIC_DAG_INVOKE_RESERVED_LEAF resume point (crash-safe pre-provider work admission); an existing
+// BOUNDED_WORKER_INVOCATION still refuses fail-closed.
+test("quiescent committed M5 reservation without a result is the reserved-leaf resume point", async () => {
+  const fixture = await interruptedStaticRun("M5");
+  try {
+    assert.deepEqual(await eventuallyResumable(fixture.root), {
+      classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_RUNNING", resume_point: "STATIC_DAG_INVOKE_RESERVED_LEAF:a", reason: null,
+    });
+  } finally { await fixture.cleanup(); }
+});
+
+test("quiescent bounded-worker invocation without a result refuses resume", async () => {
+  const fixture = await interruptedStaticRun("WORKER");
+  try { assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION"); }
+  finally { await fixture.cleanup(); }
 });
 
 
