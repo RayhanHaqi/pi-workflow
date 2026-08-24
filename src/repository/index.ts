@@ -4,6 +4,7 @@ export {
   acquireWorktreeLock,
   assertWorktreeLockHeld,
   releaseWorktreeLock,
+  probeWorktreeLockAvailability,
 } from "./lock.js";
 export {
   captureBaseline,
@@ -26,6 +27,8 @@ export type {
 export type {
   AcquireWorktreeLockInput,
   WorktreeLockHandle,
+  ProbeWorktreeLockAvailabilityInput,
+  WorktreeLockAvailability,
 } from "./lock.js";
 export type {
   BaselineApprovalResult,

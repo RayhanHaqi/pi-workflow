@@ -68,6 +68,48 @@ def open_lock(path: str) -> int:
         raise
 
 
+
+def open_existing_lock(path: str) -> int:
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        fail("INVALID_LOCK_PATH", "lock entry does not exist")
+    except OSError:
+        fail("INVALID_LOCK_PATH", "lock entry cannot be inspected")
+    if not exact_regular_mode(existing, 0o600):
+        fail("INVALID_LOCK_PATH", "existing lock entry is not a mode-0600 regular file")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        fail("INVALID_LOCK_PATH", "lock entry cannot be opened safely")
+    try:
+        observed = os.fstat(fd)
+        if not stat.S_ISREG(observed.st_mode) or stat.S_IMODE(observed.st_mode) != 0o600:
+            fail("INVALID_LOCK_PATH", "lock entry is not a mode-0600 regular file")
+        if existing.st_dev != observed.st_dev or existing.st_ino != observed.st_ino:
+            fail("INVALID_LOCK_PATH", "lock entry changed during open")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def probe_lock(path: str) -> None:
+    fd = open_existing_lock(path)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN):
+                fail("CONCURRENT_WRITER", "kernel lock is already held", 73)
+            fail("LOCK_GUARDIAN_START_FAILED", "kernel lock probe failed")
+        emit({"type": "AVAILABLE", "protocol": PROTOCOL})
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
 def write_marker(path: str, metadata: dict[str, object]) -> None:
     try:
         existing = os.lstat(path)
@@ -113,6 +155,9 @@ def install_parent_death_signal(expected_parent: int) -> None:
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--probe-lock":
+        probe_lock(sys.argv[2])
+        return
     if len(sys.argv) != 9:
         fail("LOCK_GUARDIAN_START_FAILED", "guardian argv is invalid")
     lock_path, marker_path, worktree_key, worktree_root, git_common_dir, acquired_at, parent_text, acquisition_nonce = sys.argv[1:]

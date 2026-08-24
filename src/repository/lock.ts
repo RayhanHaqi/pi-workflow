@@ -243,6 +243,52 @@ export interface AcquireWorktreeLockInput {
   readonly repository: M3RepositoryIdentityDocument;
 }
 
+export interface ProbeWorktreeLockAvailabilityInput {
+  readonly stateRoot: string;
+  readonly repository: M3RepositoryIdentityDocument;
+}
+
+export type WorktreeLockAvailability = "LOCK_AVAILABLE" | "LOCK_BUSY";
+
+/**
+ * Observational kernel-flock probe. It never creates a lock file, owner marker,
+ * or M3 acquisition authority; AVAILABLE is released before this function returns.
+ */
+export async function probeWorktreeLockAvailability(input: ProbeWorktreeLockAvailabilityInput): Promise<WorktreeLockAvailability> {
+  assertRecord(input, "probeWorktreeLockAvailability input");
+  assertExactKeys(input, ["stateRoot", "repository"], "probeWorktreeLockAvailability input");
+  assertDocumentValid("pi_gacw_repository_identity_v0", input.repository);
+  const lockDirectory = await validateLockDirectory(input.stateRoot);
+  const lockPath = join(lockDirectory, `${digestHex(input.repository.worktree_key)}.lock`);
+  const [python, helper] = await Promise.all([resolveExecutableIdentity("python3"), guardianPath()]);
+  const child = spawn(python.invocationPath, [helper.realpath, "--probe-lock", lockPath], {
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, LC_ALL: "C", LANG: "C", PYTHONIOENCODING: "utf-8" },
+  });
+  const channel = new GuardianChannel(child);
+  let response: GuardianMessage;
+  try {
+    response = await channel.waitFor((message) => message.type === "AVAILABLE" || message.type === "ERROR", READY_TIMEOUT_MS, "LOCK_GUARDIAN_START_FAILED");
+  } catch (error: unknown) {
+    child.kill("SIGKILL");
+    if (error instanceof RepositoryGuardError && error.code === "LOCK_LOST") {
+      throw new RepositoryGuardError("LOCK_GUARDIAN_START_FAILED", "Guardian exited before lock availability was established", {}, { cause: error });
+    }
+    throw error;
+  }
+  if (response.type === "ERROR") {
+    await awaitExit(child, RELEASE_TIMEOUT_MS).catch(() => undefined);
+    if (response.protocol !== PROTOCOL) throw new RepositoryGuardError("LOCK_GUARDIAN_START_FAILED", "Guardian error protocol is invalid");
+    if (response.code === "CONCURRENT_WRITER") return "LOCK_BUSY";
+    if (response.code === "INVALID_LOCK_PATH") throw new RepositoryGuardError("INVALID_LOCK_PATH", "Guardian rejected the derived lock path");
+    throw new RepositoryGuardError("LOCK_GUARDIAN_START_FAILED", "Guardian could not establish lock availability");
+  }
+  assertProtocol(response, "AVAILABLE");
+  await awaitExit(child, RELEASE_TIMEOUT_MS);
+  return "LOCK_AVAILABLE";
+}
+
 export function lockAcquisitionAuthority(handle: WorktreeLockHandle): M3LockAcquisitionDocument {
   return detachedFrozen(stateFor(handle).acquisition);
 }

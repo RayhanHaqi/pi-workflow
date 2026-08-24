@@ -1,0 +1,71 @@
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
+import { inspectRunStorage } from "../src/persistence/index.js";
+import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hooks.js";
+import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
+import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type BoundedMutationGoal } from "../src/workflow-controller.js";
+
+const execFileAsync = promisify(execFile);
+const mode = process.argv[2];
+if (process.send === undefined || !["READY", "DELTA", "M5", "WORKER", "AMBIGUOUS"].includes(mode ?? "")) {
+  throw new Error("resume-inspection-child requires a fixture mode and IPC");
+}
+
+async function repository(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "resume-inspection-crash-repo-"));
+  await execFileAsync("git", ["init", "-q"], { cwd: root });
+  await execFileAsync("git", ["config", "user.email", "resume@example.invalid"], { cwd: root });
+  await execFileAsync("git", ["config", "user.name", "resume"], { cwd: root });
+  await mkdir(join(root, "verify"));
+  await writeFile(join(root, "verify", "check.mjs"), "process.exit(0);\n");
+  await execFileAsync("git", ["add", "verify"], { cwd: root });
+  await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: root });
+  return root;
+}
+
+async function main(): Promise<void> {
+  const root = await repository(); const parent = await mkdtemp(join(tmpdir(), "resume-inspection-crash-retained-"));
+  let announced = false;
+  const announce = async (): Promise<void> => {
+    if (announced) return;
+    const entries = await readdir(parent); if (entries.length !== 1) throw new Error("retained workspace is unavailable");
+    announced = true; process.send?.({ type: "PAUSED", root: join(parent, entries[0]!), repository: root });
+  };
+  configureBoundedWorkerFauxRuntimeForTests(() => {
+    let calls = 0;
+    return { async execute({ tools }) {
+      const path = ["a.txt", "b.txt"][calls++]!;
+      if (mode === "WORKER" && calls === 1) { await announce(); await new Promise<void>(() => {}); }
+      await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      tools.submitReport(`wrote ${path}`); return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+    } };
+  });
+  configureM5PersistenceTestHooks({ checkpoint: async (checkpoint) => {
+    if (announced || checkpoint !== "AFTER_STATE_POINTER_UPDATE") return;
+    const entries = await readdir(parent); if (entries.length !== 1) return;
+    const stateRoot = join(parent, entries[0]!, "state"); const inspection = await inspectRunStorage({ stateRoot, runId: "pre-m8-bounded" }); const state = inspection.workflowState;
+    const ready = mode === "READY" && state?.phase === "READY" && state.tasks.every((task) => task.status === "PENDING");
+    const delta = mode === "DELTA" && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
+    const reservation = mode === "M5" && state?.phase === "LEAF_RUNNING";
+    const ambiguous = mode === "AMBIGUOUS" && state?.phase === "LEAF_FAST_PREFLIGHT";
+    if (!ready && !delta && !reservation && !ambiguous) return;
+    await announce(); await new Promise<void>(() => {});
+  } });
+  const goal: BoundedMutationGoal = {
+    objective: "Write exactly two resume-fixture outputs.", stop_condition: "Stop after deterministic verification.", execution_mode: "STATIC_APPROVED_DAG",
+    scope: { readable_paths: ["verify"], editable_paths: ["a.txt", "b.txt"], frozen_paths: ["verify"] }, required_outputs: ["a.txt", "b.txt"],
+    tasks: [
+      { task_id: "a", objective: "Write a.", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: [] },
+      { task_id: "b", objective: "Write b.", editable_paths: ["b.txt"], required_outputs: ["b.txt"], dependencies: ["a"], verification_command_ids: [] },
+    ],
+  };
+  const authority: BoundedMutationAuthority = { verification_commands: [{ command_id: "verify", executable: process.execPath, args: ["check.mjs"], cwd: "verify", timeout_ms: 10_000, readable_paths: [{ path: "verify", kind: "PREFIX" }] }], static_max_attempts_per_leaf: 1, static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 } };
+  await runBoundedMutationWorkflowForTests(goal, { cwd: root, authority, retainedArtifactRoot: parent, approveTasks: async ({ plan }) => plan!.content_sha256 as `sha256:${string}` });
+  throw new Error("fixture reached terminal state before interruption");
+}
+
+main().catch((error: unknown) => { process.send?.({ type: "ERROR", error: error instanceof Error ? error.message : String(error) }); process.exitCode = 1; });

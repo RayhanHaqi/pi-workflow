@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
-import { chmod, mkdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -8,6 +8,7 @@ import {
   acquireWorktreeLock,
   assertWorktreeLockHeld,
   releaseWorktreeLock,
+  probeWorktreeLockAvailability,
   resolveRepositoryIdentity,
 } from "../src/repository/index.js";
 import { configureRepositoryTestHooks, resetRepositoryTestHooks } from "../src/repository/test-hooks.js";
@@ -68,6 +69,26 @@ test("real flock guardian serializes cooperating controller processes and releas
     await releaseWorktreeLock(later);
   } finally {
     first.kill("SIGKILL");
+    await removeRepositoryFixture(fixture);
+  }
+});
+
+
+test("observational lock probe reports kernel availability without publishing or rewriting lock evidence", async () => {
+  const fixture = await createRepositoryFixture(); let owned: Awaited<ReturnType<typeof acquireWorktreeLock>> | undefined;
+  try {
+    const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
+    owned = await acquireWorktreeLock({ stateRoot: fixture.stateRoot, repository });
+    const lockDirectory = join(fixture.stateRoot, "locks");
+    const snapshot = async () => Promise.all((await readdir(lockDirectory)).sort().map(async (name) => ({ name, bytes: await readFile(join(lockDirectory, name)) })));
+    const before = await snapshot();
+    assert.equal(await probeWorktreeLockAvailability({ stateRoot: fixture.stateRoot, repository }), "LOCK_BUSY");
+    assert.deepEqual(await snapshot(), before);
+    await releaseWorktreeLock(owned); owned = undefined;
+    assert.equal(await probeWorktreeLockAvailability({ stateRoot: fixture.stateRoot, repository }), "LOCK_AVAILABLE");
+    assert.deepEqual(await snapshot(), before);
+  } finally {
+    if (owned !== undefined) await releaseWorktreeLock(owned).catch(() => undefined);
     await removeRepositoryFixture(fixture);
   }
 });

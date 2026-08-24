@@ -7,6 +7,7 @@ import { readM5ManagedRecords } from "./persistence/store.js";
 import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/preflight.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import { resolveRepositoryIdentity } from "./repository/index.js";
+import { probeWorktreeLockAvailability } from "./repository/lock.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import type { ManagedRecordClassification } from "./persistence/types.js";
 import type { M3BaselineRuntimeDocument, M3RepositoryStateTokenDocument, ReducerPolicy, WorkflowState } from "./schemas/index.js";
@@ -146,8 +147,8 @@ function settledOperations(
 }
 
 /**
- * Read-only eligibility inspection. It deliberately neither acquires an M3 lock nor publishes
- * records: this report is proof about current retained authority, not a resume operation.
+ * Read-only eligibility inspection. It never acquires durable M3 lock authority or publishes
+ * records; its kernel-flock availability probe releases before returning.
  */
 export async function inspectDeterministicResumeEligibility(input: ResumeInspectionInput): Promise<ResumeEligibilityReport> {
   if (!isAbsolute(input.retainedRunRoot)) return refused(null, null, "RESUME_REFUSED_STATE_STORE");
@@ -198,9 +199,21 @@ export async function inspectDeterministicResumeEligibility(input: ResumeInspect
   } catch {
     return refused(runId, state, "RESUME_REFUSED_BASELINE_AUTHORITY");
   }
+  let currentRepository: Awaited<ReturnType<typeof resolveRepositoryIdentity>>;
   try {
-    const currentRepository = await resolveRepositoryIdentity({ requestedPath: authority.baseline.repository.worktree_root, requireHead: true });
+    currentRepository = await resolveRepositoryIdentity({ requestedPath: authority.baseline.repository.worktree_root, requireHead: true });
     assertRepositoryMatches(authority.baseline.repository, currentRepository);
+  } catch {
+    return refused(runId, state, "RESUME_REFUSED_REPOSITORY_IDENTITY");
+  }
+  try {
+    if (await probeWorktreeLockAvailability({ stateRoot: location.stateRoot, repository: currentRepository }) !== "LOCK_AVAILABLE") {
+      return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+  } catch {
+    return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  }
+  try {
     const currentFingerprint = await captureGitState(currentRepository);
     assertNoGitBlockers(currentFingerprint);
     if (canonicalize(currentFingerprint) !== canonicalize(token.git_fingerprint)) return refused(runId, state, "RESUME_REFUSED_STATE_DRIFT");

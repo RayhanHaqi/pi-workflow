@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { execFile, fork } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import { inspectRunStorage } from "../src/persistence/index.js";
 import { readM5ManagedRecords } from "../src/persistence/store.js";
 import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hooks.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
+import { configureRepositoryTestHooks, resetRepositoryTestHooks } from "../src/repository/test-hooks.js";
 import { inspectDeterministicResumeEligibility, deriveStaticDagResumePoint } from "../src/resume-inspection.js";
 import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type BoundedMutationGoal } from "../src/workflow-controller.js";
 import type { ReducerPolicy, WorkflowState } from "../src/schemas/index.js";
@@ -123,6 +124,39 @@ async function pauseStaticRun(when: (state: WorkflowState) => boolean, blockFirs
   }
 }
 
+
+type InterruptedStaticRun = { readonly root: string; readonly repository: string; readonly cleanup: () => Promise<void> };
+
+async function interruptedStaticRun(mode: "READY" | "DELTA" | "M5" | "WORKER" | "AMBIGUOUS"): Promise<InterruptedStaticRun> {
+  const child = fork(new URL("./resume-inspection-child.ts", import.meta.url), [mode], { execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  let message: { readonly root: string; readonly repository: string };
+  try {
+    message = await new Promise((resolve, reject) => {
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => reject(new Error(`fixture owner exited before pause: code=${code} signal=${signal}`));
+      child.once("exit", onExit);
+      child.once("message", (value: unknown) => {
+        child.off("exit", onExit);
+        if (value !== null && typeof value === "object" && (value as { readonly type?: unknown }).type === "PAUSED" &&
+          typeof (value as { readonly root?: unknown }).root === "string" && typeof (value as { readonly repository?: unknown }).repository === "string") {
+          resolve(value as { readonly root: string; readonly repository: string });
+        } else reject(new Error(`fixture child failed: ${JSON.stringify(value)}`));
+      });
+    });
+    await new Promise<void>((resolve, reject) => { child.once("exit", (_code, signal) => signal === "SIGKILL" ? resolve() : reject(new Error(`fixture owner exited unexpectedly: ${signal}`))); child.kill("SIGKILL"); });
+    return { ...message, cleanup: async () => { await rm(dirname(message.root), { recursive: true, force: true }); await rm(message.repository, { recursive: true, force: true }); } };
+  } catch (error: unknown) {
+    child.kill("SIGKILL"); await new Promise<void>((resolve) => child.once("exit", () => resolve())); throw error;
+  }
+}
+
+async function eventuallyResumable(root: string): Promise<Awaited<ReturnType<typeof inspectDeterministicResumeEligibility>>> {
+  let last = await inspectDeterministicResumeEligibility({ retainedRunRoot: root });
+  for (let attempt = 0; last.classification !== "RESUMABLE" && attempt < 100; attempt += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25)); last = await inspectDeterministicResumeEligibility({ retainedRunRoot: root });
+  }
+  return last;
+}
+
 test("resume point is deterministic at the reducer-settled static DAG ready boundary", () => {
   const policy = staticPolicy();
   assert.equal(deriveStaticDagResumePoint(staticState([{ task_id: "a", status: "PENDING" }, { task_id: "b", status: "PENDING" }]), policy), "STATIC_DAG_SELECT_READY_LEAF:a");
@@ -155,7 +189,7 @@ test("resume-inspect CLI emits one deterministic machine-readable JSON report", 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("real retained STATIC_APPROVED_DAG READY state is resumable and inspection is read-only", async () => {
+test("real retained STATIC_APPROVED_DAG READY state refuses while its live controller owns the worktree lock", async () => {
   const fixture = await pauseStaticRun((state) => state.phase === "READY" && state.tasks.every((task) => task.status === "PENDING"));
   try {
     const statePath = join(fixture.root, "state", "runs", "pre-m8-bounded", "state.json");
@@ -164,49 +198,74 @@ test("real retained STATIC_APPROVED_DAG READY state is resumable and inspection 
     ]);
     const first = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
     const second = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
+    assert.deepEqual(first, { classification: "RESUME_REFUSED", run_id: "pre-m8-bounded", phase: "READY", resume_point: null, reason: "RESUME_REFUSED_IN_FLIGHT_OPERATION" });
+    assert.equal(canonicalize(first), canonicalize(second));
+    assert.deepEqual(await readFile(statePath), beforePointer);
+    assert.deepEqual(await inventory(join(fixture.root, "state")), beforeInventory);
+    assert.equal(canonicalize(await captureGitState(await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }))), canonicalize(beforeGit));
+  } finally { await fixture.finish(); }
+});
+
+test("interrupted owner leaves a quiescent retained READY state that is resumable and read-only", async () => {
+  const fixture = await interruptedStaticRun("READY");
+  try {
+    const statePath = join(fixture.root, "state", "runs", "pre-m8-bounded", "state.json");
+    const [beforePointer, beforeInventory, beforeGit] = await Promise.all([
+      readFile(statePath), inventory(join(fixture.root, "state")), resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }).then(captureGitState),
+    ]);
+    const first = await eventuallyResumable(fixture.root); const second = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
     assert.deepEqual(first, { classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "READY", resume_point: "STATIC_DAG_SELECT_READY_LEAF:a", reason: null });
     assert.equal(canonicalize(first), canonicalize(second));
     assert.deepEqual(await readFile(statePath), beforePointer);
     assert.deepEqual(await inventory(join(fixture.root, "state")), beforeInventory);
-    const afterCleanInspectionGit = await captureGitState(await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }));
-    assert.equal(canonicalize(afterCleanInspectionGit), canonicalize(beforeGit));
+    assert.equal(canonicalize(await captureGitState(await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }))), canonicalize(beforeGit));
+    const control = await mkdtemp(join(tmpdir(), "resume-inspection-probe-"));
+    try {
+      const helper = join(control, "uncertain.py"); await writeFile(helper, "import time\ntime.sleep(1)\n", { mode: 0o600 }); await chmod(helper, 0o600);
+      configureRepositoryTestHooks({ guardianPath: helper, guardianReadyTimeoutMs: 25 });
+      assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+      assert.deepEqual(await readFile(statePath), beforePointer);
+      assert.deepEqual(await inventory(join(fixture.root, "state")), beforeInventory);
+    } finally { resetRepositoryTestHooks(); await rm(control, { recursive: true, force: true }); }
     await writeFile(join(fixture.repository, "unexpected.txt"), "drift\n");
-    const drift = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
-    assert.equal(drift.reason, "RESUME_REFUSED_STATE_DRIFT");
-    assert.equal((await readFile(join(fixture.repository, "unexpected.txt"), "utf8")), "drift\n");
+    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_STATE_DRIFT");
+    assert.equal(await readFile(join(fixture.repository, "unexpected.txt"), "utf8"), "drift\n");
     assert.deepEqual(await readFile(statePath), beforePointer);
     assert.deepEqual(await inventory(join(fixture.root, "state")), beforeInventory);
     await execFileAsync("git", ["checkout", "-qb", "resume-identity-drift"], { cwd: fixture.repository });
     assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_REPOSITORY_IDENTITY");
-  } finally { await fixture.finish(); }
+  } finally { await fixture.cleanup(); }
 });
 
-test("real retained STATIC_APPROVED_DAG accepts an authoritative workflow-owned delta", async () => {
+test("live workflow-owned delta is refused while its controller owns the worktree lock", async () => {
   const fixture = await pauseStaticRun((state) => state.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS");
   try {
-    assert.deepEqual(await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root }), {
+    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  } finally { await fixture.finish(); }
+});
+
+test("quiescent workflow-owned delta is resumable", async () => {
+  const fixture = await interruptedStaticRun("DELTA");
+  try {
+    assert.deepEqual(await eventuallyResumable(fixture.root), {
       classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "READY", resume_point: "STATIC_DAG_SELECT_READY_LEAF:b", reason: null,
     });
-  } finally { await fixture.finish(); }
+  } finally { await fixture.cleanup(); }
 });
 
-
-test("real retained nonterminal static state outside READY is refused as ambiguous", async () => {
-  const fixture = await pauseStaticRun((state) => state.phase === "LEAF_FAST_PREFLIGHT");
+test("quiescent nonterminal static state outside READY is refused as ambiguous", async () => {
+  const fixture = await interruptedStaticRun("AMBIGUOUS");
   try {
-    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
-  } finally { await fixture.finish(); }
+    assert.equal((await eventuallyResumable(fixture.root)).reason, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+  } finally { await fixture.cleanup(); }
 });
 
-
-test("real M5 reservation and bounded-worker invocation without a result both refuse resume", async () => {
-  const fixture = await pauseStaticRun((state) => state.phase === "LEAF_RUNNING", true);
-  try {
-    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
-    fixture.release(); await fixture.workerEntered;
-    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
-    fixture.releaseWorker();
-  } finally { await fixture.finish(); }
+test("quiescent M5 reservation and bounded-worker invocation without a result both refuse resume", async () => {
+  for (const mode of ["M5", "WORKER"] as const) {
+    const fixture = await interruptedStaticRun(mode);
+    try { assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION"); }
+    finally { await fixture.cleanup(); }
+  }
 });
 
 
