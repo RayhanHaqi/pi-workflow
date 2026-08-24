@@ -79,6 +79,8 @@ export interface ExecuteStaticApprovedDagInput {
   readonly cwd?: string;
   readonly controller?: StaticApprovedDagController;
   readonly repositoryFacts?: (cwd: string) => Promise<StaticApprovedDagRepositoryFacts>;
+  /** Optional operator artifact-location configuration; passed through to the controller, never launch-spec authority. */
+  readonly retainedArtifactRoot?: string;
 }
 
 function fail(code: string, message: string): never { throw new StaticApprovedDagLaunchError(code, message); }
@@ -403,7 +405,7 @@ export async function executeStaticApprovedDag(input: ExecuteStaticApprovedDagIn
           static_coding_route: { provider_id: spec.expected_route.provider_id, model_id: spec.expected_route.model_id, effort: spec.expected_route.effort,
             ...(approvedModelDefinitionDigest(spec.expected_route) !== null ? { model_definition_sha256: approvedModelDefinitionDigest(spec.expected_route)! } : {}) } }
       : { verification_commands: spec.verification_commands as readonly ControllerVerificationCommand[], static_time_budgets: spec.static_time_budgets, static_max_attempts_per_leaf: spec.static_max_attempts_per_leaf, ...(spec.expected_route.effort === "xhigh" ? { static_terra_effort: "xhigh" as const } : {}) };
-    const result = await (input.controller ?? runBoundedMutationWorkflow)(spec.goal, { cwd, authority, approveTasks: createStaticApprovedDagPlanApproval(spec) });
+    const result = await (input.controller ?? runBoundedMutationWorkflow)(spec.goal, { cwd, authority, approveTasks: createStaticApprovedDagPlanApproval(spec), ...(input.retainedArtifactRoot === undefined ? {} : { retainedArtifactRoot: input.retainedArtifactRoot }) });
     return resultReport(spec, digest, result, null);
   } catch (error: unknown) {
     return resultReport(spec, digest, null, error);

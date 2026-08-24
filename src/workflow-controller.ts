@@ -1538,7 +1538,7 @@ interface InvocationWorkspace {
 }
 
 type ProductiveChildKind = "WORKFLOW" | "FIXTURE";
-export type ExternalLifecycleFixtureMode = "HANG" | "WRITE_AND_HANG" | "INTERNAL_PASS_WAIT" | "COMPLETE" | "EARLY_EXIT" | "MALFORMED_RESULT";
+export type ExternalLifecycleFixtureMode = "HANG" | "WRITE_AND_HANG" | "INTERNAL_PASS_WAIT" | "COMPLETE" | "STATIC_DAG_BLOCKED" | "EARLY_EXIT" | "MALFORMED_RESULT";
 
 interface ProductiveStartMessage {
   readonly type: "START";
@@ -2285,8 +2285,8 @@ async function productiveChildMain(): Promise<void> {
   try {
     if (start.kind === "FIXTURE") {
       const mode = start.fixtureMode;
-      if (mode !== "HANG" && mode !== "WRITE_AND_HANG" && mode !== "INTERNAL_PASS_WAIT" && mode !== "COMPLETE" && mode !== "EARLY_EXIT" && mode !== "MALFORMED_RESULT") throw new Error("fixture mode is invalid");
-      if (mode === "COMPLETE") process.send?.({ type: "FIXTURE_STAGE", stage: "START_RECEIVED" });
+      if (mode !== "HANG" && mode !== "WRITE_AND_HANG" && mode !== "INTERNAL_PASS_WAIT" && mode !== "COMPLETE" && mode !== "STATIC_DAG_BLOCKED" && mode !== "EARLY_EXIT" && mode !== "MALFORMED_RESULT") throw new Error("fixture mode is invalid");
+      if (mode === "COMPLETE" || mode === "STATIC_DAG_BLOCKED") process.send?.({ type: "FIXTURE_STAGE", stage: "START_RECEIVED" });
       if (mode === "EARLY_EXIT") {
         await new Promise<void>((resolveWrite) => { process.stderr.write("fixture early exit\n", () => resolveWrite()); });
         await delay(25); process.exitCode = 23; return;
@@ -2300,6 +2300,7 @@ async function productiveChildMain(): Promise<void> {
       }
       configureBoundedWorkerFauxRuntimeForTests(() => ({
         async execute(input) {
+          if (mode === "STATIC_DAG_BLOCKED") return { completed: false, firstFailureCode: "TEST_RUNTIME_FAILURE", firstFailureStage: "TEST_RUNTIME", cleanupCertain: true, modelTurns: 3, providerRequests: 0 };
           if (input.profile === "MUTATION_EXECUTOR") {
             if (mode !== "HANG") {
               await input.tools.writePath({ path: "out.txt", operation: "CREATE", replacementBytes: Buffer.from("fixture output\n"), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });

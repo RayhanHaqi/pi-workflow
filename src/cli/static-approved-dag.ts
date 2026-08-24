@@ -1,17 +1,27 @@
 #!/usr/bin/env node
 
 import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { executeStaticApprovedDag, inspectStaticApprovedDagSpec, type StaticApprovedDagInspectionReport } from "../static-approved-dag-launcher.js";
 
-interface CliArguments { readonly mode: "execute" | "inspect"; readonly specPath: string; readonly approvedSpecSha256: string; }
+interface CliArguments { readonly mode: "execute" | "inspect"; readonly specPath: string; readonly approvedSpecSha256: string; readonly retainedArtifactRoot: string | null }
 
 function parseArguments(argv: readonly string[]): CliArguments {
-  const inspect = argv[0] === "inspect"; const positional: string[] = []; let approved: string | null = null;
+  const inspect = argv[0] === "inspect"; const positional: string[] = []; let approved: string | null = null; let retainedArtifactRoot: string | null = null;
   for (let index = inspect ? 1 : 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (argument === "--approved-spec-sha256") { if (approved !== null || argv[index + 1] === undefined) throw new Error("usage: static-approved-dag <spec.json> --approved-spec-sha256 sha256:<digest>"); approved = argv[++index]!; continue; }
+    // Operator artifact-location configuration only: never launch-spec authority.
+    // Shape validation stops at absolute-path syntax; definitive security validation stays with the controller.
+    if (argument === "--retain-artifacts") {
+      if (retainedArtifactRoot !== null) throw new Error("usage: --retain-artifacts accepts exactly one absolute directory");
+      if (argv[index + 1] === undefined) throw new Error("usage: --retain-artifacts requires an absolute directory value");
+      retainedArtifactRoot = argv[++index]!;
+      if (!isAbsolute(retainedArtifactRoot)) throw new Error("--retain-artifacts requires an absolute directory path");
+      continue;
+    }
     if (argument === "--report") throw new Error("--report is not supported; reports are emitted on stdout only");
     if (argument.startsWith("--")) throw new Error("unknown launcher argument");
     positional.push(argument);
@@ -19,10 +29,11 @@ function parseArguments(argv: readonly string[]): CliArguments {
   if (inspect) {
     if (positional.length !== 1) throw new Error("usage: static-approved-dag inspect <spec.json>");
     if (approved !== null) throw new Error("usage: static-approved-dag inspect <spec.json> (inspection never executes and takes no approval digest)");
-    return { mode: "inspect", specPath: positional[0]!, approvedSpecSha256: "" };
+    if (retainedArtifactRoot !== null) throw new Error("usage: static-approved-dag inspect <spec.json> (inspection creates no productive workspace and takes no --retain-artifacts)");
+    return { mode: "inspect", specPath: positional[0]!, approvedSpecSha256: "", retainedArtifactRoot: null };
   }
   if (positional.length !== 1 || approved === null) throw new Error("usage: static-approved-dag <spec.json> --approved-spec-sha256 sha256:<digest>");
-  return { mode: "execute", specPath: positional[0]!, approvedSpecSha256: approved };
+  return { mode: "execute", specPath: positional[0]!, approvedSpecSha256: approved, retainedArtifactRoot };
 }
 
 
@@ -45,7 +56,7 @@ export async function main(argv = process.argv.slice(2), execute: StaticApproved
     process.stdout.write(render(report));
     return report.classification === "INSPECTED" ? 0 : 2;
   }
-  const report = await execute({ spec, approved_spec_sha256: argumentsValue.approvedSpecSha256, cwd: process.cwd() });
+  const report = await execute({ spec, approved_spec_sha256: argumentsValue.approvedSpecSha256, cwd: process.cwd(), ...(argumentsValue.retainedArtifactRoot === null ? {} : { retainedArtifactRoot: argumentsValue.retainedArtifactRoot }) });
   process.stdout.write(render(report));
   return report.classification === "PASS" ? 0 : report.classification === "VALID_BLOCKED" ? 3 : 2;
 }
