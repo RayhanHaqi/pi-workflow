@@ -214,8 +214,11 @@ export function createInitialState(policy: ReducerPolicy, identities: StateIdent
   return state;
 }
 
-// Called only from reduceRouted after reduceState validates state, policy, binding, mode, and phase.
-function selectReadyLeafUnchecked(state: WorkflowState, policy: ReducerPolicy): string | null {
+// The single canonical static-DAG ready-leaf selection authority.
+// reduceRouted consumes it after reduceState validates state, policy, binding, mode, and phase;
+// resume inspection derives its pre-selection from this same primitive so the sort semantics
+// can never drift between commit-time selection and node-time prediction.
+export function selectReadyLeafUnchecked(state: WorkflowState, policy: ReducerPolicy): string | null {
   const statuses = new Map(state.tasks.map((task) => [task.task_id, task.status]));
   const ready = policy.tasks.filter((task) => {
     if (statuses.get(task.task_id) !== "PENDING") return false;

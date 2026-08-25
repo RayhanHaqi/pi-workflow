@@ -5,6 +5,7 @@ import { canonicalize } from "./canonical-json/index.js";
 import { inspectRunStorage } from "./persistence/index.js";
 import { readM5ManagedRecords } from "./persistence/store.js";
 import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/preflight.js";
+import { selectReadyLeafUnchecked } from "./state-machine/index.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import { resolveRepositoryIdentity } from "./repository/index.js";
 import { probeWorktreeLockAvailability } from "./repository/lock.js";
@@ -88,17 +89,9 @@ export function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3R
 }
 
 /** The only V1-R2B supported points are static READY selection and pre-worker selected-leaf start. */
-function selectStaticDagReadyLeaf(state: WorkflowState, policy: ReducerPolicy): string | null {
-  const complete = new Set(state.tasks.filter((task) => task.status === "PASS").map((task) => task.task_id));
-  const candidates = policy.tasks.filter((task) => state.tasks.some((runtime) => runtime.task_id === task.task_id && runtime.status === "PENDING") &&
-    task.dependencies.every((dependency) => complete.has(dependency)))
-    .sort((left, right) => left.topological_rank - right.topological_rank || left.priority - right.priority || left.task_id.localeCompare(right.task_id));
-  return candidates.length > 0 ? candidates[0]!.task_id : null;
-}
-
 export function deriveStaticDagResumePoint(state: WorkflowState, policy: ReducerPolicy): string | null {
   if (state.execution_mode !== "STATIC_APPROVED_DAG") return null;
-  const selected = selectStaticDagReadyLeaf(state, policy);
+  const selected = selectReadyLeafUnchecked(state, policy);
   if (state.phase === "READY" && state.active_task_id === null) return selected === null ? null : `STATIC_DAG_SELECT_READY_LEAF:${selected}`;
   if (state.phase !== "LEAF_FAST_PREFLIGHT" || state.active_task_id === null || selected !== state.active_task_id) return null;
   const task = state.tasks.find((candidate) => candidate.task_id === selected);

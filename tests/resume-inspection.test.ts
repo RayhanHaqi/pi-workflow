@@ -16,6 +16,9 @@ import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hook
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 import { configureRepositoryTestHooks, resetRepositoryTestHooks } from "../src/repository/test-hooks.js";
 import { inspectDeterministicResumeEligibility, deriveStaticDagResumePoint } from "../src/resume-inspection.js";
+import { unsafeWithContentIdentity } from "../src/identity/projections.js";
+import { TransitionError, reduceState } from "../src/state-machine/index.js";
+import { transitionEvent } from "./helpers.js";
 import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type BoundedMutationGoal } from "../src/workflow-controller.js";
 import type { ReducerPolicy, WorkflowState } from "../src/schemas/index.js";
 
@@ -24,15 +27,18 @@ const execFileAsync = promisify(execFile);
 const digest = (letter: string) => `sha256:${letter.repeat(64)}`;
 
 function staticState(tasks: readonly { readonly task_id: string; readonly status: "PENDING" | "PASS" }[]): WorkflowState {
-  return {
-    schema_id: "pi_gacw_state_v0", schema_version: "0.1.0", content_sha256: digest("a"), run_id: "resume-test",
+  // The reducer dry-run oracle validates full state identity, so the fixture carries a real
+  // computed content digest instead of a placeholder.
+  const runtimeTasks = tasks.map((task) => ({ task_id: task.task_id, status: task.status, attempts: 0, postflight_completed: task.status === "PASS", verification_completed: task.status === "PASS", retry_progress_admitted: false }));
+  return unsafeWithContentIdentity({
+    schema_id: "pi_gacw_state_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: "resume-test",
     execution_mode: "STATIC_APPROVED_DAG", phase: "READY",
     identities: { objective_sha256: digest("b"), contract_sha256: digest("c"), baseline_approval_sha256: digest("d"), authority_lock_sha256: digest("e"), plan_approval_sha256: digest("f"), task_graph_sha256: digest("0"), scope_sha256: digest("1"), acceptance_sha256: digest("2"), budget_sha256: digest("3") },
-    frozen_policy_content_sha256: digest("4"), counters: { worker_invocations: { total: 0, sol_owner: 0, sol_planner: 0, sol_replan: 0, sol_closeout: 0, luna_executor: 0, terra_executor: 0 }, direct_attempts: 0, single_owner_mutation_cycles: 0, constrained_replans: 0, leaves_completed: 0 },
+    frozen_policy_content_sha256: digest("4"), counters: { worker_invocations: { total: 0, sol_owner: 0, sol_planner: 0, sol_replan: 0, sol_closeout: 0, luna_executor: 0, terra_executor: 0 }, direct_attempts: 0, single_owner_mutation_cycles: 0, constrained_replans: 0, leaves_completed: runtimeTasks.filter((task) => task.status === "PASS").length },
     gates: { planner_completed: false, owner_acceptance_completed: false, closeout_completed: false, closeout_verification_completed: false },
-    tasks: tasks.map((task) => ({ task_id: task.task_id, status: task.status, attempts: 0, postflight_completed: task.status === "PASS", verification_completed: task.status === "PASS", retry_progress_admitted: false })),
+    tasks: runtimeTasks,
     active_task_id: null, baseline_approval_required: false, route_frozen: true, owner_acceptance_required: false, replan_in_progress: false, terminal_reason: null,
-  } as WorkflowState;
+  } as Omit<WorkflowState, "content_sha256">) as unknown as WorkflowState;
 }
 
 function staticPolicy(): ReducerPolicy {
@@ -167,6 +173,89 @@ test("resume point is deterministic at the reducer-settled static DAG ready boun
   assert.equal(deriveStaticDagResumePoint(selected, policy), "STATIC_DAG_START_SELECTED_LEAF:a");
   assert.equal(deriveStaticDagResumePoint({ ...selected, tasks: selected.tasks.map((task) => task.task_id === "a" ? { ...task, attempts: 1 } : task) } as WorkflowState, policy), null);
   assert.equal(deriveStaticDagResumePoint({ ...selected, active_task_id: "b" } as WorkflowState, policy), null);
+});
+
+type LeafSpec = { readonly task_id: string; readonly rank: number; readonly priority: number; readonly dependencies?: readonly string[]; readonly status: "PENDING" | "PASS" };
+
+/** Frozen-policy/state fixture pair over arbitrary task orderings for selection-semantics cases. */
+function leafFixture(specs: readonly LeafSpec[]): { readonly state: WorkflowState; readonly policy: ReducerPolicy } {
+  const base = staticPolicy();
+  const policy = unsafeWithContentIdentity({
+    ...base,
+    content_projection_id: "document-content-v1",
+    limits: { ...base.limits, max_leaves: Math.max(specs.length, 1), max_worker_invocations: Math.max(specs.length, 1) },
+    tasks: specs.map((spec, index) => ({ task_id: spec.task_id, task_sha256: `sha256:${String(index).padStart(64, "0")}`, topological_rank: spec.rank, priority: spec.priority, dependencies: spec.dependencies ?? [], editable_paths: [`${spec.task_id}.txt`] })),
+  } as unknown as Omit<ReducerPolicy, "content_sha256">) as unknown as ReducerPolicy;
+  const state = unsafeWithContentIdentity({
+    ...staticState(specs.map((spec) => ({ task_id: spec.task_id, status: spec.status }))),
+    frozen_policy_content_sha256: policy.content_sha256,
+  } as unknown as Omit<WorkflowState, "content_sha256">) as unknown as WorkflowState;
+  return { state, policy };
+}
+
+/** Oracle is the actual reducer SELECT_READY_LEAF commit result, never a reimplemented sort. */
+function reducerSelectedResumePoint(state: WorkflowState, policy: ReducerPolicy): string | null {
+  let taskId: string | null;
+  try {
+    taskId = reduceState(state, transitionEvent("SELECT_READY_LEAF"), policy).active_task_id;
+  } catch (error: unknown) {
+    if (error instanceof TransitionError && error.code === "NO_READY_LEAF") return null;
+    throw error;
+  }
+  return taskId === null ? null : `STATIC_DAG_SELECT_READY_LEAF:${taskId}`;
+}
+
+const SELECTION_CASES: Readonly<Record<string, readonly LeafSpec[]>> = Object.freeze({
+  // Tied rank+priority with ASCII/case-sensitive ids: codepoint ordering commits "B";
+  // a locale collation could pick "a", so this case pins locale-independence.
+  tied_rank_priority_case_sensitive: [
+    { task_id: "B", rank: 0, priority: 0, status: "PENDING" },
+    { task_id: "a", rank: 0, priority: 0, status: "PENDING" },
+  ],
+  topological_rank_dominates_input_order: [
+    { task_id: "X", rank: 1, priority: 0, status: "PENDING" },
+    { task_id: "A", rank: 0, priority: 9, status: "PENDING" },
+  ],
+  priority_breaks_rank_tie: [
+    { task_id: "B", rank: 0, priority: 1, status: "PENDING" },
+    { task_id: "a", rank: 0, priority: 0, status: "PENDING" },
+  ],
+  dependency_not_pass_excluded: [
+    { task_id: "d", rank: 0, priority: 0, status: "PENDING" },
+    { task_id: "c", rank: 1, priority: 0, dependencies: ["d"], status: "PENDING" },
+    { task_id: "e", rank: 2, priority: 0, status: "PENDING" },
+  ],
+  multiple_ready_candidates: [
+    { task_id: "z", rank: 3, priority: 5, status: "PENDING" },
+    { task_id: "Y", rank: 3, priority: 5, status: "PENDING" },
+    { task_id: "k", rank: 3, priority: 7, status: "PENDING" },
+  ],
+  no_ready_candidate: [
+    { task_id: "n", rank: 0, priority: 0, status: "PENDING" },
+    { task_id: "m", rank: 1, priority: 0, dependencies: ["n"], status: "PENDING" },
+  ],
+  historical_multi_leaf_pass: [
+    { task_id: "done1", rank: 0, priority: 0, status: "PASS" },
+    { task_id: "done2", rank: 1, priority: 0, status: "PASS" },
+    { task_id: "Q", rank: 2, priority: 0, status: "PENDING" },
+    { task_id: "p", rank: 3, priority: 0, dependencies: ["done1"], status: "PENDING" },
+  ],
+});
+
+test("static DAG ready-leaf resume selection equals the reducer SELECT_READY_LEAF commit across orderings", () => {
+  for (const [name, specs] of Object.entries(SELECTION_CASES)) {
+    const { state, policy } = leafFixture(specs);
+    assert.equal(deriveStaticDagResumePoint(state, policy), reducerSelectedResumePoint(state, policy), name);
+  }
+  // Concrete divergence guard: the locale-sensitive pair must resolve to the codepoint winner
+  // and must match whatever the reducer actually committed, not a hard-coded guess alone.
+  const tied = leafFixture(SELECTION_CASES["tied_rank_priority_case_sensitive"]!);
+  assert.equal(reducerSelectedResumePoint(tied.state, tied.policy), "STATIC_DAG_SELECT_READY_LEAF:B");
+  assert.equal(deriveStaticDagResumePoint(tied.state, tied.policy), "STATIC_DAG_SELECT_READY_LEAF:B");
+  // Pre-worker selected-leaf boundary also derives from the same reducer semantics.
+  const preflight = { ...tied.state, phase: "LEAF_FAST_PREFLIGHT", active_task_id: "B" } as WorkflowState;
+  assert.equal(deriveStaticDagResumePoint(preflight, tied.policy), "STATIC_DAG_START_SELECTED_LEAF:B");
+  assert.equal(deriveStaticDagResumePoint({ ...preflight, active_task_id: "a" } as WorkflowState, tied.policy), null);
 });
 
 test("resume inspection fails closed without a retained state root and does not create one", async () => {
