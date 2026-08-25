@@ -46,7 +46,9 @@ async function main(): Promise<void> {
       // WORKER_B: leaf a completes normally (settled history); leaf b's invocation persists without a result.
       if (mode === "WORKER_B" && call === 2) { await announce(); await new Promise<void>(() => {}); }
       await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
-      tools.submitReport(`wrote ${path}`); return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+      tools.submitReport(`wrote ${path}`);
+      // Non-null cost keeps usage-evidence identity exercised on its historically drift-prone dimension.
+      return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0, inputTokens: 10, outputTokens: 20, costMicrousd: 1234 };
     } };
   });
   configureM5PersistenceTestHooks({ checkpoint: async (checkpoint, detail) => {
