@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/index.js";
+import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
 import type { M5AuthoritativeSources, M5FailureInput, M5ObligationEvidenceInput } from "./control/types.js";
 import { sha256Bytes, sha256Canonical, assertSha256Digest, type Sha256Digest } from "./identity/index.js";
 import { m3ScopeIdentity } from "./identity/m3-scope.js";
@@ -1056,12 +1057,9 @@ function sourceBundle(contractDocument: ContractDocument, budgetDocument: Budget
     ...(graph === null ? {} : { taskGraphs: [graph] }), ...(planDocument === null ? {} : { planApprovals: [planDocument] }) };
 }
 function usage(policy: M5ControlPolicyDocument, decision: M5ControlDecisionDocument, result: Awaited<ReturnType<typeof runBoundedWorker>>["result"], mode: GoalMode, role: BoundedWorkerRoute["logicalRole"]): M5UsageEvidenceDocument {
-  const value = result.actual_usage; const measure = (dimension: M5UsageEvidenceDocument["measurements"][number]["dimension"], amount: number | null, basis: M5UsageEvidenceDocument["measurements"][number]["basis"], enforcement: M5UsageEvidenceDocument["measurements"][number]["enforcement_class"]) => ({ dimension, amount, basis, enforcement_class: enforcement });
-  return identifyContractDocument("pi_gacw_m5_usage_evidence_v0", { schema_id: "pi_gacw_m5_usage_evidence_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", run_id: RUN_ID, policy_content_sha256: policy.content_sha256, originating_state_content_sha256: decision.current_state_content_sha256,
-    operation_id: decision.operation_id!, operation_kind: "WORKER_INVOCATION", execution_mode: mode, logical_role: role, reservation_decision_content_sha256: decision.content_sha256, source_layer: "CONTROLLER", source_kind: "BOUNDED_WORKER_RESULT", source_record_content_sha256: result.content_sha256,
-    measurements: [measure("WORKER_INVOCATION", value.worker_invocations, "VALIDATED", "HARD_ENFORCEABLE"), measure("TOOL_CALL", value.m4_tool_calls, "VALIDATED", "HARD_ENFORCEABLE"), measure("MODEL_TURN", value.model_turns, value.model_turns === null ? "UNAVAILABLE" : "OBSERVED", value.model_turns === null ? "UNAVAILABLE" : "SOFT_ENFORCEABLE"), measure("PROVIDER_REQUEST", value.provider_requests, value.provider_requests === null ? "UNAVAILABLE" : "OBSERVED", value.provider_requests === null ? "UNAVAILABLE" : "OBSERVABLE_ONLY"), measure("INPUT_TOKEN", value.input_tokens, value.input_tokens === null ? "UNAVAILABLE" : "OBSERVED", value.input_tokens === null ? "UNAVAILABLE" : "SOFT_ENFORCEABLE"), measure("OUTPUT_TOKEN", value.output_tokens, value.output_tokens === null ? "UNAVAILABLE" : "OBSERVED", value.output_tokens === null ? "UNAVAILABLE" : "SOFT_ENFORCEABLE"), measure("COST_MICROUSD", value.cost_microusd, value.cost_microusd === null ? "UNAVAILABLE" : "OBSERVED", value.cost_microusd === null ? "UNAVAILABLE" : "SOFT_ENFORCEABLE"), measure("WALL_TIME_MS", value.wall_time_ms, "OBSERVED", "SOFT_ENFORCEABLE")], disposition: "COMPLETED", duration_ms: value.wall_time_ms }) as M5UsageEvidenceDocument;
+  // Delegates to the extracted shared builder; identity must stay byte-identical for resumed-admission replay.
+  return buildBoundedWorkerUsageEvidence({ runId: RUN_ID, policy, decision, executionMode: mode, logicalRole: role, result });
 }
-
 type BoundedWorkerRunner = typeof runBoundedWorker;
 
 interface ResolvedWorkerInvocation {

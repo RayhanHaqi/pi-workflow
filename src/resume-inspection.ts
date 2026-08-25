@@ -80,7 +80,8 @@ function baselineForState(state: WorkflowState, records: Awaited<ReturnType<type
       approval.content_sha256 === state.identities.baseline_approval_sha256 && approval.baseline_runtime_content_sha256 === entry.content_sha256));
 }
 
-function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3RepositoryStateTokenDocument | null {
+/** Established M3 token-chain semantics: the unique authoritative chain tip, or null when ambiguous. */
+export function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3RepositoryStateTokenDocument | null {
   const predecessors = new Set(tokens.map((token) => token.prior_token_content_sha256).filter((value): value is string => value !== null));
   const tips = tokens.filter((token) => !predecessors.has(token.content_sha256));
   return tips.length === 1 ? tips[0]! : null;
@@ -132,24 +133,73 @@ function classificationOf(classifications: readonly ManagedRecordClassification[
   return classifications.find((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest)?.classification ?? null;
 }
 
+/** Worker records bound to exactly one logical operation identity (CURRENT-operation scope, never run-global history). */
+export function currentOperationWorkerRecords(
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  operationId: string,
+): { readonly invocations: typeof records.boundedWorkerInvocations; readonly results: typeof records.boundedWorkerResults } {
+  const invocations = records.boundedWorkerInvocations.filter((invocation) => invocation.operation_id === operationId);
+  const invocationShas = new Set(invocations.map((invocation) => invocation.content_sha256));
+  const results = records.boundedWorkerResults.filter((result) => invocationShas.has(result.invocation_content_sha256));
+  return { invocations, results };
+}
+
+/**
+ * Settled historical authority proof for every reservation/worker operation OUTSIDE the current decision set:
+ * authoritative invocation/result pairs with certain cleanup, no orphans, no unknown outcomes, and each
+ * non-current reservation carrying its completed outcome evidence. Legacy M6 evidence always refuses.
+ */
+function historicalOperationsSettled(
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+  currentDecisionShas: ReadonlySet<string>,
+): boolean {
+  if (classifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" || entry.object.kind === "M6_WORKER_RESULT")) return false;
+  if (records.boundedWorkerInvocations.some((invocation) => !authoritative(classifications, "BOUNDED_WORKER_INVOCATION", invocation.content_sha256))) return false;
+  if (records.boundedWorkerResults.some((result) => !authoritative(classifications, "BOUNDED_WORKER_RESULT", result.content_sha256))) return false;
+  for (const invocation of records.boundedWorkerInvocations) {
+    const results = records.boundedWorkerResults.filter((result) => result.invocation_content_sha256 === invocation.content_sha256);
+    if (results.length !== 1 || !results[0]!.cleanup_certain) return false;
+  }
+  for (const result of records.boundedWorkerResults) {
+    if (records.boundedWorkerInvocations.filter((invocation) => invocation.content_sha256 === result.invocation_content_sha256).length !== 1) return false;
+  }
+  for (const decision of records.decisions) {
+    if (decision.reservation === null || currentDecisionShas.has(decision.content_sha256)) continue;
+    if (!authoritative(classifications, "M5_CONTROL_DECISION", decision.content_sha256) || decision.reservation.status === "OUTCOME_UNCERTAIN") return false;
+    const invocations = records.boundedWorkerInvocations.filter((entry) => entry.m5_reservation_decision_content_sha256 === decision.content_sha256);
+    if (invocations.length !== 1 || records.boundedWorkerResults.filter((entry) => entry.invocation_content_sha256 === invocations[0]!.content_sha256).length !== 1) return false;
+  }
+  return true;
+}
+
 function staticWorkDecisionCandidateList(
   state: WorkflowState,
   policy: ReducerPolicy,
   records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
 ): readonly M5ControlDecisionDocument[] {
-  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id === null || records.boundedWorkerInvocations.length !== 0 || records.boundedWorkerResults.length !== 0) return [];
+  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id === null) return [];
   const task = state.tasks.find((entry) => entry.task_id === state.active_task_id);
   const frozenTask = policy.tasks.find((entry) => entry.task_id === state.active_task_id);
   const m5Policy = resolveExactStaticM5Policy(state, records);
   if (task === undefined || frozenTask === undefined || m5Policy === null) return [];
   const operationId = staticLeafOperationId(task.task_id);
   const transitionId = staticLeafTransitionId(operationId);
-  return records.decisions.filter((decision) => decision.intent === "AUTHORIZE_WORK" && decision.outcome === "AUTHORIZE" &&
+  // Provider-safety boundary is CURRENT-operation scoped, never run-global history: any matching bounded
+  // invocation or result proves the provider boundary may already be crossed for this exact operation.
+  const current = currentOperationWorkerRecords(records, operationId);
+  if (current.invocations.length !== 0 || current.results.length !== 0) return [];
+  // FIRST_ATTEMPT_ONLY: any candidate is the attempt-1 operation for the selected task; historical
+  // settled predecessor leaves are valid and must not block the next first-attempt leaf.
+  const candidates = records.decisions.filter((decision) => decision.intent === "AUTHORIZE_WORK" && decision.outcome === "AUTHORIZE" &&
     decision.operation_id === operationId && decision.transition_id === transitionId && decision.policy_content_sha256 === m5Policy.content_sha256 &&
     decision.reducer_policy_content_sha256 === state.frozen_policy_content_sha256 &&
     decision.transition_event?.event_type === "START_LEAF_ATTEMPT" && decision.reservation?.status === "ACTIVE" &&
     decision.reservation.future_operation_id === operationId && decision.reservation.reserved_policy_content_sha256 === decision.policy_content_sha256 &&
     decision.reservation.reserved_route === "STATIC_APPROVED_DAG");
+  if (!historicalOperationsSettled(records, classifications, new Set(candidates.map((decision) => decision.content_sha256)))) return [];
+  return candidates;
 }
 
 /** Package-internal exact pre-provider AUTHORIZE_WORK decision match under a required managed-record classification. */
@@ -160,10 +210,9 @@ export function exactStaticWorkDecision(
   classifications: readonly ManagedRecordClassification[],
   requiredClassification: "UNREFERENCED_MANAGED_RECORD" | "AUTHORITATIVE_MANAGED_RECORD",
 ): M5ControlDecisionDocument | null {
-  if (classifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" || entry.object.kind === "M6_WORKER_RESULT")) return null;
-  const candidates = staticWorkDecisionCandidateList(state, policy, records).filter((decision) =>
+  const candidates = staticWorkDecisionCandidateList(state, policy, records, classifications).filter((decision) =>
     classificationOf(classifications, "M5_CONTROL_DECISION", decision.content_sha256) === requiredClassification);
-  if (candidates.length !== 1 || records.decisions.filter((entry) => entry.reservation !== null).length !== 1) return null;
+  if (candidates.length !== 1) return null;
   return candidates[0]!;
 }
 
@@ -174,8 +223,7 @@ export function staticWorkDecisionCandidates(
   records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
   classifications: readonly ManagedRecordClassification[],
 ): readonly M5ControlDecisionDocument[] {
-  if (classifications.some((entry) => entry.object.kind === "M6_WORKER_INVOCATION" || entry.object.kind === "M6_WORKER_RESULT")) return [];
-  return staticWorkDecisionCandidateList(state, policy, records);
+  return staticWorkDecisionCandidateList(state, policy, records, classifications);
 }
 
 export function deriveStaticDagPreProviderResumePoint(

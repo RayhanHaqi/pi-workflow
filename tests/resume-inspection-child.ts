@@ -12,7 +12,7 @@ import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type
 
 const execFileAsync = promisify(execFile);
 const mode = process.argv[2];
-if (process.send === undefined || !["READY", "DELTA", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT"].includes(mode ?? "")) {
+if (process.send === undefined || !["READY", "DELTA", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT", "WINDOW_A_B", "WINDOW_B_B", "WORKER_B", "RESULT_B"].includes(mode ?? "")) {
   throw new Error("resume-inspection-child requires a fixture mode and IPC");
 }
 
@@ -36,16 +36,20 @@ async function main(): Promise<void> {
     const entries = await readdir(parent); if (entries.length !== 1) throw new Error("retained workspace is unavailable");
     announced = true; process.send?.({ type: "PAUSED", root: join(parent, entries[0]!), repository: root });
   };
+  // The factory runs once per bounded worker execution; the counter is therefore run-scoped, not call-local.
+  let executions = 0;
   configureBoundedWorkerFauxRuntimeForTests(() => {
-    let calls = 0;
+    const call = ++executions;
     return { async execute({ tools }) {
-      const path = ["a.txt", "b.txt"][calls++]!;
-      if (mode === "WORKER" && calls === 1) { await announce(); await new Promise<void>(() => {}); }
+      const path = ["a.txt", "b.txt"][call - 1]!;
+      if (mode === "WORKER" && call === 1) { await announce(); await new Promise<void>(() => {}); }
+      // WORKER_B: leaf a completes normally (settled history); leaf b's invocation persists without a result.
+      if (mode === "WORKER_B" && call === 2) { await announce(); await new Promise<void>(() => {}); }
       await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
       tools.submitReport(`wrote ${path}`); return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
     } };
   });
-  configureM5PersistenceTestHooks({ checkpoint: async (checkpoint) => {
+  configureM5PersistenceTestHooks({ checkpoint: async (checkpoint, detail) => {
     if (announced) return;
     const entries = await readdir(parent); if (entries.length !== 1) return;
     const stateRoot = join(parent, entries[0]!, "state"); const inspection = await inspectRunStorage({ stateRoot, runId: "pre-m8-bounded" }); const state = inspection.workflowState;
@@ -67,6 +71,18 @@ async function main(): Promise<void> {
       // Result exists while the reducer remains LEAF_RUNNING: the exact refusal seam for existing worker evidence.
       const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
       pause = records.boundedWorkerInvocations.length === 1 && records.boundedWorkerResults.length === 1;
+    } else if (mode === "WINDOW_A_B" && checkpoint === "AFTER_DECISION_PUBLICATION" && state?.phase === "LEAF_FAST_PREFLIGHT") {
+      // Two-leaf WINDOW A: leaf a fully settled; leaf b's AUTHORIZE_WORK decision durable, transition uncommitted.
+      const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
+      pause = records.decisions.some((decision) => decision.intent === "AUTHORIZE_WORK" && decision.operation_id === "static-leaf-b-attempt-1");
+    } else if (mode === "WINDOW_B_B" && checkpoint === "AFTER_COMMITTED_STATE_BEFORE_RESPONSE" && state?.phase === "LEAF_RUNNING") {
+      // Two-leaf WINDOW B: leaf b's START_LEAF_ATTEMPT committed and classified, response lost.
+      const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
+      pause = records.decisions.some((decision) => decision.content_sha256 === detail && decision.operation_id === "static-leaf-b-attempt-1");
+    } else if (mode === "RESULT_B" && checkpoint === "BEFORE_TRANSITION_EVIDENCE_PUBLICATION" && state?.phase === "LEAF_RUNNING") {
+      // Leaf b's result exists while the reducer remains LEAF_RUNNING: current-operation refusal seam.
+      const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
+      pause = records.boundedWorkerInvocations.length === 2 && records.boundedWorkerResults.length === 2;
     }
     if (!pause) return;
     await announce(); await new Promise<void>(() => {});

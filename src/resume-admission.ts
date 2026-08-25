@@ -1,5 +1,6 @@
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/kernel.js";
+import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
 import type { M5AuthoritativeSources } from "./control/types.js";
 import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { commitTransition, inspectRunStorage } from "./persistence/index.js";
@@ -11,6 +12,7 @@ import {
   type WorktreeLockHandle,
 } from "./repository/index.js";
 import {
+  currentOperationWorkerRecords,
   deriveStaticDagPreProviderResumePoint,
   deriveStaticDagResumePoint,
   exactStaticWorkDecision,
@@ -21,6 +23,7 @@ import {
   staticLeafOperationId,
   staticLeafTransitionId,
   staticWorkDecisionCandidates,
+  tokenTip,
   type ResumeInspectionInput,
   type ResumeRefusalReason,
 } from "./resume-inspection.js";
@@ -400,16 +403,19 @@ function rehydrateStaticLeafAuthority(
     ? uniqueBy(records.baselines, (entry) => entry.content_sha256, policy.baseline_approval_sha256)
     : uniqueBy(records.baselines, (entry) => entry.content_sha256, approval.baseline_runtime_content_sha256);
   if (baseline === null || baseline.repository.content_sha256 !== policy.repository_identity_content_sha256 || baseline.repository.worktree_key !== policy.worktree_key) return null;
-  const stateTokens = records.stateTokens.filter((entry) => entry.run_id === policy.run_id &&
+  // Multi-leaf runs legitimately retain multiple authoritative M3 tokens; the required authority is the
+  // exact unique CURRENT tip of this run/repository/worktree/scope's authoritative token chain.
+  const scopeTokens = records.stateTokens.filter((entry) => entry.run_id === policy.run_id &&
     entry.repository_identity_content_sha256 === policy.repository_identity_content_sha256 && entry.worktree_key === policy.worktree_key &&
     entry.task_scope_identity === policy.scope_sha256 && classifications.some((classification) => classification.object.kind === "M3_REPOSITORY_STATE_TOKEN" &&
       classification.object.contentSha256 === entry.content_sha256 && classification.classification === "AUTHORITATIVE_MANAGED_RECORD"));
+  const stateToken = tokenTip(scopeTokens);
   const selectedTasks = records.tasks.filter((entry) => state.active_task_id !== null && entry.task_id === state.active_task_id);
-  if (stateTokens.length !== 1 || selectedTasks.length !== 1 || state.active_task_id === null) return null;
+  if (stateToken === null || selectedTasks.length !== 1 || state.active_task_id === null) return null;
   return Object.freeze({
     policy, reducerPolicy: reducerPolicies[0]!, repositoryIdentity: baseline.repository, contract, budget, routeMap, routeMapApproval,
     toolPolicy: toolPolicyCandidates[0]!, commandCatalog: catalogCandidates[0]!, planApprovals, taskGraphs, tasks: records.tasks,
-    selectedTask: selectedTasks[0]!, stateToken: stateTokens[0]!,
+    selectedTask: selectedTasks[0]!, stateToken,
   });
 }
 
@@ -467,14 +473,20 @@ export async function authorizeDeterministicResumedLeafWork(resume: Deterministi
     if (livePreProvider !== resume.binding.resume_point && livePlain !== resume.binding.resume_point) return refused("RESUME_REFUSED_STATE_STORE");
     const runningAlready = state.phase === "LEAF_RUNNING";
     const candidates = staticWorkDecisionCandidates(state, authority.reducerPolicy, records, current.managedRecordClassifications);
+    // Run-global history snapshots: historical settled evidence is allowed to persist unchanged;
+    // only CURRENT-operation deltas are constrained by this admission.
+    const reservationsBefore = records.decisions.filter((entry) => entry.reservation !== null).length;
+    const invocationsBefore = records.boundedWorkerInvocations.length;
+    const resultsBefore = records.boundedWorkerResults.length;
     if (runningAlready) {
       // WINDOW B only: exactly the committed authoritative reservation may be replayed.
       if (livePreProvider !== `STATIC_DAG_INVOKE_RESERVED_LEAF:${taskId}` || candidates.length !== 1 ||
         exactStaticWorkDecision(state, authority.reducerPolicy, records, current.managedRecordClassifications, "AUTHORITATIVE_MANAGED_RECORD") === null) {
         return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
       }
-    } else if (candidates.length > 1 || records.decisions.filter((entry) => entry.reservation !== null).length > 1) {
-      // Contradictory authority: multiple matching decisions or conflicting reservations refuse.
+    } else if (candidates.length > 1) {
+      // Contradictory CURRENT-operation authority: multiple matching decisions refuse.
+      // Settled predecessor-leaf reservations are valid history, not contradictions.
       return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
     }
     const operationId = staticLeafOperationId(taskId);
@@ -487,6 +499,22 @@ export async function authorizeDeterministicResumedLeafWork(resume: Deterministi
     if (expectedRevision === null || expectedPointer === null || expectedPointer === undefined || expectedWorkflow === null) {
       return refused("RESUME_REFUSED_STATE_STORE");
     }
+    // Production binds every accumulated usage-evidence record into the next leaf's AUTHORIZE_WORK request.
+    // Usage records are published by the kernel call that consumes them, so a settled predecessor leaf's
+    // reconciliation evidence may not be durable yet at this boundary; reconstruct it exactly from its durable
+    // reservation+result pair (byte-identical builder; the kernel's exact binding validation fails closed).
+    const candidateShas = new Set(candidates.map((decision) => decision.content_sha256));
+    const reconstructedUsage = records.decisions
+      .filter((decision) => decision.reservation !== null && !candidateShas.has(decision.content_sha256) &&
+        !records.usage.some((entry) => entry.reservation_decision_content_sha256 === decision.content_sha256))
+      .map((decision) => {
+        const invocation = records.boundedWorkerInvocations.find((entry) => entry.m5_reservation_decision_content_sha256 === decision.content_sha256);
+        const result = invocation === undefined ? undefined : records.boundedWorkerResults.find((entry) => entry.invocation_content_sha256 === invocation.content_sha256);
+        if (invocation === undefined || result === undefined) return null;
+        return buildBoundedWorkerUsageEvidence({ runId: resume.binding.run_id, policy: authority.policy, decision,
+          executionMode: state.execution_mode, logicalRole: decision.reservation!.logical_role, result });
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
     const gitBefore = await captureGitState(authority.repositoryIdentity);
     const authoritativeSources: M5AuthoritativeSources = {
       boundedStaticPreM8: true, contract: authority.contract, budget: authority.budget, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval,
@@ -503,7 +531,9 @@ export async function authorizeDeterministicResumedLeafWork(resume: Deterministi
       result = await kernel.evaluateControlDecision({
         intent: "AUTHORIZE_WORK", expectedRevision, expectedStatePointerContentSha256: expectedPointer as Sha256Digest,
         expectedWorkflowStateContentSha256: expectedWorkflow as Sha256Digest, transitionId, operationId,
-        processMetadata: resumeProcessMetadata(), authoritativeSources, usageEvidence: [],
+        processMetadata: resumeProcessMetadata(), authoritativeSources,
+        // Exact production slice semantics: persisted usage plus any not-yet-durable settled-leaf evidence.
+        usageEvidence: [...reconstructedUsage, ...records.usage],
         availableLogicalRoles: resumedAvailableLogicalRoles(authority.policy),
       });
     } catch {
@@ -536,9 +566,14 @@ export async function authorizeDeterministicResumedLeafWork(resume: Deterministi
     }
     const recordsAfter = await readM5ManagedRecords(location);
     const afterCandidates = staticWorkDecisionCandidates(after, authority.reducerPolicy, recordsAfter, successor.managedRecordClassifications);
+    const afterCurrent = currentOperationWorkerRecords(recordsAfter, operationId);
+    // Clean admission adds one CURRENT-operation reservation; a Window A redrive reuses the already-published
+    // decision (delta 0); a Window B replay commits nothing new (delta 0).
+    const expectedReservationDelta = runningAlready || candidates.length === 1 ? 0 : 1;
     if (afterCandidates.length !== 1 || afterCandidates[0]!.content_sha256 !== result.decision.content_sha256 ||
-      recordsAfter.boundedWorkerInvocations.length !== 0 || recordsAfter.boundedWorkerResults.length !== 0 ||
-      recordsAfter.decisions.filter((entry) => entry.reservation !== null).length !== 1 ||
+      afterCurrent.invocations.length !== 0 || afterCurrent.results.length !== 0 ||
+      recordsAfter.boundedWorkerInvocations.length !== invocationsBefore || recordsAfter.boundedWorkerResults.length !== resultsBefore ||
+      recordsAfter.decisions.filter((entry) => entry.reservation !== null).length !== reservationsBefore + expectedReservationDelta ||
       classificationOf(successor.managedRecordClassifications, "M5_CONTROL_DECISION", result.decision.content_sha256) !== "AUTHORITATIVE_MANAGED_RECORD") {
       return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
     }

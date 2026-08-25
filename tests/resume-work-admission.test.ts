@@ -22,15 +22,17 @@ import {
   releaseDeterministicResumeWorkAdmission,
 } from "../src/resume-admission.js";
 import {
+  currentOperationWorkerRecords,
   deriveStaticDagPreProviderResumePoint,
   inspectDeterministicResumeEligibility,
   RESUMED_PRODUCT_LOGICAL_ROLES,
   resumedAvailableLogicalRoles,
+  staticLeafOperationId,
   staticWorkDecisionCandidates,
 } from "../src/resume-inspection.js";
 import { PRODUCT_LOGICAL_ROLES } from "../src/workflow-controller.js";
 
-type FixtureMode = "READY" | "WINDOW_A" | "WINDOW_B" | "RESULT" | "WORKER";
+type FixtureMode = "READY" | "WINDOW_A" | "WINDOW_B" | "RESULT" | "WORKER" | "DELTA" | "WINDOW_A_B" | "WINDOW_B_B" | "WORKER_B" | "RESULT_B";
 type ChildFixture = { readonly child: ReturnType<typeof fork>; readonly root: string; readonly repository: string; readonly cleanup: () => Promise<void> };
 
 async function startFixture(mode: FixtureMode): Promise<ChildFixture> {
@@ -393,11 +395,15 @@ test("contradictory authority refuses fail-closed", async () => {
     assert.equal(deriveStaticDagPreProviderResumePoint(state, reducerPolicy, variant((decision) => { decision["operation_id"] = "static-leaf-b-attempt-1"; }), inspection.managedRecordClassifications, inspection.transitionCommit!), null);
     // Wrong transition event refuses.
     assert.equal(deriveStaticDagPreProviderResumePoint(state, reducerPolicy, variant((decision) => { decision["transition_event"] = { ...(decision["transition_event"] as Record<string, unknown>), event_type: "START_PLAN" }; }), inspection.managedRecordClassifications, inspection.transitionCommit!), null);
-    // Multiple matching decisions refuse: original plus an identical-authority clone.
+    // Multiple matching decisions refuse: original plus a like-classified identical-authority clone.
     const clone = structuredClone(original) as unknown as Record<string, unknown>; clone["content_sha256"] = "sha256:" + "b".repeat(64);
+    const duplicatedClassifications = [
+      ...inspection.managedRecordClassifications,
+      { object: { kind: "M5_CONTROL_DECISION", contentSha256: clone["content_sha256"] as string }, classification: "UNREFERENCED_MANAGED_RECORD" },
+    ] as typeof inspection.managedRecordClassifications;
     const duplicated = Object.freeze({ ...records, decisions: [...records.decisions, clone as unknown as typeof original] }) as Awaited<ReturnType<typeof readM5ManagedRecords>>;
-    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, duplicated, inspection.managedRecordClassifications).length, 2);
-    assert.equal(deriveStaticDagPreProviderResumePoint(state, reducerPolicy, duplicated, inspection.managedRecordClassifications, inspection.transitionCommit!), null);
+    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, duplicated, duplicatedClassifications).length, 2);
+    assert.equal(deriveStaticDagPreProviderResumePoint(state, reducerPolicy, duplicated, duplicatedClassifications, inspection.transitionCommit!), null);
     // Conflicting extra reservation refuses.
     const conflicting = variant((decision) => { decision["content_sha256"] = "sha256:" + "c".repeat(64); decision["operation_id"] = "static-leaf-other-attempt-1"; decision["reservation"] = { ...(decision["reservation"] as Record<string, unknown>), future_operation_id: "static-leaf-other-attempt-1" }; });
     assert.equal(deriveStaticDagPreProviderResumePoint(state, reducerPolicy, conflicting, inspection.managedRecordClassifications, inspection.transitionCommit!), null);
@@ -411,6 +417,211 @@ test("contradictory authority refuses fail-closed", async () => {
     if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
     await fixture.cleanup();
   }
+});
+
+test("two-leaf history: settled leaf a admits later first-attempt leaf b cleanly", async () => {
+  const fixture = await interruptFixture("DELTA");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  let work: Awaited<ReturnType<typeof authorizeDeterministicResumedLeafWork>> | undefined;
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:b");
+    const history = await readM5ManagedRecords(LOCATION(fixture.root));
+    // A_PASS_HISTORY_RETAINED: real product evidence for a (reservation + invocation + result) survives.
+    const aDecision = history.decisions.find((decision) => decision.operation_id === "static-leaf-a-attempt-1");
+    assert.ok(aDecision !== undefined && aDecision.reservation !== null);
+    assert.equal(history.boundedWorkerInvocations.filter((invocation) => invocation.operation_id === "static-leaf-a-attempt-1").length, 1);
+    assert.equal(history.boundedWorkerResults.length, 1);
+    const stateBefore = (await inspectRunStorage(LOCATION(fixture.root))).workflowState!;
+    assert.equal(stateBefore.counters.worker_invocations.terra_executor, 1);
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    work = await authorizeDeterministicResumedLeafWork(await activateDeterministicResumeAdmission(admission));
+    admission = undefined;
+    assert.equal(work.binding.operation_id, "static-leaf-b-attempt-1");
+    const successor = await inspectRunStorage(LOCATION(fixture.root));
+    const state = successor.workflowState!;
+    assert.equal(state.phase, "LEAF_RUNNING");
+    assert.equal(state.active_task_id, "b");
+    const b = state.tasks.find((entry) => entry.task_id === "b")!;
+    assert.equal(b.status, "RUNNING"); assert.equal(b.attempts, 1);
+    // Accounting: a's counter contribution unchanged; b contributes exactly +1.
+    assert.equal(state.counters.worker_invocations.terra_executor, stateBefore.counters.worker_invocations.terra_executor + 1);
+    // Historical records intact; no CURRENT-operation worker evidence created.
+    const after = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(canonicalize(after.decisions.find((decision) => decision.operation_id === "static-leaf-a-attempt-1")), canonicalize(aDecision));
+    assert.equal(after.boundedWorkerInvocations.length, 1);
+    assert.equal(after.boundedWorkerResults.length, 1);
+    assert.equal(currentOperationWorkerRecords(after, "static-leaf-b-attempt-1").invocations.length, 0);
+    assert.equal(after.decisions.filter((decision) => decision.reservation !== null).length, 2);
+    await releaseDeterministicResumeWorkAdmission(work); work = undefined;
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    if (work !== undefined) await releaseDeterministicResumeWorkAdmission(work).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+test("two-leaf WINDOW A redrives the exact b decision despite retained a history", async () => {
+  const fixture = await interruptFixture("WINDOW_A_B");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  let work: Awaited<ReturnType<typeof authorizeDeterministicResumedLeafWork>> | undefined;
+  try {
+    assert.deepEqual(await eventuallyResumable(fixture.root), { classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_FAST_PREFLIGHT", resume_point: "STATIC_DAG_REDRIVE_WORK_ADMISSION:b", reason: null });
+    const before = await readM5ManagedRecords(LOCATION(fixture.root));
+    const bSha = before.decisions.find((decision) => decision.operation_id === "static-leaf-b-attempt-1")!.content_sha256;
+    const aDecision = before.decisions.find((decision) => decision.operation_id === "static-leaf-a-attempt-1")!;
+    assert.equal(await classificationOf(fixture.root, bSha), "UNREFERENCED_MANAGED_RECORD");
+    assert.equal(before.boundedWorkerInvocations.length, 1);
+    assert.equal(before.boundedWorkerResults.length, 1);
+    const priorRevision = (await inspectRunStorage(LOCATION(fixture.root))).revision!;
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    work = await authorizeDeterministicResumedLeafWork(admission); admission = undefined;
+    assert.equal(work.binding.m5_decision_content_sha256, bSha);
+    const successor = await inspectRunStorage(LOCATION(fixture.root));
+    assert.equal(successor.revision, priorRevision + 1);
+    assert.equal(successor.workflowState!.phase, "LEAF_RUNNING");
+    assert.equal(successor.workflowState!.tasks.find((entry) => entry.task_id === "b")?.attempts, 1);
+    const after = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(after.decisions.filter((decision) => decision.reservation !== null).length, 2);
+    assert.equal(after.decisions.filter((decision) => decision.operation_id === "static-leaf-b-attempt-1").length, 1);
+    assert.equal(canonicalize(after.decisions.find((decision) => decision.operation_id === "static-leaf-a-attempt-1")), canonicalize(aDecision));
+    assert.equal(after.boundedWorkerInvocations.length, 1);
+    assert.equal(after.boundedWorkerResults.length, 1);
+    await releaseDeterministicResumeWorkAdmission(work); work = undefined;
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    if (work !== undefined) await releaseDeterministicResumeWorkAdmission(work).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+test("two-leaf WINDOW B recovers the exact reserved b without a second increment", async () => {
+  const fixture = await interruptFixture("WINDOW_B_B");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  let work: Awaited<ReturnType<typeof authorizeDeterministicResumedLeafWork>> | undefined;
+  try {
+    assert.deepEqual(await eventuallyResumable(fixture.root), { classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_RUNNING", resume_point: "STATIC_DAG_INVOKE_RESERVED_LEAF:b", reason: null });
+    const before = await inspectRunStorage(LOCATION(fixture.root));
+    const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
+    const bSha = recordsBefore.decisions.find((decision) => decision.operation_id === "static-leaf-b-attempt-1")!.content_sha256;
+    assert.equal(recordsBefore.boundedWorkerInvocations.filter((invocation) => invocation.operation_id === "static-leaf-b-attempt-1").length, 0);
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    work = await authorizeDeterministicResumedLeafWork(admission); admission = undefined;
+    assert.equal(work.binding.m5_decision_content_sha256, bSha);
+    const after = await inspectRunStorage(LOCATION(fixture.root));
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.transitionCommit!.content_sha256, before.transitionCommit!.content_sha256);
+    assert.equal(after.workflowState!.counters.worker_invocations.terra_executor, 2);
+    assert.equal(after.workflowState!.tasks.find((entry) => entry.task_id === "b")?.attempts, 1);
+    const recordsAfter = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(recordsAfter.decisions.filter((decision) => decision.reservation !== null).length, 2);
+    assert.equal(currentOperationWorkerRecords(recordsAfter, "static-leaf-b-attempt-1").invocations.length, 0);
+    await releaseDeterministicResumeWorkAdmission(work); work = undefined;
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    if (work !== undefined) await releaseDeterministicResumeWorkAdmission(work).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+test("current b invocation refuses while historical a invocation remains allowed", async () => {
+  const fixture = await interruptFixture("WORKER_B");
+  try {
+    const report = await eventuallyRefused(fixture.root);
+    assert.equal(report.reason, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    const records = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(records.boundedWorkerInvocations.filter((invocation) => invocation.operation_id === "static-leaf-a-attempt-1").length, 1);
+    assert.equal(records.boundedWorkerInvocations.filter((invocation) => invocation.operation_id === "static-leaf-b-attempt-1").length, 1);
+    assert.equal(records.boundedWorkerResults.length, 1);
+    await rejectsCode(inspectAndAcquireWithoutLock(fixture.root), "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    const reread = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(reread.boundedWorkerInvocations.length, 2);
+  } finally { await fixture.cleanup(); }
+});
+
+test("current b result refuses and preserves its exact bytes", async () => {
+  const fixture = await interruptFixture("RESULT_B");
+  try {
+    const report = await eventuallyRefused(fixture.root);
+    assert.equal(report.classification, "RESUME_REFUSED");
+    const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(recordsBefore.boundedWorkerInvocations.length, 2);
+    assert.equal(recordsBefore.boundedWorkerResults.length, 2);
+    await assert.rejects(inspectAndAcquireWithoutLock(fixture.root));
+    const recordsAfter = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(canonicalize(recordsAfter.boundedWorkerResults), canonicalize(recordsBefore.boundedWorkerResults));
+  } finally { await fixture.cleanup(); }
+});
+
+test("unsettled historical operation refuses the later leaf fail-closed", async () => {
+  const fixture = await interruptFixture("WINDOW_A_B");
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_REDRIVE_WORK_ADMISSION:b");
+    const inspection = await inspectRunStorage(LOCATION(fixture.root));
+    const records = await readM5ManagedRecords(LOCATION(fixture.root));
+    const state = inspection.workflowState!;
+    const reducerPolicy = records.reducerPolicies.find((entry) => entry.content_sha256 === state.frozen_policy_content_sha256)!;
+    const classifications = inspection.managedRecordClassifications;
+    // Settled history alone is allowed.
+    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, records, classifications).length, 1);
+    // Unknown-outcome historical reservation refuses.
+    const uncertainDecisions = records.decisions.map((decision) =>
+      decision.operation_id === staticLeafOperationId("a")
+        ? { ...decision, reservation: { ...decision.reservation!, status: "OUTCOME_UNCERTAIN" as const } }
+        : decision);
+    const uncertain = { ...records, decisions: uncertainDecisions } as unknown as Awaited<ReturnType<typeof readM5ManagedRecords>>;
+    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, uncertain, classifications).length, 0);
+    // Historical invocation without matching result refuses.
+    const aInvocation = records.boundedWorkerInvocations.find((invocation) => invocation.operation_id === staticLeafOperationId("a"))!;
+    const missingResult = {
+      ...records,
+      boundedWorkerResults: records.boundedWorkerResults.filter((result) => result.invocation_content_sha256 !== aInvocation.content_sha256),
+    } as unknown as Awaited<ReturnType<typeof readM5ManagedRecords>>;
+    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, missingResult, classifications).length, 0);
+    // Uncertain cleanup refuses.
+    const dirtyResults = records.boundedWorkerResults.map((result) => ({ ...result, cleanup_certain: false }));
+    const dirtyCleanup = { ...records, boundedWorkerResults: dirtyResults } as unknown as Awaited<ReturnType<typeof readM5ManagedRecords>>;
+    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, dirtyCleanup, classifications).length, 0);
+  } finally { await fixture.cleanup(); }
+});
+
+test("contradictory CURRENT b decisions refuse while settled a reservations are not contradictions", async () => {
+  const fixture = await interruptFixture("WINDOW_A_B");
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_REDRIVE_WORK_ADMISSION:b");
+    const inspection = await inspectRunStorage(LOCATION(fixture.root));
+    const records = await readM5ManagedRecords(LOCATION(fixture.root));
+    const state = inspection.workflowState!;
+    const reducerPolicy = records.reducerPolicies.find((entry) => entry.content_sha256 === state.frozen_policy_content_sha256)!;
+    const classifications = inspection.managedRecordClassifications;
+    const original = staticWorkDecisionCandidates(state, reducerPolicy, records, classifications)[0]!;
+    // A settled reservation from task a is NOT a contradiction: exactly one current candidate exists.
+    assert.equal(original.operation_id, "static-leaf-b-attempt-1");
+    const point = (variantRecords: Awaited<ReturnType<typeof readM5ManagedRecords>>): string | null =>
+      deriveStaticDagPreProviderResumePoint(state, reducerPolicy, variantRecords, classifications, inspection.transitionCommit!);
+    const pointWith = (variantRecords: Awaited<ReturnType<typeof readM5ManagedRecords>>, variantClassifications: typeof classifications): string | null =>
+      deriveStaticDagPreProviderResumePoint(state, reducerPolicy, variantRecords, variantClassifications, inspection.transitionCommit!);
+    // Duplicate matching b decision refuses (both candidates classified like the real orphan decision).
+    const clone = structuredClone(original) as unknown as Record<string, unknown>; clone["content_sha256"] = "sha256:" + "e".repeat(64);
+    const duplicatedClassifications = [
+      ...classifications,
+      { object: { kind: "M5_CONTROL_DECISION", contentSha256: clone["content_sha256"] as string }, classification: "UNREFERENCED_MANAGED_RECORD" },
+    ] as typeof classifications;
+    const duplicated = Object.freeze({ ...records, decisions: [...records.decisions, clone as unknown as typeof original] }) as Awaited<ReturnType<typeof readM5ManagedRecords>>;
+    assert.equal(staticWorkDecisionCandidates(state, reducerPolicy, duplicated, duplicatedClassifications).length, 2);
+    assert.equal(pointWith(duplicated, duplicatedClassifications), null);
+    // Wrong operation id competing at the same current boundary refuses.
+    const wrongId = structuredClone(original) as unknown as Record<string, unknown>;
+    wrongId["content_sha256"] = "sha256:" + "f".repeat(64); wrongId["operation_id"] = "static-leaf-zz-attempt-1";
+    wrongId["reservation"] = { ...(original.reservation as Record<string, unknown>), future_operation_id: "static-leaf-zz-attempt-1" };
+    const wrong = Object.freeze({ ...records, decisions: [...records.decisions, wrongId as unknown as typeof original] }) as Awaited<ReturnType<typeof readM5ManagedRecords>>;
+    assert.equal(point(wrong), null);
+    // Conflicting active UNSETTLED reservation at the current boundary refuses (it cannot prove settlement).
+    const conflict = structuredClone(original) as unknown as Record<string, unknown>;
+    conflict["content_sha256"] = "sha256:" + "9".repeat(64); conflict["operation_id"] = "static-leaf-b2-attempt-1";
+    conflict["reservation"] = { ...(original.reservation as Record<string, unknown>), future_operation_id: "static-leaf-b2-attempt-1" };
+    const conflicting = Object.freeze({ ...records, decisions: [...records.decisions, conflict as unknown as typeof original] }) as Awaited<ReturnType<typeof readM5ManagedRecords>>;
+    assert.equal(point(conflicting), null);
+  } finally { await fixture.cleanup(); }
 });
 
 test("resumed role inventory stays canonically equal to the frozen production inventory", () => {
