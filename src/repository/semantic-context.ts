@@ -19,7 +19,7 @@ import {
   assertM3BaselineRuntimeSemantics,
   m3FingerprintDirtyPaths,
 } from "../persistence/m3-authority.js";
-import { assertEnvironmentProducerSemantics } from "./environment.js";
+import { assertEnvironmentProducerSemantics, assertEnvironmentFingerprintContinuity } from "./environment.js";
 import { decodeUtf8, oneLine, runGitInspection } from "./git-runner.js";
 
 interface TreeEntry {
@@ -274,6 +274,19 @@ export async function assertDurableEnvironmentProducerSemantics(
   } catch (error: unknown) {
     if (error instanceof M3AuthorityValidationError) throw error;
     throw new M3AuthorityValidationError("INVALID", "PREFLIGHT_SOURCE_SEMANTIC_MISMATCH", "preflight environment producer facts are inconsistent");
+  }
+}
+
+/** Exact live-environment continuity for a resume-lock-handover lock generation. */
+export async function assertDurableResumeHandoverEnvironmentSemantics(
+  rootPreflight: M3PreflightDocument,
+  lockDiagnostic: M3LockDiagnosticDocument,
+): Promise<void> {
+  try {
+    await assertEnvironmentFingerprintContinuity(rootPreflight.environment_fingerprint, rootPreflight.repository, lockDiagnostic);
+  } catch (error: unknown) {
+    if (error instanceof M3AuthorityValidationError) throw error;
+    throw new M3AuthorityValidationError("INVALID", "ENVIRONMENT_DRIFT", "resume-lock-handover live environment differs from the frozen root-preflight environment");
   }
 }
 

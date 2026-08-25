@@ -25,6 +25,7 @@ import {
   type M3PreflightDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
+  type M3ResumeLockHandoverDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
   type M4AdmissionRefusalDocument,
@@ -120,6 +121,7 @@ interface RunLayout {
   readonly preflightRecordDirectory: string;
   readonly repositoryStateTokenDirectory: string;
   readonly postflightRecordDirectory: string;
+  readonly resumeLockHandoverRecordDirectory: string;
   readonly retentionRecordDirectory: string;
   readonly secureFilesystemCapabilityDirectory: string;
   readonly sandboxCapabilityDirectory: string;
@@ -161,6 +163,7 @@ interface JsonKindDefinition {
     | "preflightRecordDirectory"
     | "repositoryStateTokenDirectory"
     | "postflightRecordDirectory"
+    | "resumeLockHandoverRecordDirectory"
     | "retentionRecordDirectory"
     | "secureFilesystemCapabilityDirectory"
     | "sandboxCapabilityDirectory"
@@ -198,6 +201,7 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M3_PREFLIGHT", schemaId: "pi_gacw_preflight_v0", directory: "preflightRecordDirectory" },
   { kind: "M3_REPOSITORY_STATE_TOKEN", schemaId: "pi_gacw_repository_state_token_v0", directory: "repositoryStateTokenDirectory" },
   { kind: "M3_POSTFLIGHT", schemaId: "pi_gacw_postflight_v0", directory: "postflightRecordDirectory" },
+  { kind: "M3_RESUME_LOCK_HANDOVER", schemaId: "pi_gacw_resume_lock_handover_v0", directory: "resumeLockHandoverRecordDirectory" },
   { kind: "M3_RETENTION_RESULT", schemaId: "pi_gacw_retention_result_v0", directory: "retentionRecordDirectory" },
   { kind: "M4_SECURE_FS_CAPABILITY", schemaId: "pi_gacw_secure_fs_capability_v0", directory: "secureFilesystemCapabilityDirectory" },
   { kind: "M4_SANDBOX_CAPABILITY", schemaId: "pi_gacw_sandbox_capability_v0", directory: "sandboxCapabilityDirectory" },
@@ -359,6 +363,7 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     preflightRecordDirectory: join(recordsDirectory, "preflights"),
     repositoryStateTokenDirectory: join(recordsDirectory, "repository-state-tokens"),
     postflightRecordDirectory: join(recordsDirectory, "postflights"),
+    resumeLockHandoverRecordDirectory: join(recordsDirectory, "resume-lock-handovers"),
     retentionRecordDirectory: join(recordsDirectory, "retention"),
     secureFilesystemCapabilityDirectory: join(recordsDirectory, "secure-fs-capabilities"),
     sandboxCapabilityDirectory: join(recordsDirectory, "sandbox-capabilities"),
@@ -601,6 +606,7 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.preflightRecordDirectory);
   await ensurePrivateDirectory(layout.repositoryStateTokenDirectory);
   await ensurePrivateDirectory(layout.postflightRecordDirectory);
+  await ensurePrivateDirectory(layout.resumeLockHandoverRecordDirectory);
   await ensurePrivateDirectory(layout.retentionRecordDirectory);
   await ensurePrivateDirectory(layout.secureFilesystemCapabilityDirectory);
   await ensurePrivateDirectory(layout.sandboxCapabilityDirectory);
@@ -1436,6 +1442,7 @@ async function scanLayout(
     "process-assessments",
     "reducer-policies",
     "repository-state-tokens",
+    "resume-lock-handovers",
     "retention",
     "secure-fs-capabilities",
     "sandbox-capabilities",
@@ -1514,6 +1521,7 @@ const M3_MANAGED_KINDS = new Set<StoredObjectKind>([
   "M3_PREFLIGHT",
   "M3_REPOSITORY_STATE_TOKEN",
   "M3_POSTFLIGHT",
+  "M3_RESUME_LOCK_HANDOVER",
   "M3_RETENTION_RESULT",
   "M3_TERMINAL_RETENTION_AUTHORITY",
   "M3_BASELINE_BLOB",
@@ -1563,6 +1571,7 @@ async function classifyManagedRecords(
   const preflights = new Map<string, M3PreflightDocument>();
   const tokens = new Map<string, M3RepositoryStateTokenDocument>();
   const postflights = new Map<string, M3PostflightDocument>();
+  const resumeHandovers = new Map<string, M3ResumeLockHandoverDocument>();
   const results = new Map<string, M3RetentionResultDocument>();
   const terminalAuthorities = new Map<string, M3TerminalRetentionAuthorityDocument | Error>();
   const blobDigests = new Set<string>();
@@ -1600,6 +1609,7 @@ async function classifyManagedRecords(
     else if (object.kind === "M3_PREFLIGHT") preflights.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_REPOSITORY_STATE_TOKEN") tokens.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_POSTFLIGHT") postflights.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M3_RESUME_LOCK_HANDOVER") resumeHandovers.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_RETENTION_RESULT") results.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_BASELINE_BLOB") {
       blobDigests.add(object.contentSha256);
@@ -1648,6 +1658,7 @@ async function classifyManagedRecords(
     preflights,
     tokens,
     postflights,
+    resumeHandovers,
     results,
     terminalAuthorities,
     blobDigests,

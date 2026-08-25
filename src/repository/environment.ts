@@ -64,3 +64,25 @@ export async function assertEnvironmentProducerSemantics(
     }
   }
 }
+
+/**
+ * Exact live-environment continuity across a lock-generation change. The
+ * environment fingerprint deliberately contains no generation-specific PID,
+ * acquired_at, or acquisition nonce, so exact equality with a frozen root
+ * preflight is meaningful for a resumed process holding a fresh acquisition.
+ */
+export async function assertEnvironmentFingerprintContinuity(
+  expected: M3EnvironmentFingerprint,
+  repository: M3RepositoryIdentityDocument,
+  lockDiagnostic: M3LockDiagnosticDocument,
+): Promise<void> {
+  const actual = await currentEnvironmentFingerprint(repository, lockDiagnostic);
+  for (const key of [
+    "node_version", "git_version", "python_version", "controller_version",
+    "node_path", "git_path", "python_path", "guardian_helper_path", "guardian_helper_sha256",
+  ] as const) {
+    if (expected[key] !== actual[key]) {
+      throw new RepositoryGuardError("ENVIRONMENT_DRIFT", `Live environment field ${key} differs from the frozen root-preflight environment`);
+    }
+  }
+}

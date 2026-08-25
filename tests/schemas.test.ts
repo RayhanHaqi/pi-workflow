@@ -139,6 +139,7 @@ test("safe schema inventory contains every required versioned contract through M
     "pi_gacw_preflight_v0",
     "pi_gacw_repository_state_token_v0",
     "pi_gacw_postflight_v0",
+    "pi_gacw_resume_lock_handover_v0",
     "pi_gacw_terminal_retention_authority_v0",
     "pi_gacw_retention_result_v0",
     "pi_gacw_secure_fs_capability_v0",

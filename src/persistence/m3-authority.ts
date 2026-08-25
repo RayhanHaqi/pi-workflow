@@ -20,6 +20,7 @@ import {
   type M3PreflightDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
+  type M3ResumeLockHandoverDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
   type WorkflowState,
@@ -842,6 +843,57 @@ export function assertM3PostflightSourceSemantics(
   }
 }
 
+export function assertM3ResumeLockHandoverSemantics(
+  source: M3ResumeLockHandoverDocument,
+  successor: M3RepositoryStateTokenDocument | null,
+  prior: M3RepositoryStateTokenDocument,
+  priorAuthority: Pick<M3TokenAuthority, "lockAcquisition">,
+  baseline: M3BaselineRuntimeDocument,
+  approval: M3BaselineApprovalRuntimeDocument | null,
+  lockDiagnostic: M3LockDiagnosticDocument,
+  lockAcquisition: M3LockAcquisitionDocument,
+): void {
+  assertDocumentValid("pi_gacw_resume_lock_handover_v0", source);
+  requireM3BaselineApprovalSemantics(baseline, approval);
+  commonTokenSemantics(prior);
+  assertM3LockDiagnosticSemantics(lockDiagnostic, lockAcquisition, baseline);
+  // The handover source binds exactly the predecessor's immutable environment
+  // projection identities and the current held lock generation.
+  if (source.run_id !== prior.run_id || source.run_id !== baseline.run_id ||
+      source.prior_token_content_sha256 !== prior.content_sha256 ||
+      source.repository_identity_content_sha256 !== prior.repository_identity_content_sha256 ||
+      source.git_fingerprint_sha256 !== prior.git_fingerprint.content_sha256 ||
+      source.instruction_fingerprint_sha256 !== prior.instruction_fingerprint.content_sha256 ||
+      source.authority_fingerprint_sha256 !== prior.authority_fingerprint.content_sha256 ||
+      source.lock_diagnostic_content_sha256 !== lockDiagnostic.content_sha256) {
+    invalid("STATE_TOKEN_PROVENANCE_INVALID", "resume-lock-handover source does not exactly bind its predecessor authority");
+  }
+  // Same-generation rule: a handover must cross a real lock-generation change.
+  if (lockDiagnostic.content_sha256 === prior.lock_diagnostic_content_sha256 ||
+      lockAcquisition.content_sha256 === priorAuthority.lockAcquisition.content_sha256) {
+    invalid("STATE_TOKEN_PROVENANCE_INVALID", "resume-lock-handover does not advance to a new lock generation");
+  }
+  if (successor === null) return;
+  commonTokenSemantics(successor);
+  // The successor token preserves the predecessor's exact repository-state
+  // representation byte-exact and changes only its current lock generation.
+  if (successor.source !== "RESUME_LOCK_HANDOVER" || successor.source_content_sha256 !== source.content_sha256 ||
+      successor.prior_token_content_sha256 !== prior.content_sha256 || successor.run_id !== source.run_id ||
+      successor.baseline_runtime_content_sha256 !== prior.baseline_runtime_content_sha256 ||
+      successor.repository_identity_content_sha256 !== prior.repository_identity_content_sha256 ||
+      successor.worktree_key !== prior.worktree_key || successor.branch !== prior.branch ||
+      successor.head !== prior.head || successor.worktree_list_sha256 !== prior.worktree_list_sha256 ||
+      !same(successor.git_fingerprint, prior.git_fingerprint) ||
+      !same(successor.instruction_fingerprint, prior.instruction_fingerprint) ||
+      !same(successor.authority_fingerprint, prior.authority_fingerprint) ||
+      successor.task_scope_identity !== prior.task_scope_identity ||
+      successor.workflow_owned_delta_sha256 !== prior.workflow_owned_delta_sha256 ||
+      !same(successor.changed_paths, prior.changed_paths) ||
+      successor.lock_diagnostic_content_sha256 !== lockDiagnostic.content_sha256) {
+    invalid("STATE_TOKEN_PROVENANCE_INVALID", "resume-lock-handover successor token does not exactly bind its semantic source");
+  }
+}
+
 export interface M3AuthorityResolver {
   readonly baseline: (digest: string) => Promise<M3BaselineRuntimeDocument | undefined>;
   readonly approval: (digest: string) => Promise<M3BaselineApprovalRuntimeDocument | undefined>;
@@ -849,11 +901,17 @@ export interface M3AuthorityResolver {
   readonly lockDiagnostic: (digest: string) => Promise<M3LockDiagnosticDocument | undefined>;
   readonly preflight: (digest: string) => Promise<M3PreflightDocument | undefined>;
   readonly postflight: (digest: string) => Promise<M3PostflightDocument | undefined>;
+  readonly resumeHandover: (digest: string) => Promise<M3ResumeLockHandoverDocument | undefined>;
   readonly token: (digest: string) => Promise<M3RepositoryStateTokenDocument | undefined>;
   readonly assertBaselineProducer: (baseline: M3BaselineRuntimeDocument) => Promise<void>;
   readonly assertLockAcquisitionProducer: (acquisition: M3LockAcquisitionDocument) => Promise<void>;
   readonly assertEnvironmentProducer: (
     source: M3PreflightDocument,
+    lockDiagnostic: M3LockDiagnosticDocument,
+  ) => Promise<void>;
+  /** Live-environment continuity between the frozen root preflight and the current held lock generation. */
+  readonly assertResumeHandoverEnvironment: (
+    rootPreflight: M3PreflightDocument,
     lockDiagnostic: M3LockDiagnosticDocument,
   ) => Promise<void>;
   readonly assertPostflightProducer: (
@@ -910,6 +968,36 @@ export async function validateM3AuthoritativeToken(
       await resolver.assertEnvironmentProducer(source, lockDiagnostic);
       assertM3FullPreflightSourceSemantics(source, baseline, approval, token, lockDiagnostic, lockAcquisition);
       authority = { token, baseline, approval, lockAcquisition, rootPreflight: source, chainDepth: 0 };
+    } else if (token.source === "RESUME_LOCK_HANDOVER") {
+      if (token.prior_token_content_sha256 === null) invalid("STATE_TOKEN_PROVENANCE_INVALID", "resume-lock-handover token has no prior token");
+      const prior = await resolver.token(token.prior_token_content_sha256);
+      if (prior === undefined) missing("STATE_TOKEN_RECORD_MISSING", "resume-lock-handover prior token is missing");
+      const priorAuthority = await validateM3AuthoritativeToken(prior, runId, resolver, memo, visiting, depth + 1);
+      if (priorAuthority.baseline.content_sha256 !== baseline.content_sha256) {
+        invalid("STATE_TOKEN_PROVENANCE_INVALID", "resume-lock-handover token changes baseline authority");
+      }
+      const source = await resolver.resumeHandover(token.source_content_sha256);
+      if (source === undefined) missing("STATE_TOKEN_SOURCE_MISSING", "resume-lock-handover token source is missing");
+      if (source.prior_token_content_sha256 !== prior.content_sha256) {
+        invalid("STATE_TOKEN_PROVENANCE_INVALID", "resume-lock-handover source binds another predecessor");
+      }
+      const lockDiagnostic = await resolver.lockDiagnostic(source.lock_diagnostic_content_sha256);
+      if (lockDiagnostic === undefined) missing("STATE_TOKEN_LOCK_DIAGNOSTIC_MISSING", "resume-lock-handover lock diagnostic is missing");
+      const lockAcquisition = await resolver.lockAcquisition(lockDiagnostic.lock_acquisition_content_sha256);
+      if (lockAcquisition === undefined) missing("STATE_TOKEN_LOCK_ACQUISITION_MISSING", "resume-lock-handover lock acquisition root is missing");
+      await resolver.assertLockAcquisitionProducer(lockAcquisition);
+      await resolver.assertResumeHandoverEnvironment(priorAuthority.rootPreflight, lockDiagnostic);
+      assertM3ResumeLockHandoverSemantics(source, token, prior, priorAuthority, baseline, priorAuthority.approval, lockDiagnostic, lockAcquisition);
+      // The meaning of lockAcquisition becomes the CURRENT lock-generation
+      // authority; the historical rootPreflight remains the original FULL_PREFLIGHT.
+      authority = {
+        token,
+        baseline,
+        approval: priorAuthority.approval,
+        lockAcquisition,
+        rootPreflight: priorAuthority.rootPreflight,
+        chainDepth: priorAuthority.chainDepth + 1,
+      };
     } else {
       if (token.prior_token_content_sha256 === null) invalid("STATE_TOKEN_PROVENANCE_INVALID", "postflight token has no prior token");
       const prior = await resolver.token(token.prior_token_content_sha256);

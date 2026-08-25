@@ -23,6 +23,7 @@
       "type": "string",
       "enum": [
         "FULL_PREFLIGHT",
+        "RESUME_LOCK_HANDOVER",
         "POSTFLIGHT"
       ]
     },

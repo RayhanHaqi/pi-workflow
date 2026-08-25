@@ -13,6 +13,7 @@ export {
 } from "./baseline.js";
 export { runFastPreflight, runFullPreflight } from "./preflight.js";
 export { runPostflight } from "./postflight.js";
+export { runResumeLockHandover } from "./resume-handover.js";
 export {
   applyRetentionCleanup,
   createTerminalRetentionAuthority,
@@ -49,6 +50,10 @@ export type {
   RunFullPreflightInput,
 } from "./preflight.js";
 export type { PostflightResult, RunPostflightInput } from "./postflight.js";
+export type {
+  ResumeLockHandoverResult,
+  RunResumeLockHandoverInput,
+} from "./resume-handover.js";
 export type {
   CreateTerminalRetentionAuthorityInput,
   RetentionOperationInput,

@@ -27,6 +27,7 @@ export type {
   M3PreflightDocument,
   M3RepositoryIdentityDocument,
   M3RepositoryStateTokenDocument,
+  M3ResumeLockHandoverDocument,
   M3RetentionResultDocument,
   M3TerminalRetentionAuthorityDocument,
   M4AdmissionRefusalDocument,

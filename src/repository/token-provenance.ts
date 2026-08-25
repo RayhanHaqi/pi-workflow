@@ -6,6 +6,7 @@ import type {
   M3PostflightDocument,
   M3PreflightDocument,
   M3RepositoryStateTokenDocument,
+  M3ResumeLockHandoverDocument,
 } from "../schemas/index.js";
 import {
   M3AuthorityValidationError,
@@ -13,6 +14,7 @@ import {
   type M3AuthorityResolver,
 } from "../persistence/m3-authority.js";
 import { assertGlobalLockAcquisition } from "./acquisition.js";
+import { assertEnvironmentFingerprintContinuity } from "./environment.js";
 import { RepositoryGuardError, repositoryGuardError, type RepositoryGuardErrorCode } from "./errors.js";
 import {
   assertBaselineProducerSemantics,
@@ -40,6 +42,7 @@ type ResolverDocument =
   | M3LockDiagnosticDocument
   | M3PreflightDocument
   | M3PostflightDocument
+  | M3ResumeLockHandoverDocument
   | M3RepositoryStateTokenDocument;
 
 async function optionalRecord(
@@ -65,10 +68,16 @@ function resolverFor(location: M3StorageLocation): M3AuthorityResolver {
     lockDiagnostic: async (digest) => optionalRecord(location, "LOCK_DIAGNOSTIC", digest) as Promise<M3LockDiagnosticDocument | undefined>,
     preflight: async (digest) => optionalRecord(location, "PREFLIGHT", digest) as Promise<M3PreflightDocument | undefined>,
     postflight: async (digest) => optionalRecord(location, "POSTFLIGHT", digest) as Promise<M3PostflightDocument | undefined>,
+    resumeHandover: async (digest) => optionalRecord(location, "RESUME_LOCK_HANDOVER", digest) as Promise<M3ResumeLockHandoverDocument | undefined>,
     token: async (digest) => optionalRecord(location, "REPOSITORY_STATE_TOKEN", digest) as Promise<M3RepositoryStateTokenDocument | undefined>,
     assertBaselineProducer: async (baseline) => assertBaselineProducerSemantics(baseline, await baselines),
     assertLockAcquisitionProducer: async (acquisition) => assertGlobalLockAcquisition(location.stateRoot, acquisition),
     assertEnvironmentProducer: assertFullEnvironmentProducerSemantics,
+    assertResumeHandoverEnvironment: async (rootPreflight, lockDiagnostic) => {
+      // Exact live-environment continuity across the A→B generation change,
+      // surfaced as the existing ENVIRONMENT_DRIFT fail-closed code.
+      await assertEnvironmentFingerprintContinuity(rootPreflight.environment_fingerprint, rootPreflight.repository, lockDiagnostic);
+    },
     assertPostflightProducer: assertPostflightProducerSemantics,
   };
 }

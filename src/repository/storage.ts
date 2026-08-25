@@ -15,6 +15,7 @@ import {
   type M3PostflightDocument,
   type M3PreflightDocument,
   type M3RepositoryStateTokenDocument,
+  type M3ResumeLockHandoverDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
   type SchemaId,
@@ -53,6 +54,7 @@ export type M3RecordKind =
   | "PREFLIGHT"
   | "REPOSITORY_STATE_TOKEN"
   | "POSTFLIGHT"
+  | "RESUME_LOCK_HANDOVER"
   | "RETENTION_RESULT";
 
 const recordDefinitions: Readonly<Record<M3RecordKind, { readonly directory: string; readonly schemaId: SchemaId }>> = Object.freeze({
@@ -63,6 +65,7 @@ const recordDefinitions: Readonly<Record<M3RecordKind, { readonly directory: str
   PREFLIGHT: { directory: "preflights", schemaId: "pi_gacw_preflight_v0" },
   REPOSITORY_STATE_TOKEN: { directory: "repository-state-tokens", schemaId: "pi_gacw_repository_state_token_v0" },
   POSTFLIGHT: { directory: "postflights", schemaId: "pi_gacw_postflight_v0" },
+  RESUME_LOCK_HANDOVER: { directory: "resume-lock-handovers", schemaId: "pi_gacw_resume_lock_handover_v0" },
   RETENTION_RESULT: { directory: "retention", schemaId: "pi_gacw_retention_result_v0" },
 });
 
@@ -170,6 +173,7 @@ type M3RecordDocumentByKind = {
   readonly PREFLIGHT: M3PreflightDocument;
   readonly REPOSITORY_STATE_TOKEN: M3RepositoryStateTokenDocument;
   readonly POSTFLIGHT: M3PostflightDocument;
+  readonly RESUME_LOCK_HANDOVER: M3ResumeLockHandoverDocument;
   readonly RETENTION_RESULT: M3RetentionResultDocument;
 };
 

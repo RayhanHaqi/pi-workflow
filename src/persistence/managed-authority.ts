@@ -7,6 +7,7 @@ import {
   type M3PostflightDocument,
   type M3PreflightDocument,
   type M3RepositoryStateTokenDocument,
+  type M3ResumeLockHandoverDocument,
   type M3RetentionResultDocument,
   type M3TerminalRetentionAuthorityDocument,
   type WorkflowState,
@@ -19,6 +20,7 @@ import {
   assertDurableBaselineProducerSemantics,
   assertDurableEnvironmentProducerSemantics,
   assertDurablePostflightProducerSemantics,
+  assertDurableResumeHandoverEnvironmentSemantics,
 } from "../repository/semantic-context.js";
 import type { InspectedObject, ManagedRecordClassification } from "./types.js";
 import {
@@ -30,6 +32,7 @@ import {
   assertM3LockAcquisitionSemantics,
   assertM3LockDiagnosticSemantics,
   assertM3PostflightSourceSemantics,
+  assertM3ResumeLockHandoverSemantics,
   assertM3RetentionResultSemantics,
   assertM3TerminalRetentionAuthoritySemantics,
   buildM3RetentionAuthorityContext,
@@ -53,6 +56,7 @@ export interface ManagedAuthorityInventory {
   readonly preflights: ReadonlyMap<string, M3PreflightDocument>;
   readonly tokens: ReadonlyMap<string, M3RepositoryStateTokenDocument>;
   readonly postflights: ReadonlyMap<string, M3PostflightDocument>;
+  readonly resumeHandovers: ReadonlyMap<string, M3ResumeLockHandoverDocument>;
   readonly results: ReadonlyMap<string, M3RetentionResultDocument>;
   /** Keyed by the raw-evidence physical SHA-256 used by the inspected object. */
   readonly terminalAuthorities: ReadonlyMap<string, M3TerminalRetentionAuthorityDocument | Error>;
@@ -93,6 +97,7 @@ export async function classifyManagedAuthority(
   const baselineProducerMemo = new Map<string, Promise<void>>();
   const acquisitionProducerMemo = new Map<string, Promise<void>>();
   const environmentProducerMemo = new Map<string, Promise<void>>();
+  const handoverEnvironmentMemo = new Map<string, Promise<void>>();
   const postflightProducerMemo = new Map<string, Promise<void>>();
   const baselineProducer = (baseline: M3BaselineRuntimeDocument): Promise<void> => {
     const prior = baselineProducerMemo.get(baseline.content_sha256);
@@ -128,6 +133,17 @@ export async function classifyManagedAuthority(
     if (cached !== undefined) return cached;
     const pending = assertDurablePostflightProducerSemantics(source, prior, baseline);
     postflightProducerMemo.set(source.content_sha256, pending);
+    return pending;
+  };
+  const handoverEnvironmentProducer = (
+    rootPreflight: M3PreflightDocument,
+    lockDiagnostic: M3LockDiagnosticDocument,
+  ): Promise<void> => {
+    const key = `${rootPreflight.content_sha256}:${lockDiagnostic.content_sha256}`;
+    const prior = handoverEnvironmentMemo.get(key);
+    if (prior !== undefined) return prior;
+    const pending = assertDurableResumeHandoverEnvironmentSemantics(rootPreflight, lockDiagnostic);
+    handoverEnvironmentMemo.set(key, pending);
     return pending;
   };
   for (const [digest, acquisition] of inventory.lockAcquisitions) {
@@ -255,10 +271,12 @@ export async function classifyManagedAuthority(
     lockDiagnostic: async (digest) => inventory.lockDiagnostics.get(digest),
     preflight: async (digest) => inventory.preflights.get(digest),
     postflight: async (digest) => inventory.postflights.get(digest),
+    resumeHandover: async (digest) => inventory.resumeHandovers.get(digest),
     token: async (digest) => inventory.tokens.get(digest),
     assertBaselineProducer: baselineProducer,
     assertLockAcquisitionProducer: acquisitionProducer,
     assertEnvironmentProducer: environmentProducer,
+    assertResumeHandoverEnvironment: handoverEnvironmentProducer,
     assertPostflightProducer: postflightProducer,
   };
   const tokenMemo = new Map<string, M3TokenAuthority>();
@@ -377,6 +395,35 @@ export async function classifyManagedAuthority(
       await postflightProducer(postflight, prior, baseline);
       assertM3PostflightSourceSemantics(postflight, null, prior, baseline, priorAuthority.approval);
       const rooted = [...inventory.tokens.values()].some((token) => token.source === "POSTFLIGHT" &&
+        token.source_content_sha256 === digest && tokenAuthorities.has(token.content_sha256));
+      decisions.set(key, rooted ? AUTHORITATIVE : UNREFERENCED);
+    } catch (error: unknown) { decisions.set(key, failureDecision(error)); }
+  }
+
+  // Resume-lock-handover sources are first-class M3 authority evidence. An
+  // orphan source (crash before its successor token) stays resumable as
+  // UNREFERENCED, never INVALID.
+  for (const [digest, handover] of inventory.resumeHandovers) {
+    const key = `M3_RESUME_LOCK_HANDOVER:${digest}`;
+    const prior = inventory.tokens.get(handover.prior_token_content_sha256);
+    if (prior === undefined) { decisions.set(key, INCOMPLETE); continue; }
+    const priorAuthority = tokenAuthorities.get(prior.content_sha256);
+    if (priorAuthority === undefined) {
+      const priorDecision = decisions.get(`M3_REPOSITORY_STATE_TOKEN:${prior.content_sha256}`);
+      decisions.set(key, priorDecision?.classification === "INVALID_MANAGED_RECORD" ? INVALID : INCOMPLETE);
+      continue;
+    }
+    const lockDiagnostic = inventory.lockDiagnostics.get(handover.lock_diagnostic_content_sha256);
+    if (lockDiagnostic === undefined) { decisions.set(key, INCOMPLETE); continue; }
+    const lockAcquisition = inventory.lockAcquisitions.get(lockDiagnostic.lock_acquisition_content_sha256);
+    if (lockAcquisition === undefined) { decisions.set(key, INCOMPLETE); continue; }
+    if (!acquisitionSemantic.has(lockAcquisition.content_sha256)) {
+      decisions.set(key, decisions.get(`M3_LOCK_ACQUISITION:${lockAcquisition.content_sha256}`) ?? INVALID); continue;
+    }
+    try {
+      await handoverEnvironmentProducer(priorAuthority.rootPreflight, lockDiagnostic);
+      assertM3ResumeLockHandoverSemantics(handover, null, prior, priorAuthority, priorAuthority.baseline, priorAuthority.approval, lockDiagnostic, lockAcquisition);
+      const rooted = [...inventory.tokens.values()].some((token) => token.source === "RESUME_LOCK_HANDOVER" &&
         token.source_content_sha256 === digest && tokenAuthorities.has(token.content_sha256));
       decisions.set(key, rooted ? AUTHORITATIVE : UNREFERENCED);
     } catch (error: unknown) { decisions.set(key, failureDecision(error)); }

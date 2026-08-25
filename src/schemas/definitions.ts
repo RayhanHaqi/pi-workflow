@@ -1248,7 +1248,7 @@ export const M3PreflightSchema = StrictObject(
 export const M3RepositoryStateTokenSchema = StrictObject(
   {
     ...DocumentFields("pi_gacw_repository_state_token_v0"),
-    source: StringEnum(["FULL_PREFLIGHT", "POSTFLIGHT"] as const),
+    source: StringEnum(["FULL_PREFLIGHT", "RESUME_LOCK_HANDOVER", "POSTFLIGHT"] as const),
     source_content_sha256: Digest(),
     prior_token_content_sha256: NullableDigest(),
     run_id: RunId(),
@@ -1267,6 +1267,25 @@ export const M3RepositoryStateTokenSchema = StrictObject(
     changed_paths: Type.Array(PathString(), { maxItems: 100_000, uniqueItems: true }),
   },
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_repository_state_token_v0.schema.json" },
+);
+
+// Explicit M3 resume-lock-handover source. Deliberately carries no timestamp,
+// baseline/approval identity, task-scope identity, prior acquisition identity,
+// route, model, budget, or workflow-state identity: every one of those is
+// inherited through the exact predecessor repository-state token so that a
+// same-owner retry after a crash reconstructs the byte-identical source identity.
+export const M3ResumeLockHandoverSchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_resume_lock_handover_v0"),
+    run_id: RunId(),
+    prior_token_content_sha256: Digest(),
+    repository_identity_content_sha256: Digest(),
+    git_fingerprint_sha256: Digest(),
+    instruction_fingerprint_sha256: Digest(),
+    authority_fingerprint_sha256: Digest(),
+    lock_diagnostic_content_sha256: Digest(),
+  },
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_resume_lock_handover_v0.schema.json" },
 );
 
 export const M3DeltaEntrySchema = StrictObject({
@@ -2245,6 +2264,7 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_preflight_v0", fileName: "pi_gacw_preflight_v0.schema.json", schema: M3PreflightSchema },
   { schemaId: "pi_gacw_repository_state_token_v0", fileName: "pi_gacw_repository_state_token_v0.schema.json", schema: M3RepositoryStateTokenSchema },
   { schemaId: "pi_gacw_postflight_v0", fileName: "pi_gacw_postflight_v0.schema.json", schema: M3PostflightSchema },
+  { schemaId: "pi_gacw_resume_lock_handover_v0", fileName: "pi_gacw_resume_lock_handover_v0.schema.json", schema: M3ResumeLockHandoverSchema },
   { schemaId: "pi_gacw_terminal_retention_authority_v0", fileName: "pi_gacw_terminal_retention_authority_v0.schema.json", schema: M3TerminalRetentionAuthoritySchema },
   { schemaId: "pi_gacw_retention_result_v0", fileName: "pi_gacw_retention_result_v0.schema.json", schema: M3RetentionResultSchema },
   { schemaId: "pi_gacw_secure_fs_capability_v0", fileName: "pi_gacw_secure_fs_capability_v0.schema.json", schema: M4SecureFilesystemCapabilitySchema },
@@ -2335,6 +2355,7 @@ export type M3PreflightDocument = Static<typeof M3PreflightSchema>;
 export type M3RepositoryStateTokenDocument = Static<typeof M3RepositoryStateTokenSchema>;
 export type M3DeltaEntry = Static<typeof M3DeltaEntrySchema>;
 export type M3PostflightDocument = Static<typeof M3PostflightSchema>;
+export type M3ResumeLockHandoverDocument = Static<typeof M3ResumeLockHandoverSchema>;
 export type M3TerminalRetentionAuthorityDocument = Static<typeof M3TerminalRetentionAuthoritySchema>;
 export type M3RetentionResultDocument = Static<typeof M3RetentionResultSchema>;
 export type M4PathRule = Static<typeof M4PathRuleSchema>;

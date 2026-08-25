@@ -35,6 +35,8 @@ test("built repository package exposes only the explicit M3 guard boundary", asy
     "runFastPreflight",
     "runFullPreflight",
     "runPostflight",
+    // V1-R2D0 added the explicit M3 resume-lock-handover admission to the committed guard boundary.
+    "runResumeLockHandover",
     "verifyBaselineApproval",
   ]);
   for (const forbidden of [
