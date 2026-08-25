@@ -225,7 +225,8 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
 const JSON_KIND_BY_DIRECTORY = new Map(JSON_KINDS.map((definition) => [definition.directory, definition]));
 /** Historical layouts predate this additive evidence collection and remain read-only compatible. */
-const LEGACY_OPTIONAL_JSON_KINDS = new Set<JsonStoredObjectKind>(["M4_ADMISSION_REFUSAL"]);
+/** Historical layouts predate these additive collections and remain read-only compatible. */
+const LEGACY_OPTIONAL_JSON_KINDS = new Set<JsonStoredObjectKind>(["M4_ADMISSION_REFUSAL", "M3_RESUME_LOCK_HANDOVER"]);
 function isLegacyOptionalJsonKind(kind: JsonStoredObjectKind): boolean { return LEGACY_OPTIONAL_JSON_KINDS.has(kind); }
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {
@@ -1465,7 +1466,7 @@ async function scanLayout(
     "bounded-worker-results",
   ].sort();
   const recordChildren = (await readdir(layout.recordsDirectory)).sort();
-  const optionalRecordNames = new Set(["m4-admission-refusals"]);
+  const optionalRecordNames = new Set(["m4-admission-refusals", "resume-lock-handovers"]);
   if (recordChildren.some((name) => !expectedRecordNames.includes(name)) ||
       expectedRecordNames.some((name) => !optionalRecordNames.has(name) && !recordChildren.includes(name))) {
     throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath: "records", detail: "Records directory has a missing or unexpected entry" });

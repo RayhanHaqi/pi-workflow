@@ -3,7 +3,7 @@ import { join, relative, sep } from "node:path";
 
 import { canonicalize } from "../canonical-json/index.js";
 import { sha256Bytes, sha256Canonical, type Sha256Digest } from "../identity/index.js";
-import { assertPrivateDirectory, assertRegularPrivateFile, fsyncDirectory, publishImmutableFile } from "../persistence/atomic.js";
+import { assertPrivateDirectory, assertRegularPrivateFile, ensurePrivateDirectory, fsyncDirectory, publishImmutableFile } from "../persistence/atomic.js";
 import { inspectRunStorage } from "../persistence/index.js";
 import { inspectRunStorageForRetention } from "../persistence/store.js";
 import {
@@ -127,8 +127,24 @@ export async function assertUsableM3Storage(location: M3StorageLocation): Promis
   await assertPrivateDirectory(join(location.stateRoot, "locks"));
   await assertPrivateDirectory(baselineBlobDirectory(location));
   for (const kind of Object.keys(recordDefinitions) as M3RecordKind[]) {
+    // Retained pre-R2D0 runs have no resume-lock-handovers directory; it is
+    // created safely on the first actual handover write. An existing unsafe
+    // path is still refused. Every other record directory stays mandatory.
+    if (LEGACY_OPTIONAL_RECORD_KINDS.has(kind) && await lstatOrUndefined(recordDirectory(location, kind)) === undefined) continue;
     await assertPrivateDirectory(recordDirectory(location, kind));
   }
+}
+
+/** Record kinds whose directories may be absent in retained pre-R2D0 layouts. */
+const LEGACY_OPTIONAL_RECORD_KINDS: ReadonlySet<M3RecordKind> = new Set(["RESUME_LOCK_HANDOVER"]);
+
+/**
+ * Safely materialize the legacy-optional handover record directory on the
+ * productive first-write path only. Never called from read-only inspection.
+ */
+export async function ensureResumeLockHandoverDirectory(location: M3StorageLocation): Promise<void> {
+  assertLocation(location);
+  await ensurePrivateDirectory(recordDirectory(location, "RESUME_LOCK_HANDOVER"));
 }
 
 /** Require the classifier's complete physical/proof authority for one durable record. */

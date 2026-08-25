@@ -26,6 +26,7 @@ import {
   assertStateRootCapacity,
   assertUsableM3Storage,
   canonicalJsonRecordBytes,
+  ensureResumeLockHandoverDirectory,
   loadM3Record,
   m3RecordExists,
   publishM3Record,
@@ -259,6 +260,9 @@ export async function runResumeLockHandover(input: RunResumeLockHandoverInput): 
   // every boundary and after publication. A source without its token remains a
   // harmless resumable orphan (H1).
   await assertWorktreeLockHeld(input.lock);
+  // First productive handover write into a retained pre-R2D0 run materializes
+  // only this exact legacy-optional record directory, safely and mode 0700.
+  await ensureResumeLockHandoverDirectory(location);
   if (acquisitionWasNew) {
     await publishM3Record(location, "LOCK_ACQUISITION", acquisitionB as unknown as Record<string, unknown>);
   }
