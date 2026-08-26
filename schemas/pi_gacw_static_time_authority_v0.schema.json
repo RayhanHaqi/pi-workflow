@@ -1,0 +1,160 @@
+{
+  "$id": "https://pi-gacw.invalid/schemas/pi_gacw_static_time_authority_v0.schema.json",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_static_time_authority_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+          "type": "string"
+        },
+        "authority_scope": {
+          "const": "WORKFLOW",
+          "type": "string"
+        },
+        "authority_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "approved_plan_content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "predecessor_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "predecessor_workflow_state_content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "predecessor_transition_commit_content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "wall_budget_ms": {
+          "minimum": 1,
+          "maximum": 604800000,
+          "type": "integer"
+        },
+        "started_at_epoch_ms": {
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "run_id",
+        "authority_scope",
+        "authority_id",
+        "approved_plan_content_sha256",
+        "predecessor_revision",
+        "predecessor_workflow_state_content_sha256",
+        "predecessor_transition_commit_content_sha256",
+        "wall_budget_ms",
+        "started_at_epoch_ms"
+      ]
+    },
+    {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "const": "pi_gacw_static_time_authority_v0",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "0.1.0",
+          "type": "string"
+        },
+        "content_projection_id": {
+          "const": "document-content-v1",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+          "type": "string"
+        },
+        "authority_scope": {
+          "const": "NODE",
+          "type": "string"
+        },
+        "authority_id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "workflow_time_authority_content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "predecessor_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "predecessor_workflow_state_content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "predecessor_transition_commit_content_sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "task_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "wall_budget_ms": {
+          "minimum": 1,
+          "maximum": 604800000,
+          "type": "integer"
+        },
+        "started_at_epoch_ms": {
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_version",
+        "content_projection_id",
+        "content_sha256",
+        "run_id",
+        "authority_scope",
+        "authority_id",
+        "workflow_time_authority_content_sha256",
+        "predecessor_revision",
+        "predecessor_workflow_state_content_sha256",
+        "predecessor_transition_commit_content_sha256",
+        "task_id",
+        "wall_budget_ms",
+        "started_at_epoch_ms"
+      ]
+    }
+  ]
+}

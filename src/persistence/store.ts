@@ -58,10 +58,23 @@ import {
   type TaskGraphDocument,
   type SchemaId,
   type StateTransitionCommitDocument,
+  type StaticTimeAuthorityDocument,
   type TransitionEvent,
   type WorkflowState,
+  type NodeTimeAuthorityDocument,
+  type WorkflowTimeAuthorityDocument,
 } from "../schemas/index.js";
 import { createInitialState, reduceState } from "../state-machine/index.js";
+import {
+  buildNodeStaticTimeAuthority,
+  buildWorkflowStaticTimeAuthority,
+  classifyStaticTimeAuthorities,
+  nodeStaticTimeAuthorityIdentity,
+  sampleStartedAtEpochMs,
+  type StaticTimeAncestry,
+  type StaticTimingVerdict,
+  workflowStaticTimeAuthorityIdentity,
+} from "./static-time-authority.js";
 import { classifyManagedAuthority } from "./managed-authority.js";
 import { classifyM4Authority } from "./m4-authority.js";
 import { classifyM5Authority } from "./m5-authority.js";
@@ -140,6 +153,7 @@ interface RunLayout {
   readonly m6WorkerResultDirectory: string;
   readonly boundedWorkerInvocationDirectory: string;
   readonly boundedWorkerResultDirectory: string;
+  readonly staticTimeAuthorityDirectory: string;
   readonly commitsDirectory: string;
 }
 
@@ -182,6 +196,7 @@ interface JsonKindDefinition {
     | "m6WorkerResultDirectory"
     | "boundedWorkerInvocationDirectory"
     | "boundedWorkerResultDirectory"
+    | "staticTimeAuthorityDirectory"
     | "commitsDirectory"
   >;
 }
@@ -220,13 +235,14 @@ const JSON_KINDS: readonly JsonKindDefinition[] = Object.freeze([
   { kind: "M6_WORKER_RESULT", schemaId: "pi_gacw_m6_worker_result_v0", directory: "m6WorkerResultDirectory" },
   { kind: "BOUNDED_WORKER_INVOCATION", schemaId: "pi_gacw_bounded_worker_invocation_v0", directory: "boundedWorkerInvocationDirectory" },
   { kind: "BOUNDED_WORKER_RESULT", schemaId: "pi_gacw_bounded_worker_result_v0", directory: "boundedWorkerResultDirectory" },
+  { kind: "M2_STATIC_TIME_AUTHORITY", schemaId: "pi_gacw_static_time_authority_v0", directory: "staticTimeAuthorityDirectory" },
 ]);
 
 const JSON_KIND_BY_NAME = new Map(JSON_KINDS.map((definition) => [definition.kind, definition]));
 const JSON_KIND_BY_DIRECTORY = new Map(JSON_KINDS.map((definition) => [definition.directory, definition]));
 /** Historical layouts predate this additive evidence collection and remain read-only compatible. */
 /** Historical layouts predate these additive collections and remain read-only compatible. */
-const LEGACY_OPTIONAL_JSON_KINDS = new Set<JsonStoredObjectKind>(["M4_ADMISSION_REFUSAL", "M3_RESUME_LOCK_HANDOVER"]);
+const LEGACY_OPTIONAL_JSON_KINDS = new Set<JsonStoredObjectKind>(["M4_ADMISSION_REFUSAL", "M3_RESUME_LOCK_HANDOVER", "M2_STATIC_TIME_AUTHORITY"]);
 function isLegacyOptionalJsonKind(kind: JsonStoredObjectKind): boolean { return LEGACY_OPTIONAL_JSON_KINDS.has(kind); }
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {
@@ -383,6 +399,7 @@ function assertLocation(input: RunStorageLocation): RunLayout {
     m6WorkerResultDirectory: join(recordsDirectory, "m6-worker-results"),
     boundedWorkerInvocationDirectory: join(recordsDirectory, "bounded-worker-invocations"),
     boundedWorkerResultDirectory: join(recordsDirectory, "bounded-worker-results"),
+    staticTimeAuthorityDirectory: join(recordsDirectory, "static-time-authorities"),
     commitsDirectory: join(runDirectory, "commits"),
   };
 }
@@ -626,6 +643,7 @@ async function initializeLayout(layout: RunLayout): Promise<void> {
   await ensurePrivateDirectory(layout.m6WorkerResultDirectory);
   await ensurePrivateDirectory(layout.boundedWorkerInvocationDirectory);
   await ensurePrivateDirectory(layout.boundedWorkerResultDirectory);
+  await ensurePrivateDirectory(layout.staticTimeAuthorityDirectory);
   await ensurePrivateDirectory(layout.commitsDirectory);
 }
 
@@ -676,6 +694,9 @@ async function assertExistingLayout(layout: RunLayout): Promise<void> {
   }
   if (await existingStats(layout.m4AdmissionRefusalDirectory) !== undefined) {
     await assertPrivateDirectory(layout.m4AdmissionRefusalDirectory);
+  }
+  if (await existingStats(layout.staticTimeAuthorityDirectory) !== undefined) {
+    await assertPrivateDirectory(layout.staticTimeAuthorityDirectory);
   }
 }
 
@@ -1464,9 +1485,10 @@ async function scanLayout(
     "m6-worker-results",
     "bounded-worker-invocations",
     "bounded-worker-results",
+    "static-time-authorities",
   ].sort();
   const recordChildren = (await readdir(layout.recordsDirectory)).sort();
-  const optionalRecordNames = new Set(["m4-admission-refusals", "resume-lock-handovers"]);
+  const optionalRecordNames = new Set(["m4-admission-refusals", "resume-lock-handovers", "static-time-authorities"]);
   if (recordChildren.some((name) => !expectedRecordNames.includes(name)) ||
       expectedRecordNames.some((name) => !optionalRecordNames.has(name) && !recordChildren.includes(name))) {
     throw new LayoutIssue({ code: "UNKNOWN_ENTRY", relativePath: "records", detail: "Records directory has a missing or unexpected entry" });
@@ -1536,8 +1558,11 @@ const M4_MANAGED_KINDS = new Set<StoredObjectKind>([
 const M5_MANAGED_KINDS = new Set<StoredObjectKind>(["M5_CONTROL_POLICY", "M5_USAGE_EVIDENCE", "M5_CONTROL_DECISION"]);
 const M6_MANAGED_KINDS = new Set<StoredObjectKind>(["M6_WORKER_INVOCATION", "M6_WORKER_RESULT"]);
 const BOUNDED_WORKER_MANAGED_KINDS = new Set<StoredObjectKind>(["BOUNDED_WORKER_INVOCATION", "BOUNDED_WORKER_RESULT"]);
+// V1-R2D-TIME: M2-owned durable wall-clock timing authority. Deliberately NOT a
+// member of M3_MANAGED_KINDS; it uses its own smallest separate classification path.
+const M2_STATIC_TIME_MANAGED_KINDS = new Set<StoredObjectKind>(["M2_STATIC_TIME_AUTHORITY"]);
 
-const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS, ...M6_MANAGED_KINDS, ...BOUNDED_WORKER_MANAGED_KINDS]);
+const ALL_MANAGED_KINDS = new Set<StoredObjectKind>([...M3_MANAGED_KINDS, ...M4_MANAGED_KINDS, ...M5_MANAGED_KINDS, ...M6_MANAGED_KINDS, ...BOUNDED_WORKER_MANAGED_KINDS, ...M2_STATIC_TIME_MANAGED_KINDS]);
 
 async function terminalAuthorityManagedObjects(
   layout: RunLayout,
@@ -1596,6 +1621,7 @@ async function classifyManagedRecords(
   const m6Results = new Map<string, M6WorkerResultDocument>();
   const boundedInvocations = new Map<string, BoundedWorkerInvocationDocument>();
   const boundedResults = new Map<string, BoundedWorkerResultDocument>();
+  const staticTimeAuthorities = new Map<string, StaticTimeAuthorityDocument>();
   const transitionEvents = new Map<string, TransitionEvent>();
   const transitionCommits = new Map<string, StateTransitionCommitDocument>();
   for (const object of objects) {
@@ -1633,6 +1659,7 @@ async function classifyManagedRecords(
     else if (object.kind === "M6_WORKER_RESULT") m6Results.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "BOUNDED_WORKER_INVOCATION") boundedInvocations.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "BOUNDED_WORKER_RESULT") boundedResults.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
+    else if (object.kind === "M2_STATIC_TIME_AUTHORITY") staticTimeAuthorities.set(object.contentSha256, await readJsonDocument(layout, object.kind, object.contentSha256));
     else if (object.kind === "M3_TERMINAL_RETENTION_AUTHORITY") {
       try {
         const bytes = await readRawEvidence(layout, object.contentSha256);
@@ -1839,7 +1866,30 @@ async function classifyManagedRecords(
     invocations: m6Invocations,
     results: m6Results,
   });
-  return [...m3.map(promote), ...m4.map(promote), ...m5, ...m6, ...bounded].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
+  // Smallest separate M2 timing-classification pass over the same scanned inventory.
+  const reachableCommitDigests = new Set<string>();
+  const reachableStateDigests = new Set<string>();
+  for (const digest of transitionCommits.keys()) {
+    if (graph.reachable.has(objectDescriptor(layout, "TRANSITION_COMMIT", digest as Sha256Digest).relativePath)) reachableCommitDigests.add(digest);
+  }
+  for (const digest of workflowStates.keys()) {
+    if (graph.reachable.has(objectDescriptor(layout, "WORKFLOW_STATE", digest as Sha256Digest).relativePath)) reachableStateDigests.add(digest);
+  }
+  const staticTimingVerdicts = classifyStaticTimeAuthorities({
+    runId: basename(layout.runDirectory),
+    authorities: staticTimeAuthorities,
+    reachableCommits: reachableCommitDigests,
+    reachableStates: reachableStateDigests,
+    ancestry: { commits: transitionCommits, states: workflowStates, events: transitionEvents },
+    policies: reducerPolicies,
+    budgets: sourceCandidates.budgets,
+    planApprovals: sourceCandidates.planApprovals,
+  });
+  const staticTiming = [...staticTimeAuthorities.keys()].map((digest): ManagedRecordClassification => {
+    const verdict: StaticTimingVerdict = staticTimingVerdicts.get(digest) ?? { decision: "INVALID_MANAGED_RECORD", detail: "timing authority was not classified" };
+    return { object: objectDescriptor(layout, "M2_STATIC_TIME_AUTHORITY", digest as Sha256Digest), classification: verdict.decision, detail: verdict.detail };
+  });
+  return [...m3.map(promote), ...m4.map(promote), ...m5, ...m6, ...bounded, ...staticTiming].sort((left, right) => compareText(left.object.relativePath, right.object.relativePath));
 }
 
 function blockedInspection(
@@ -2100,8 +2150,11 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
   readonly taskGraphs: readonly TaskGraphDocument[];
   readonly tasks: readonly TaskDocument[];
   readonly workflowStates: readonly WorkflowState[];
+  readonly transitionEvents: readonly TransitionEvent[];
+  readonly transitionCommits: readonly StateTransitionCommitDocument[];
   readonly boundedWorkerInvocations: readonly BoundedWorkerInvocationDocument[];
   readonly boundedWorkerResults: readonly BoundedWorkerResultDocument[];
+  readonly staticTimeAuthorities: readonly StaticTimeAuthorityDocument[];
 }> {
   const layout = assertLocation(input);
   await assertExistingLayout(layout);
@@ -2138,8 +2191,11 @@ export async function readM5ManagedRecords(input: RunStorageLocation): Promise<{
     taskGraphs: sourceCandidates.taskGraphs,
     tasks: sourceCandidates.tasks,
     workflowStates: await load<WorkflowState>("WORKFLOW_STATE"),
+    transitionEvents: await load<TransitionEvent>("TRANSITION_EVENT"),
+    transitionCommits: await load<StateTransitionCommitDocument>("TRANSITION_COMMIT"),
     boundedWorkerInvocations: await load<BoundedWorkerInvocationDocument>("BOUNDED_WORKER_INVOCATION"),
     boundedWorkerResults: await load<BoundedWorkerResultDocument>("BOUNDED_WORKER_RESULT"),
+    staticTimeAuthorities: await load<StaticTimeAuthorityDocument>("M2_STATIC_TIME_AUTHORITY"),
   });
 }
 
@@ -2299,6 +2355,145 @@ export async function readBoundedWorkerRecords(input: RunStorageLocation): Promi
     invocations: await load<BoundedWorkerInvocationDocument>("BOUNDED_WORKER_INVOCATION"),
     results: await load<BoundedWorkerResultDocument>("BOUNDED_WORKER_RESULT"),
   });
+}
+
+// ---------------------------------------------------------------------------
+// V1-R2D-TIME: durable M2 static wall-clock timing authority
+// ---------------------------------------------------------------------------
+
+async function readStaticTimeAuthorityDocuments(layout: RunLayout): Promise<StaticTimeAuthorityDocument[]> {
+  if (await existingStats(layout.staticTimeAuthorityDirectory) === undefined) return [];
+  const names = (await readdir(layout.staticTimeAuthorityDirectory)).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
+  const values: StaticTimeAuthorityDocument[] = [];
+  for (const name of names) values.push(await readJsonDocument<StaticTimeAuthorityDocument>(layout, "M2_STATIC_TIME_AUTHORITY", `sha256:${name.slice(0, -5)}`));
+  return values;
+}
+
+/** Package-internal immutable timing-authority loader; legacy-optional and read-only safe. */
+export async function readStaticTimeAuthorities(input: RunStorageLocation): Promise<readonly StaticTimeAuthorityDocument[]> {
+  const layout = assertLocation(input);
+  await assertExistingLayout(layout);
+  return detachedFrozen(await readStaticTimeAuthorityDocuments(layout));
+}
+
+/**
+ * Publish-or-reuse one content-addressed timing document for its semantic
+ * authority key. No latest-wins: the same key with different immutable content
+ * fails closed with a typed conflict.
+ */
+export async function publishStaticTimeAuthority(input: RunStorageLocation & {
+  readonly document: StaticTimeAuthorityDocument;
+}): Promise<{ readonly reused: boolean }> {
+  assertRecord(input, "static time authority publication input");
+  assertExactKeys(input, ["stateRoot", "runId", "document"], "static time authority publication input");
+  assertDocumentValid("pi_gacw_static_time_authority_v0", input.document);
+  if (input.document.run_id !== input.runId) throw new StateStoreError("RUN_ID_MISMATCH", "static time authority belongs to another run");
+  return withRunExclusive(input, async () => {
+    const layout = assertLocation(input);
+    // Fresh runs initialize the directory normally (initializeLayout); a legacy
+    // retained run that somehow reaches real publication creates it exactly here,
+    // never during read-only inspection.
+    if (await existingStats(layout.staticTimeAuthorityDirectory) === undefined) {
+      await ensurePrivateDirectory(layout.staticTimeAuthorityDirectory);
+      await syncDirectory(layout.recordsDirectory);
+    }
+    const inspection = await inspectRunStorage({ stateRoot: input.stateRoot, runId: input.runId });
+    requireUsableInspection(inspection);
+    if (inspection.workflowState.phase === "PASS" || inspection.workflowState.phase === "BLOCKED") {
+      throw new StateStoreError("TERMINAL_STATE_IMMUTABLE", "Cannot publish static time authority to a terminal run");
+    }
+    const existing = await readStaticTimeAuthorityDocuments(layout);
+    const sameKey = existing.find((entry) => entry.authority_id === input.document.authority_id);
+    if (sameKey !== undefined) {
+      if (sameKey.content_sha256 !== input.document.content_sha256 || canonicalize(sameKey) !== canonicalize(input.document)) {
+        throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "A different immutable timing document already owns this semantic authority key");
+      }
+      return { reused: true } as const;
+    }
+    const publication = await publishJsonDocument(layout, "M2_STATIC_TIME_AUTHORITY", input.document as unknown as Record<string, unknown>);
+    await readJsonDocument(layout, "M2_STATIC_TIME_AUTHORITY", input.document.content_sha256);
+    return detachedFrozen(publication);
+  });
+}
+
+async function durableStaticTimeAuthority(input: RunStorageLocation, authorityId: string): Promise<StaticTimeAuthorityDocument> {
+  const existing = await readStaticTimeAuthorities(input);
+  const match = existing.find((entry) => entry.authority_id === authorityId);
+  if (match === undefined) {
+    throw new StateStoreError("STATIC_TIME_AUTHORITY_DURABILITY_UNKNOWN", "the sampled timing document is not durably readable after publication");
+  }
+  return match;
+}
+
+/**
+ * Samples the clock ONCE, publishes-or-reuses the WORKFLOW timing document, and
+ * returns the exact durable document. A response-loss retry reuses the original
+ * timestamp; an uncertain-durability failure refuses instead of resampling.
+ */
+export async function establishWorkflowStaticTimeAuthority(input: RunStorageLocation & {
+  readonly approvedPlanContentSha256: Sha256Digest;
+  readonly workflowWallBudgetMs: number;
+  readonly epoch: { readonly revision: number; readonly workflow_state_content_sha256: string; readonly transition_commit_content_sha256: string };
+}): Promise<WorkflowTimeAuthorityDocument> {
+  assertRecord(input, "workflow timing establishment input");
+  assertExactKeys(input, ["stateRoot", "runId", "approvedPlanContentSha256", "workflowWallBudgetMs", "epoch"], "workflow timing establishment input");
+  // Reuse an already-durable semantic key WITHOUT sampling so a post-crash retry
+  // can never mint a newer timestamp for the same epoch.
+  const workflowKey = workflowStaticTimeAuthorityIdentity({
+    run_id: input.runId,
+    approved_plan_content_sha256: input.approvedPlanContentSha256,
+    predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
+  });
+  const reusableWorkflow = (await readStaticTimeAuthorities(input)).find((entry) => entry.authority_id === workflowKey);
+  if (reusableWorkflow !== undefined) return reusableWorkflow as WorkflowTimeAuthorityDocument;
+  const startedAtEpochMs = sampleStartedAtEpochMs();
+  const document = buildWorkflowStaticTimeAuthority({
+    runId: input.runId,
+    approvedPlanContentSha256: input.approvedPlanContentSha256,
+    epoch: input.epoch,
+    workflowWallBudgetMs: input.workflowWallBudgetMs,
+    startedAtEpochMs,
+  });
+  const expectedKey = workflowKey;
+  if (document.authority_id !== expectedKey || document.content_sha256 === null) throw new StateStoreError("IDENTITY_MISMATCH", "workflow timing identity projection failed");
+  await publishStaticTimeAuthority({ stateRoot: input.stateRoot, runId: input.runId, document });
+  const durable = await durableStaticTimeAuthority({ stateRoot: input.stateRoot, runId: input.runId }, expectedKey);
+  if (durable.content_sha256 !== document.content_sha256) throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "a different workflow timing document owns this semantic key");
+  return durable as WorkflowTimeAuthorityDocument;
+}
+
+/** NODE variant: same single-sample publish-or-reuse semantics bound to one exact READY epoch. */
+export async function establishNodeStaticTimeAuthority(input: RunStorageLocation & {
+  readonly taskId: string;
+  readonly nodeWallBudgetMs: number;
+  readonly workflowTimeAuthorityContentSha256: Sha256Digest;
+  readonly epoch: { readonly revision: number; readonly workflow_state_content_sha256: string; readonly transition_commit_content_sha256: string };
+}): Promise<NodeTimeAuthorityDocument> {
+  assertRecord(input, "node timing establishment input");
+  assertExactKeys(input, ["stateRoot", "runId", "taskId", "nodeWallBudgetMs", "workflowTimeAuthorityContentSha256", "epoch"], "node timing establishment input");
+  // Same reuse-first rule as the WORKFLOW variant.
+  const nodeKey = nodeStaticTimeAuthorityIdentity({
+    run_id: input.runId,
+    workflow_time_authority_content_sha256: input.workflowTimeAuthorityContentSha256,
+    predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
+  });
+  const reusableNode = (await readStaticTimeAuthorities(input)).find((entry) => entry.authority_id === nodeKey);
+  if (reusableNode !== undefined) return reusableNode as NodeTimeAuthorityDocument;
+  const startedAtEpochMs = sampleStartedAtEpochMs();
+  const document = buildNodeStaticTimeAuthority({
+    runId: input.runId,
+    taskId: input.taskId,
+    epoch: input.epoch,
+    workflowTimeAuthorityContentSha256: input.workflowTimeAuthorityContentSha256,
+    nodeWallBudgetMs: input.nodeWallBudgetMs,
+    startedAtEpochMs,
+  });
+  const expectedKey = nodeKey;
+  if (document.authority_id !== expectedKey) throw new StateStoreError("IDENTITY_MISMATCH", "node timing identity projection failed");
+  await publishStaticTimeAuthority({ stateRoot: input.stateRoot, runId: input.runId, document });
+  const durable = await durableStaticTimeAuthority({ stateRoot: input.stateRoot, runId: input.runId }, expectedKey);
+  if (durable.content_sha256 !== document.content_sha256) throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "a different node timing document owns this semantic key");
+  return durable as NodeTimeAuthorityDocument;
 }
 
 export async function initializeRunStorage(input: InitializeRunStorageInput): Promise<CommittedRunState> {

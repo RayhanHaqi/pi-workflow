@@ -30,6 +30,7 @@ export type {
   M3ResumeLockHandoverDocument,
   M3RetentionResultDocument,
   M3TerminalRetentionAuthorityDocument,
+  NodeTimeAuthorityDocument,
   M4AdmissionRefusalDocument,
   M4CommandCatalogDocument,
   M4CommandResultDocument,
@@ -62,6 +63,7 @@ export type {
   RouteMapDocument,
   RoutingDocument,
   SchemaId,
+  StaticTimeAuthorityDocument,
   StateTransitionCommitDocument,
   TaskDocument,
   TaskGraphDocument,
@@ -69,6 +71,7 @@ export type {
   TransitionEvent,
   WorkflowPhase,
   WorkflowState,
+  WorkflowTimeAuthorityDocument,
 } from "./definitions.js";
 
 export {

@@ -65,6 +65,14 @@ import {
   type WorkflowState,
 } from "./schemas/index.js";
 import { createInitialState } from "./state-machine/index.js";
+import { selectReadyLeafUnchecked } from "./state-machine/reducer.js";
+import {
+  establishNodeStaticTimeAuthority,
+  establishWorkflowStaticTimeAuthority,
+} from "./persistence/store.js";
+import { staticNodeDeadlineExpired, staticWorkflowDeadlineExpired } from "./persistence/static-time-authority.js";
+import { sampleWallClockMs } from "./wall-clock.js";
+import type { NodeTimeAuthorityDocument, WorkflowTimeAuthorityDocument } from "./schemas/index.js";
 import { configureBoundedWorkerFauxRuntimeForTests, runBoundedWorker, runBoundedWorkerForTests, type BoundedWorkerRoute } from "./pi-adapter/bounded-worker.js";
 
 const execFileAsync = promisify(execFile);
@@ -1249,29 +1257,54 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     // the exact Contract or Plan evidence that this callback verified.
     await approvalDigest();
     const approvedStaticTimeBudgets = goal.execution_mode === "STATIC_APPROVED_DAG" ? budgetDocument.limits.static_time_budgets : undefined;
-    const workflowStartedAt = approvedStaticTimeBudgets === undefined ? null : Date.now();
+    // V1-R2D-TIME: durable M2 wall-clock anchors replace the process-memory
+    // workflow/node start timestamps. Both stay null outside frozen static
+    // time budgets, preserving legacy default-deadline behavior exactly.
+    let workflowTimeAuthority: WorkflowTimeAuthorityDocument | null = null;
+    let nodeTimeAuthority: NodeTimeAuthorityDocument | null = null;
     const assertStaticWorkflowDeadline = (stage: string): void => {
-      if (workflowStartedAt !== null && Date.now() - workflowStartedAt >= approvedStaticTimeBudgets!.workflow_wall_ms) {
+      if (workflowTimeAuthority === null) return;
+      if (staticWorkflowDeadlineExpired(workflowTimeAuthority, sampleWallClockMs())) {
         throw new BoundedWorkflowError("STATIC_WORKFLOW_WALL_DEADLINE_EXCEEDED", `frozen static workflow wall deadline exhausted before ${stage}`);
       }
     };
-    const assertStaticNodeDeadline = (startedAt: number, stage: string): void => {
-      if (approvedStaticTimeBudgets === undefined) return;
+    const assertStaticNodeDeadline = (stage: string): void => {
+      if (nodeTimeAuthority === null) {
+        assertStaticWorkflowDeadline(stage);
+        return;
+      }
       assertStaticWorkflowDeadline(stage);
-      if (Date.now() - startedAt >= approvedStaticTimeBudgets.node_wall_ms) {
+      if (staticNodeDeadlineExpired(nodeTimeAuthority, sampleWallClockMs())) {
         throw new BoundedWorkflowError("STATIC_NODE_WALL_DEADLINE_EXCEEDED", `frozen static node wall deadline exhausted before ${stage}`);
       }
     };
-    const invoke = async (operationId: string, task: TaskDocument | null, workerPlan: PlanApprovalDocument | null, profile: "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT", routeRole: BoundedWorkerRoute["logicalRole"], nodeStartedAt?: number): Promise<ResolvedWorkerInvocation> => {
+    if (goal.execution_mode === "STATIC_APPROVED_DAG" && approvedStaticTimeBudgets !== undefined) {
+      // Exact execution approval accepted -> read the exact current M2 predecessor
+      // -> sample the clock ONCE -> publish-or-reuse the WORKFLOW timing authority
+      // -> check the workflow deadline -> FREEZE_STATIC_DAG. Publication happens
+      // strictly BEFORE the freeze; a prepared record left behind by a failed
+      // freeze stays valid unreferenced evidence.
+      const predecessor = await expected();
+      workflowTimeAuthority = await establishWorkflowStaticTimeAuthority({
+        stateRoot, runId: RUN_ID,
+        approvedPlanContentSha256: planDocument!.content_sha256 as Sha256Digest,
+        workflowWallBudgetMs: approvedStaticTimeBudgets.workflow_wall_ms,
+        epoch: {
+          revision: predecessor.expectedRevision,
+          workflow_state_content_sha256: predecessor.inspection.workflowState!.content_sha256,
+          transition_commit_content_sha256: predecessor.inspection.transitionCommit!.content_sha256,
+        },
+      });
+      assertStaticWorkflowDeadline("static workflow start");
+    }
+    const invoke = async (operationId: string, task: TaskDocument | null, workerPlan: PlanApprovalDocument | null, profile: "MUTATION_EXECUTOR" | "SOL_PLANNER" | "SOL_CLOSEOUT", routeRole: BoundedWorkerRoute["logicalRole"]): Promise<ResolvedWorkerInvocation> => {
       assertNotCancelled("worker reservation");
-      if (nodeStartedAt === undefined) assertStaticWorkflowDeadline("worker reservation");
-      else assertStaticNodeDeadline(nodeStartedAt, "worker reservation");
+      assertStaticNodeDeadline("worker reservation");
       sources = { ...sources, m3StateTokens: [gateway.acceptedState] };
       const admission = await decision("AUTHORIZE_WORK", `pre-m8-authorize-${operationId}`, { operationId, usageEvidence: usages.slice(publishedUsageCount) });
       publishedUsageCount = usages.length;
       assertNotCancelled("worker invocation");
-      if (nodeStartedAt === undefined) assertStaticWorkflowDeadline("worker invocation");
-      else assertStaticNodeDeadline(nodeStartedAt, "worker invocation");
+      assertStaticNodeDeadline("worker invocation");
       if (admission.outcome !== "AUTHORIZE" || admission.reservation === null) throw new BoundedWorkflowError("M5_ADMISSION", admission.blocking_reason ?? "M5 refused worker");
       const selectedRoute = route.routes.find((entry) => entry.logical_role === routeRole);
       if (selectedRoute === undefined) throw new Error("product route is absent");
@@ -1285,8 +1318,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         allowedReadPaths: readableScope.regularFilePaths, allowedEditPaths: task?.scope.editable_paths ?? [], maxM4ToolCalls, maxM4MutationCalls,
         maxModelTurns: (() => { const remaining = admission.budget.find((entry) => entry.dimension === "MODEL_TURN")?.soft_remaining; if (remaining === undefined || remaining === null) throw new BoundedWorkflowError("M5_MODEL_TURN_AUTHORITY", "M5 did not provide an enforceable model-turn admission remainder"); return remaining; })(),
         deadlineMs: approvedStaticTimeBudgets?.worker_deadline_ms ?? MAX_WALL_TIME_MS, signal: controllerAbort.signal });
-      if (nodeStartedAt === undefined) assertStaticWorkflowDeadline("worker postflight");
-      else assertStaticNodeDeadline(nodeStartedAt, "worker postflight");
+      assertStaticNodeDeadline("worker postflight");
       const [inspection, records, m5Records] = await Promise.all([inspectRunStorage({ stateRoot, runId: RUN_ID }), readBoundedWorkerRecords({ stateRoot, runId: RUN_ID }), readM5ManagedRecords({ stateRoot, runId: RUN_ID })]);
       const persistedInvocation = records.invocations.find((entry) => entry.content_sha256 === execution.invocation.content_sha256); const persistedResult = records.results.find((entry) => entry.content_sha256 === execution.result.content_sha256);
       const reservationStates = m5Records.workflowStates.filter((entry) => entry.content_sha256 === admission.current_state_content_sha256);
@@ -1329,8 +1361,8 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         await commit(type, staticTransitionIndex, payload);
         staticTransitionIndex += 1;
       };
-      const staticVerification = async (task: TaskDocument, nodeStartedAt: number) => {
-        assertStaticNodeDeadline(nodeStartedAt, "static verification admission");
+      const staticVerification = async (task: TaskDocument) => {
+        assertStaticNodeDeadline("static verification admission");
         const taskSpecs = task.verification_commands.map((command) => {
           const spec = specs.find((candidate) => candidate.command_id === command.command_id);
           if (spec === undefined) throw new BoundedWorkflowError("STATIC_LEAF_VERIFICATION_AUTHORITY_MISSING", "frozen task verification command is absent from controller authority");
@@ -1339,7 +1371,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         const results: Awaited<ReturnType<typeof gateway.run_verification_command>>["record"][] = [];
         const postflights: M3PostflightDocument[] = [];
         for (const spec of taskSpecs) {
-          assertStaticNodeDeadline(nodeStartedAt, "static verification command admission");
+          assertStaticNodeDeadline("static verification command admission");
           const tokenBefore = gateway.acceptedState.content_sha256 as Sha256Digest;
           let record: Awaited<ReturnType<typeof gateway.run_verification_command>>["record"] | undefined;
           try {
@@ -1349,7 +1381,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
             record = durable.commandResults.find((candidate) => candidate.command_id === spec.command_id && candidate.state_token_before === tokenBefore);
             if (record === undefined) throw new BoundedWorkflowError("STATIC_LEAF_VERIFICATION_EVIDENCE_MISSING", "failed frozen verification did not retain its command result");
           }
-          assertStaticNodeDeadline(nodeStartedAt, "static verification postflight");
+          assertStaticNodeDeadline("static verification postflight");
           const durable = await readM5ManagedRecords({ stateRoot, runId: RUN_ID });
           const persisted = durable.commandResults.find((candidate) => candidate.content_sha256 === record.content_sha256);
           const postflight = record.postflight_content_sha256 === null ? undefined : durable.postflights.find((candidate) => candidate.content_sha256 === record.postflight_content_sha256);
@@ -1369,20 +1401,42 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       };
       for (let index = 0; index < tasks.length && !staticStopped; index += 1) {
         assertStaticWorkflowDeadline("static node admission");
-        const nodeStartedAt = Date.now();
+        // NODE START BOUNDARY (load-bearing): canonical reducer selection against
+        // the fresh exact READY predecessor, then clock sampled ONCE, then the
+        // NODE timing authority published BEFORE SELECT_READY_LEAF so a lost
+        // select response can reuse the exact durable timestamp. The predecessor
+        // transition commit stored here is the already-durable READY predecessor
+        // commit, never the future SELECT commit.
+        const readyTaskId = selectReadyLeafUnchecked((await expected()).inspection.workflowState!, reducerPolicy);
+        if (readyTaskId === null) throw new BoundedWorkflowError("NO_READY_LEAF", "No dependency-satisfied leaf is ready");
+        if (approvedStaticTimeBudgets !== undefined) {
+          const readyPredecessor = await expected();
+          nodeTimeAuthority = await establishNodeStaticTimeAuthority({
+            stateRoot, runId: RUN_ID,
+            taskId: readyTaskId,
+            nodeWallBudgetMs: approvedStaticTimeBudgets.node_wall_ms,
+            workflowTimeAuthorityContentSha256: workflowTimeAuthority!.content_sha256 as Sha256Digest,
+            epoch: {
+              revision: readyPredecessor.expectedRevision,
+              workflow_state_content_sha256: readyPredecessor.inspection.workflowState!.content_sha256,
+              transition_commit_content_sha256: readyPredecessor.inspection.transitionCommit!.content_sha256,
+            },
+          });
+          assertStaticNodeDeadline("static node admission");
+        }
         await staticCommit("SELECT_READY_LEAF");
-        assertStaticNodeDeadline(nodeStartedAt, "static node admission");
-        const taskId = (await expected()).inspection.workflowState!.active_task_id;
-        const task = tasks.find((candidate) => candidate.task_id === taskId);
+        const committedTaskId = (await expected()).inspection.workflowState!.active_task_id;
+        if (committedTaskId !== readyTaskId) throw new BoundedWorkflowError("READY_LEAF_MISMATCH", "committed selection differs from canonical ready-leaf selection");
+        const task = tasks.find((candidate) => candidate.task_id === committedTaskId);
         if (task === undefined) throw new BoundedWorkflowError("STATIC_DAG_READY_NODE_MISSING", "ready-node selection did not identify a frozen task");
         for (let attempt = 1; !staticStopped; attempt += 1) {
-          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", staticExecutorRole, nodeStartedAt);
+          const worker = await invoke(`static-leaf-${task.task_id}-attempt-${attempt}`, task, planDocument, "MUTATION_EXECUTOR", staticExecutorRole);
           if (closeProductiveAuthority(worker)) { staticStopped = true; break; }
-          assertStaticNodeDeadline(nodeStartedAt, "static node mutation postflight");
+          assertStaticNodeDeadline("static node mutation postflight");
           await staticCommit("COMPLETE_LEAF_ATTEMPT");
-          const verified = await staticVerification(task, nodeStartedAt);
+          const verified = await staticVerification(task);
           const failure = verified.results.find((record) => record.outcome !== "PASS");
-          assertStaticNodeDeadline(nodeStartedAt, "static node verification transition");
+          assertStaticNodeDeadline("static node verification transition");
           await staticCommit("PASS_LEAF_POSTFLIGHT");
           if (failure === undefined) {
             await staticCommit("LEAF_VERIFICATION_PASSED");
@@ -1402,7 +1456,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
             operationId: worker.operationId, scopeIdentity: m5.scope_sha256 as Sha256Digest,
             repositoryIdentity: m5.repository_identity_content_sha256 as Sha256Digest, worktreeKey: m5.worktree_key as Sha256Digest,
           };
-          assertStaticNodeDeadline(nodeStartedAt, "static node retry authorization");
+          assertStaticNodeDeadline("static node retry authorization");
           const continuation = await decision("AUTHORIZE_CONTINUATION", `pre-m8-static-repair-${task.task_id}-${attempt}`, {
             operationId: worker.operationId,
             progressEvidence: { claimedKind: "NEW_TEST_EVIDENCE", evidenceContentSha256: [failure.content_sha256 as Sha256Digest] },

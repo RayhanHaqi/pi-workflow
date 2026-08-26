@@ -4,7 +4,9 @@ import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
 import type { M5AuthoritativeSources } from "./control/types.js";
 import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { commitTransition, inspectRunStorage } from "./persistence/index.js";
-import { readM5ManagedRecords } from "./persistence/store.js";
+import { establishNodeStaticTimeAuthority, readM5ManagedRecords } from "./persistence/store.js";
+import { resolveApplicableResumeTiming, staticTimingVerdicts } from "./persistence/static-time-authority.js";
+import { sampleWallClockMs } from "./wall-clock.js";
 import {
   acquireWorktreeLock,
   assertWorktreeLockHeld,
@@ -27,6 +29,7 @@ import {
   type ResumeInspectionInput,
   type ResumeRefusalReason,
 } from "./resume-inspection.js";
+import { selectReadyLeafUnchecked } from "./state-machine/reducer.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import {
   identifyContractDocument,
@@ -239,6 +242,40 @@ export async function activateDeterministicResumeAdmission(admission: Determinis
     const reservationsBefore = records.decisions.filter((decision) => decision.reservation !== null).length;
     const invocationsBefore = records.boundedWorkerInvocations.length;
     if (selectedBefore === undefined || selectedBefore.status !== "PENDING") return refused("RESUME_REFUSED_STATE_STORE");
+    // V1-R2D-TIME NODE START BOUNDARY: the durable SELECT_READY_LEAF below must not
+    // begin a node epoch without its timing authority. Resolve applicable timing,
+    // then establish-or-reuse the exact prepared NODE authority under this lock
+    // BEFORE the select commit so a lost response reuses the same timestamp.
+    {
+      const timing = resolveApplicableResumeTiming({
+        runId: binding.run_id, state: prior.workflowState, tipCommit: prior.transitionCommit,
+        records: {
+          transitionCommits: records.transitionCommits, workflowStates: records.workflowStates,
+          transitionEvents: records.transitionEvents, authorities: records.staticTimeAuthorities,
+        },
+        verdicts: staticTimingVerdicts(prior.managedRecordClassifications),
+        nowMs: sampleWallClockMs(),
+      });
+      if (timing.outcome === "REFUSED" || timing.workflow === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+      // Derived canonical selection must equal the timing record's exact task.
+      if (selectReadyLeafUnchecked(prior.workflowState, policy) !== selectedTaskId) return refused("RESUME_REFUSED_STATE_STORE");
+      if (timing.node === null) {
+        const budget = records.budgets.find((entry) => entry.budget_sha256 === prior.workflowState.identities.budget_sha256);
+        const staticBudgets = budget?.limits.static_time_budgets;
+        if (budget === undefined || staticBudgets === undefined || staticBudgets.workflow_wall_ms !== timing.workflow.wall_budget_ms) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+        await establishNodeStaticTimeAuthority({
+          stateRoot: location.stateRoot, runId: binding.run_id,
+          taskId: selectedTaskId,
+          nodeWallBudgetMs: staticBudgets.node_wall_ms,
+          workflowTimeAuthorityContentSha256: timing.workflow.content_sha256 as Sha256Digest,
+          epoch: {
+            revision: prior.revision,
+            workflow_state_content_sha256: prior.workflowState.content_sha256,
+            transition_commit_content_sha256: prior.transitionCommit.content_sha256,
+          },
+        });
+      }
+    }
     await commitTransition({
       ...location, expectedRevision: prior.revision, expectedStatePointerContentSha256: prior.statePointer.content_sha256 as Sha256Digest,
       expectedWorkflowStateContentSha256: prior.workflowState.content_sha256 as Sha256Digest,

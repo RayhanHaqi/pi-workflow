@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { canonicalize } from "../src/canonical-json/index.js";
 import type { Sha256Digest } from "../src/identity/index.js";
 import { commitTransition, inspectRunStorage } from "../src/persistence/index.js";
-import { readM5ManagedRecords } from "../src/persistence/store.js";
+import { establishNodeStaticTimeAuthority, readM5ManagedRecords } from "../src/persistence/store.js";
 import {
   acquireWorktreeLock,
   probeWorktreeLockAvailability,
@@ -89,6 +89,34 @@ async function rejectsCode(promise: Promise<unknown>, expected: string): Promise
   await assert.rejects(promise, (error: unknown) => codeOf(error) === expected || (error instanceof DeterministicResumeAdmissionError && error.code === expected));
 }
 
+/**
+ * V1-R2D-TIME: a simulated response-loss select must mirror the production order —
+ * publish the prepared NODE timing authority BEFORE committing SELECT_READY_LEAF —
+ * otherwise the selected leaf legitimately refuses as missing NODE timing.
+ */
+async function establishReadyNodeTimingBeforeExternalSelect(
+  location: { readonly stateRoot: string; readonly runId: string },
+  taskId: string,
+): Promise<void> {
+  const inspection = await inspectRunStorage(location);
+  const records = await readM5ManagedRecords(location);
+  const state = inspection.workflowState!;
+  const workflow = records.staticTimeAuthorities.find((entry) => entry.authority_scope === "WORKFLOW");
+  assert.ok(workflow, "fixture run has no durable WORKFLOW timing authority");
+  const budget = records.budgets.find((entry) => entry.budget_sha256 === state.identities.budget_sha256)!;
+  await establishNodeStaticTimeAuthority({
+    ...location,
+    taskId,
+    nodeWallBudgetMs: budget.limits.static_time_budgets!.node_wall_ms,
+    workflowTimeAuthorityContentSha256: workflow.content_sha256 as Sha256Digest,
+    epoch: {
+      revision: inspection.revision!,
+      workflow_state_content_sha256: state.content_sha256,
+      transition_commit_content_sha256: inspection.transitionCommit!.content_sha256,
+    },
+  });
+}
+
 async function m2Snapshot(root: string, repository: string) {
   const statePath = join(root, "state", "runs", "pre-m8-bounded", "state.json");
   return Promise.all([readFile(statePath), inventory(join(root, "state", "runs")), resolveRepositoryIdentity({ requestedPath: repository, requireHead: true }).then(captureGitState)]);
@@ -165,6 +193,7 @@ test("under-lock repository drift and fresh state-pointer revalidation refuse st
     const policy = records.reducerPolicies.find((entry) => entry.content_sha256 === initial.workflowState!.frozen_policy_content_sha256)!;
     const repository = await resolveRepositoryIdentity({ requestedPath: stale.repository, requireHead: true });
     lock = await acquireWorktreeLock({ stateRoot: location.stateRoot, repository });
+    await establishReadyNodeTimingBeforeExternalSelect(location, "a");
     await commitTransition({
       ...location,
       expectedRevision: initial.revision!, expectedStatePointerContentSha256: initial.statePointer!.content_sha256 as Sha256Digest,
@@ -277,6 +306,7 @@ test("stale admission cannot commit a second SELECT_READY_LEAF transition", asyn
     const location = { stateRoot: join(fixture.root, "state"), runId: "pre-m8-bounded" };
     const prior = await inspectRunStorage(location); const records = await readM5ManagedRecords(location);
     const policy = records.reducerPolicies.find((entry) => entry.content_sha256 === prior.workflowState!.frozen_policy_content_sha256)!;
+    await establishReadyNodeTimingBeforeExternalSelect(location, "a");
     await commitTransition({
       ...location, expectedRevision: prior.revision!, expectedStatePointerContentSha256: prior.statePointer!.content_sha256 as Sha256Digest,
       expectedWorkflowStateContentSha256: prior.workflowState!.content_sha256 as Sha256Digest, transitionId: "resume-activation-stale-admission", policy,

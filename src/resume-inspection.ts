@@ -4,8 +4,10 @@ import { isAbsolute, join } from "node:path";
 import { canonicalize } from "./canonical-json/index.js";
 import { inspectRunStorage } from "./persistence/index.js";
 import { readM5ManagedRecords } from "./persistence/store.js";
+import { resolveApplicableResumeTiming, staticTimingVerdicts } from "./persistence/static-time-authority.js";
 import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/preflight.js";
 import { selectReadyLeafUnchecked } from "./state-machine/reducer.js";
+import { sampleWallClockMs } from "./wall-clock.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import { resolveRepositoryIdentity } from "./repository/index.js";
 import { probeWorktreeLockAvailability } from "./repository/lock.js";
@@ -20,6 +22,7 @@ export type ResumeRefusalReason =
   | "RESUME_REFUSED_STATE_DRIFT"
   | "RESUME_REFUSED_BASELINE_AUTHORITY"
   | "RESUME_REFUSED_EXECUTION_AUTHORITY"
+  | "RESUME_REFUSED_TIMING_AUTHORITY"
   | "RESUME_REFUSED_IN_FLIGHT_OPERATION"
   | "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT";
 
@@ -351,11 +354,31 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
     return refused(runId, state, "RESUME_REFUSED_BASELINE_AUTHORITY");
   }
   if (inspection.managedRecordClassifications.some((entry) => (entry.classification === "INVALID_MANAGED_RECORD" || entry.classification === "UNCOMMITTED_BASELINE_PUBLICATION") &&
-    entry.object.kind !== "M3_BASELINE" && entry.object.kind !== "M3_BASELINE_APPROVAL" && entry.object.kind !== "M3_BASELINE_BLOB")) {
+    entry.object.kind !== "M3_BASELINE" && entry.object.kind !== "M3_BASELINE_APPROVAL" && entry.object.kind !== "M3_BASELINE_BLOB" && entry.object.kind !== "M2_STATIC_TIME_AUTHORITY")) {
     return refused(runId, state, "RESUME_REFUSED_STATE_STORE");
   }
   const authority = executionAuthorityComplete(state, records, inspection.managedRecordClassifications);
   if (authority === null) return refused(runId, state, "RESUME_REFUSED_EXECUTION_AUTHORITY");
+  if (state.execution_mode === "STATIC_APPROVED_DAG") {
+    // V1-R2D-TIME: applicable durable timing must resolve and be unexpired.
+    // Read-only: never mutates M2 and never creates timing records. A READY state
+    // without a NODE authority is not invalid here; a legacy started run without
+    // any WORKFLOW timing authority refuses timing eligibility (not STATE_STORE).
+    const verdicts = staticTimingVerdicts(inspection.managedRecordClassifications);
+    const timing = resolveApplicableResumeTiming({
+      runId, state,
+      tipCommit: inspection.transitionCommit,
+      records: {
+        transitionCommits: records.transitionCommits,
+        workflowStates: records.workflowStates,
+        transitionEvents: records.transitionEvents,
+        authorities: records.staticTimeAuthorities,
+      },
+      verdicts,
+      nowMs: sampleWallClockMs(),
+    });
+    if (timing.outcome === "REFUSED") return refused(runId, state, "RESUME_REFUSED_TIMING_AUTHORITY");
+  }
   const preProviderPoint = deriveStaticDagPreProviderResumePoint(state, authority.policy, records, inspection.managedRecordClassifications, inspection.transitionCommit);
   if (preProviderPoint === null && !settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
 

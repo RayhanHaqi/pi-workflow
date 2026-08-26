@@ -1288,6 +1288,50 @@ export const M3ResumeLockHandoverSchema = StrictObject(
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_resume_lock_handover_v0.schema.json" },
 );
 
+// Durable static wall-clock timing authority (V1-R2D-TIME, M2-owned). One strict
+// discriminated document schema with WORKFLOW and NODE variants. Deliberately
+// carries no deadline field, budget digest, task-content digest, M3 token or
+// lock identity, PID, filesystem timestamp, or process start time: the deadline
+// is derived exactly as started_at_epoch_ms + wall_budget_ms under safe-integer
+// arithmetic, and every other identity is inherited through the named exact
+// predecessor transition epoch so a sampled start time can never be silently
+// widened across a crash or resume.
+export const WorkflowStaticTimeAuthoritySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_static_time_authority_v0"),
+    run_id: RunId(),
+    authority_scope: Type.Literal("WORKFLOW"),
+    authority_id: Digest(),
+    approved_plan_content_sha256: Digest(),
+    predecessor_revision: Type.Integer({ minimum: 0 }),
+    predecessor_workflow_state_content_sha256: Digest(),
+    predecessor_transition_commit_content_sha256: Digest(),
+    wall_budget_ms: Type.Integer({ minimum: 1, maximum: 604_800_000 }),
+    started_at_epoch_ms: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  },
+);
+
+export const NodeStaticTimeAuthoritySchema = StrictObject(
+  {
+    ...DocumentFields("pi_gacw_static_time_authority_v0"),
+    run_id: RunId(),
+    authority_scope: Type.Literal("NODE"),
+    authority_id: Digest(),
+    workflow_time_authority_content_sha256: Digest(),
+    predecessor_revision: Type.Integer({ minimum: 0 }),
+    predecessor_workflow_state_content_sha256: Digest(),
+    predecessor_transition_commit_content_sha256: Digest(),
+    task_id: Identifier(),
+    wall_budget_ms: Type.Integer({ minimum: 1, maximum: 604_800_000 }),
+    started_at_epoch_ms: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  },
+);
+
+export const StaticTimeAuthoritySchema = Type.Union(
+  [WorkflowStaticTimeAuthoritySchema, NodeStaticTimeAuthoritySchema],
+  { $id: "https://pi-gacw.invalid/schemas/pi_gacw_static_time_authority_v0.schema.json" },
+);
+
 export const M3DeltaEntrySchema = StrictObject({
   path: PathString(),
   change_kind: StringEnum(["ADDED", "MODIFIED", "DELETED", "TYPE_CHANGED", "MODE_CHANGED", "BASELINE_REVERTED"] as const),
@@ -2282,6 +2326,7 @@ const internalSchemaRegistry = [
   { schemaId: "pi_gacw_m5_control_decision_v0", fileName: "pi_gacw_m5_control_decision_v0.schema.json", schema: M5ControlDecisionSchema },
   { schemaId: "pi_gacw_m6_worker_invocation_v0", fileName: "pi_gacw_m6_worker_invocation_v0.schema.json", schema: M6WorkerInvocationSchema },
   { schemaId: "pi_gacw_m6_worker_result_v0", fileName: "pi_gacw_m6_worker_result_v0.schema.json", schema: M6WorkerResultSchema },
+  { schemaId: "pi_gacw_static_time_authority_v0", fileName: "pi_gacw_static_time_authority_v0.schema.json", schema: StaticTimeAuthoritySchema },
   { schemaId: "pi_gacw_bounded_worker_invocation_v0", fileName: "pi_gacw_bounded_worker_invocation_v0.schema.json", schema: BoundedWorkerInvocationSchema },
   { schemaId: "pi_gacw_bounded_worker_result_v0", fileName: "pi_gacw_bounded_worker_result_v0.schema.json", schema: BoundedWorkerResultSchema },
 ] as const;
@@ -2356,6 +2401,9 @@ export type M3RepositoryStateTokenDocument = Static<typeof M3RepositoryStateToke
 export type M3DeltaEntry = Static<typeof M3DeltaEntrySchema>;
 export type M3PostflightDocument = Static<typeof M3PostflightSchema>;
 export type M3ResumeLockHandoverDocument = Static<typeof M3ResumeLockHandoverSchema>;
+export type WorkflowTimeAuthorityDocument = Static<typeof WorkflowStaticTimeAuthoritySchema>;
+export type NodeTimeAuthorityDocument = Static<typeof NodeStaticTimeAuthoritySchema>;
+export type StaticTimeAuthorityDocument = Static<typeof StaticTimeAuthoritySchema>;
 export type M3TerminalRetentionAuthorityDocument = Static<typeof M3TerminalRetentionAuthoritySchema>;
 export type M3RetentionResultDocument = Static<typeof M3RetentionResultSchema>;
 export type M4PathRule = Static<typeof M4PathRuleSchema>;

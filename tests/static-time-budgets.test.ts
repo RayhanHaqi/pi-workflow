@@ -15,6 +15,7 @@ import {
 } from "../src/workflow-controller.js";
 import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
 import { identifyContractDocument, type PlanApprovalDocument } from "../src/schemas/index.js";
+import { installTestWallClock } from "../src/wall-clock.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,14 +91,16 @@ async function runStatic(
   }
 }
 
+// V1-R2D-TIME: durable timing consumes the package clock seam, so tests override
+// time through it instead of monkey-patching Date.now (which the backward-motion
+// guard must keep rejecting).
 async function withFakeDate<T>(action: (advance: (milliseconds: number) => void) => Promise<T>): Promise<T> {
-  const original = Date.now;
   let now = 0;
-  Date.now = () => now;
+  installTestWallClock(() => now);
   try {
     return await action((milliseconds) => { now += milliseconds; });
   } finally {
-    Date.now = original;
+    installTestWallClock(null);
   }
 }
 
