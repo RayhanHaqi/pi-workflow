@@ -459,3 +459,22 @@ export function classifyM5Authority(input: M5AuthorityInput): readonly ManagedRe
       input.runAuthorityValidatedPolicyDigests?.has(decision.policy_content_sha256) === true) root(digest);
   return [...results.values()].sort((a, b) => compare(a.object.relativePath, b.object.relativePath));
 }
+
+export type StaticMaxM4MutationCallsResolution =
+  | { readonly outcome: "RESOLVED"; readonly value: 1 | 32 }
+  | { readonly outcome: "ABSENT" }
+  | { readonly outcome: "NOT_STATIC" };
+
+export function resolveStaticMaxM4MutationCalls(policy: M5ControlPolicyDocument): StaticMaxM4MutationCallsResolution {
+  if (policy.requested_mode !== "STATIC_APPROVED_DAG") {
+    return { outcome: "NOT_STATIC" };
+  }
+  const raw = (policy as unknown as { readonly static_max_m4_mutation_calls?: unknown }).static_max_m4_mutation_calls;
+  if (raw === undefined) {
+    return { outcome: "ABSENT" };
+  }
+  if (raw === 1 || raw === 32) {
+    return { outcome: "RESOLVED", value: raw };
+  }
+  return { outcome: "ABSENT" };
+}

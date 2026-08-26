@@ -1939,6 +1939,7 @@ export const M5ControlPolicySchema = StrictObject(
     maximum_control_decisions: Type.Integer({ minimum: 1, maximum: 100_000 }),
     maximum_usage_records: Type.Integer({ minimum: 0, maximum: 100_000 }),
     maximum_authority_depth: Type.Integer({ minimum: 1, maximum: 64 }),
+    static_max_m4_mutation_calls: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(32)])),
   },
   { $id: "https://pi-gacw.invalid/schemas/pi_gacw_m5_control_policy_v0.schema.json" },
 );

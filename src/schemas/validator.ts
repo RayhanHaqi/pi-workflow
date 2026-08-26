@@ -1224,6 +1224,19 @@ function assertM5PolicyDocumentSemantics(policy: M5ControlPolicyDocument): void 
   if (facts.leaf_count > facts.task_count || facts.unique_write_ownership === facts.ownership_ambiguous) {
     throw new ContractValidationError("CONTRADICTORY_M5_ROUTE_FACTS", "Leaf/task or ownership facts contradict");
   }
+  const staticMax = (policy as { readonly static_max_m4_mutation_calls?: unknown }).static_max_m4_mutation_calls;
+  if (staticMax !== undefined) {
+    if (policy.requested_mode !== "STATIC_APPROVED_DAG") {
+      throw new ContractValidationError("STATIC_MUTATION_MODE_MISMATCH", "static_max_m4_mutation_calls is restricted to STATIC_APPROVED_DAG");
+    }
+    if (staticMax !== 1 && staticMax !== 32) {
+      throw new ContractValidationError("INVALID_STATIC_MUTATION_LIMIT", "static_max_m4_mutation_calls must be 1 or 32");
+    }
+    const toolCallLimit = policy.limits.find((entry) => entry.dimension === "TOOL_CALL")?.hard_limit ?? null;
+    if (toolCallLimit !== null && (staticMax as number) > toolCallLimit) {
+      throw new ContractValidationError("STATIC_MUTATION_EXCEEDS_TOOL_ENVELOPE", "static_max_m4_mutation_calls exceeds the frozen TOOL_CALL envelope");
+    }
+  }
 }
 
 function assertM5UsageDocumentSemantics(usage: M5UsageEvidenceDocument): void {

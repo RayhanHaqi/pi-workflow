@@ -922,7 +922,7 @@ async function stageBaselineAuthority(input: {
   return { baseline: capture.baseline, approval, approvalRequest: request };
 }
 
-function m5Policy(repository: M3RepositoryIdentityDocument, state: WorkflowState, reducerPolicy: ReducerPolicy, contractDocument: ContractDocument, budgetDocument: BudgetDocument, routes: RouteMapDocument, approval: RouteMapApprovalDocument, toolPolicy: M4ScopedToolPolicyDocument, catalog: M4CommandCatalogDocument, goal: ReturnType<typeof normalizeGoal>, staticExecutorRole: "TERRA_EXECUTOR" | "CODING_EXECUTOR"): M5ControlPolicyDocument {
+function m5Policy(repository: M3RepositoryIdentityDocument, state: WorkflowState, reducerPolicy: ReducerPolicy, contractDocument: ContractDocument, budgetDocument: BudgetDocument, routes: RouteMapDocument, approval: RouteMapApprovalDocument, toolPolicy: M4ScopedToolPolicyDocument, catalog: M4CommandCatalogDocument, goal: ReturnType<typeof normalizeGoal>, staticExecutorRole: "TERRA_EXECUTOR" | "CODING_EXECUTOR", maxM4MutationCalls: number): M5ControlPolicyDocument {
   const obligations = [
     ...goal.required_outputs.map((value) => ({ declaration: value, direction: "OUTPUT" as const, stage: 1, producer: goal.tasks.find((task) => task.required_outputs.includes(value))!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "FILE" as const, literal: value, prefix: null })),
     ...catalog.commands.map((entry) => ({ declaration: `command:${entry.command_id}`, direction: "OUTPUT" as const, stage: 1, producer: goal.tasks.at(-1)!.task_id, consumers: ["contract"], grammar: "LITERAL" as const, evidence_kind: "COMMAND" as const, literal: entry.command_id, prefix: null })),
@@ -948,7 +948,7 @@ function m5Policy(repository: M3RepositoryIdentityDocument, state: WorkflowState
     ],
     role_reservation_envelopes: roles.map((logical_role) => ({ logical_role, purpose: logical_role === "SOL_CLOSEOUT" ? "REQUIRED_CLOSEOUT" as const : "ORDINARY" as const, amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] })),
     failure_action_table_version: "m5-failure-actions-v1", progress_rule_version: "m5-progress-v1", contract_gate_rule_version: "m5-contract-gate-v1", route_selection_rule_version: "m5-route-selection-v1", insufficient_routing_evidence: "BLOCK",
-    maximum_control_decisions: Math.max(16, leaves * 8), maximum_usage_records: budgetDocument.limits.max_worker_invocations, maximum_authority_depth: 64 }) as unknown as M5ControlPolicyDocument;
+    maximum_control_decisions: Math.max(16, leaves * 8), maximum_usage_records: budgetDocument.limits.max_worker_invocations, maximum_authority_depth: 64, ...(goal.execution_mode === "STATIC_APPROVED_DAG" ? { static_max_m4_mutation_calls: maxM4MutationCalls as 1 | 32 } : {}) }) as unknown as M5ControlPolicyDocument;
 }
 
 async function environment(repository: M3RepositoryIdentityDocument): Promise<RequiredEnvironment> {
@@ -1217,7 +1217,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     assertNotCancelled("M4 gateway admission");
     const m4Policy = await toolPolicy(repository, full.acceptedState, goal, specs); const commandCatalog = catalog(repository, m4Policy, specs);
     const gateway = await createScopedToolGateway({ stateRoot, runId: RUN_ID, repository, baseline, acceptedState: full.acceptedState, lock: lock!, instructionFiles: [], authorityFiles: [], editablePaths: goal.scope.editable_paths, frozenPaths: goal.scope.frozen_paths, taskScopeIdentity: scopeSha, toolPolicy: m4Policy, commandCatalog, temporaryRoot });
-    const m5 = m5Policy(repository, initialState, reducerPolicy, contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, goal, staticExecutorRole);
+    const m5 = m5Policy(repository, initialState, reducerPolicy, contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, goal, staticExecutorRole, maxM4MutationCalls);
     const approvedExecutionAuthority = executionAuthority({ goal, repository, baseline, approval, route, routeApproval: routeApprovalDocument, budget: budgetDocument,
       contract: contractDocument, tasks, graph, plan: planDocument, reducerPolicy, maxM4MutationCalls });
     let sources = sourceBundle(contractDocument, budgetDocument, route, routeApprovalDocument, m4Policy, commandCatalog, gateway.acceptedState, tasks, graph, planDocument);
