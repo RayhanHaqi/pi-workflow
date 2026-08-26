@@ -18,6 +18,7 @@ import {
   readStaticTimeAuthorities,
 } from "../src/persistence/store.js";
 import {
+  nodeStaticTimeAuthorityIdentity,
   resolveApplicableResumeTiming,
   staticDeadlineExpired,
   staticNodeDeadlineExpired,
@@ -627,4 +628,242 @@ test("an exact node-deadline hit blocks inside the same node", async () => {
   assert.match(result.reason, /STATIC_NODE_WALL_DEADLINE_EXCEEDED/);
   assert.equal(result.finalState?.phase, "BLOCKED");
   assert.deepEqual(deadlines, [300_000]);
+});
+
+// ---------------------------------------------------------------------------
+// V1-R2D-TIME-R1 regressions: physical current-epoch resolution, establish
+// reuse semantics, and historical-invalid isolation
+// ---------------------------------------------------------------------------
+
+async function injectTimingRecord(run: TimingRun, document: StaticTimeAuthorityDocument): Promise<void> {
+  await mkdir(join(run.stateRoot, "runs", run.runId, "records", "static-time-authorities"), { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(run.stateRoot, "runs", run.runId, "records", "static-time-authorities", `${document.content_sha256.slice("sha256:".length)}.json`),
+    `${canonicalize(document)}\n`,
+    { mode: 0o600 },
+  );
+}
+
+function nodeAuthorityDocument(input: {
+  readonly runId: string;
+  readonly workflowContentSha256: Sha256Digest;
+  readonly taskId: string;
+  readonly nodeWallBudgetMs: number;
+  readonly epoch: { readonly revision: number; readonly workflow_state_content_sha256: string; readonly transition_commit_content_sha256: string };
+  readonly startedAtEpochMs: number;
+}): StaticTimeAuthorityDocument {
+  return identifyContractDocument("pi_gacw_static_time_authority_v0", {
+    schema_id: "pi_gacw_static_time_authority_v0",
+    schema_version: "0.1.0",
+    content_projection_id: "document-content-v1",
+    run_id: input.runId,
+    authority_scope: "NODE",
+    authority_id: nodeStaticTimeAuthorityIdentity({
+      run_id: input.runId,
+      workflow_time_authority_content_sha256: input.workflowContentSha256,
+      predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
+    }),
+    workflow_time_authority_content_sha256: input.workflowContentSha256,
+    predecessor_revision: input.epoch.revision,
+    predecessor_workflow_state_content_sha256: input.epoch.workflow_state_content_sha256,
+    predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
+    task_id: input.taskId,
+    wall_budget_ms: input.nodeWallBudgetMs,
+    started_at_epoch_ms: input.startedAtEpochMs,
+  }) as unknown as StaticTimeAuthorityDocument;
+}
+
+test("a schema-valid wrong-task NODE record for the exact READY epoch refuses instead of looking absent", async () => {
+  installTestWallClock(() => 110_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const ready = await inspectionOf(run);
+    const wrongTask = nodeAuthorityDocument({
+      runId: run.runId,
+      workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-b", // canonical reducer selection on this epoch is task-a
+      nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms,
+      epoch: {
+        revision: ready.revision!,
+        workflow_state_content_sha256: ready.workflowState!.content_sha256,
+        transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+      },
+      startedAtEpochMs: 110_000,
+    });
+    await injectTimingRecord(run, wrongTask);
+    const classification = await classificationOfDigest(run, wrongTask.content_sha256);
+    assert.equal(classification?.classification, "INVALID_MANAGED_RECORD");
+    // Physical current-epoch match with an INVALID verdict: REFUSED, never ABSENT.
+    assert.equal((await resumeTiming(run, 111_000)).outcome, "REFUSED");
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("a wrong node wall_budget_ms on the exact READY epoch refuses instead of looking absent", async () => {
+  installTestWallClock(() => 120_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const ready = await inspectionOf(run);
+    const widened = nodeAuthorityDocument({
+      runId: run.runId,
+      workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-a",
+      nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms + 1,
+      epoch: {
+        revision: ready.revision!,
+        workflow_state_content_sha256: ready.workflowState!.content_sha256,
+        transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+      },
+      startedAtEpochMs: 120_000,
+    });
+    await injectTimingRecord(run, widened);
+    assert.equal((await classificationOfDigest(run, widened.content_sha256))?.classification, "INVALID_MANAGED_RECORD");
+    const resolution = await resumeTiming(run, 121_000);
+    assert.equal(resolution.outcome, "REFUSED");
+    if (resolution.outcome === "REFUSED") assert.match(resolution.detail, /node_wall_ms/);
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("an incomplete current-epoch NODE chain refuses instead of looking absent", async () => {
+  installTestWallClock(() => 130_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    void workflow;
+    const ready = await inspectionOf(run);
+    // Schema-valid record whose WORKFLOW reference does not resolve to any durable record.
+    const orphanedChain = nodeAuthorityDocument({
+      runId: run.runId,
+      workflowContentSha256: digest(999),
+      taskId: "task-a",
+      nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms,
+      epoch: {
+        revision: ready.revision!,
+        workflow_state_content_sha256: ready.workflowState!.content_sha256,
+        transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+      },
+      startedAtEpochMs: 130_000,
+    });
+    await injectTimingRecord(run, orphanedChain);
+    assert.equal((await classificationOfDigest(run, orphanedChain.content_sha256))?.classification, "INCOMPLETE_MANAGED_RECORD_CHAIN");
+    const resolution = await resumeTiming(run, 131_000);
+    assert.equal(resolution.outcome, "REFUSED");
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("an invalid historical NODE epoch is isolated from a clean current READY epoch", async () => {
+  installTestWallClock(() => 140_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    // Historical leaf-a select epoch gets an INVALID (wrong-task) prepared record.
+    const historicalReady = await inspectionOf(run);
+    const staleEpoch = {
+      revision: historicalReady.revision!,
+      workflow_state_content_sha256: historicalReady.workflowState!.content_sha256,
+      transition_commit_content_sha256: historicalReady.transitionCommit!.content_sha256,
+    };
+    const invalidHistorical = nodeAuthorityDocument({
+      runId: run.runId,
+      workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-b", // wrong for this epoch
+      nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms,
+      epoch: staleEpoch,
+      startedAtEpochMs: 140_000,
+    });
+    await injectTimingRecord(run, invalidHistorical);
+    // Leaf a then completes normally; the CURRENT READY epoch is a different commit.
+    await commitEvent(run, "SELECT_READY_LEAF", {}, "iso-select");
+    await commitEvent(run, "START_LEAF_ATTEMPT", {}, "iso-start");
+    await commitEvent(run, "COMPLETE_LEAF_ATTEMPT", {}, "iso-complete");
+    await commitEvent(run, "PASS_LEAF_POSTFLIGHT", {}, "iso-postflight");
+    const passed = await commitEvent(run, "LEAF_VERIFICATION_PASSED", {}, "iso-verify");
+    assert.equal(passed.workflowState!.phase, "READY");
+    assert.notEqual(passed.transitionCommit!.content_sha256, staleEpoch.transition_commit_content_sha256);
+    // The historical invalid record must not poison the clean current epoch.
+    const classification = await classificationOfDigest(run, invalidHistorical.content_sha256);
+    assert.equal(classification?.classification, "INVALID_MANAGED_RECORD");
+    const resolution = await resumeTiming(run, 141_000);
+    assert.equal(resolution.outcome, "OK");
+    if (resolution.outcome === "OK") assert.equal(resolution.node, null); // eligible to establish
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("establish reuse verifies requested semantics and never resamples on mismatch", async () => {
+  installTestWallClock(() => 150_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const node = await establishPreparedNodeAuthority(run, workflow, "task-a");
+    // Same semantic key, mismatching requested task: typed conflict, no resample.
+    await assert.rejects(
+      establishNodeStaticTimeAuthority({
+        ...loc(run), taskId: "task-b", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms,
+        workflowTimeAuthorityContentSha256: workflow.content_sha256 as Sha256Digest, epoch: await nodeEpochOf(node),
+      }),
+      (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+    );
+    // Same key, mismatching requested budget: identical fail-closed shape.
+    await assert.rejects(
+      establishNodeStaticTimeAuthority({
+        ...loc(run), taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms + 1,
+        workflowTimeAuthorityContentSha256: workflow.content_sha256 as Sha256Digest, epoch: await nodeEpochOf(node),
+      }),
+      (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+    );
+    // The durable record is untouched: same timestamp, still exactly one NODE record.
+    const authorities = await readStaticTimeAuthorities(loc(run));
+    assert.deepEqual(
+      authorities.filter((entry) => entry.authority_scope === "NODE").map((entry) => [entry.started_at_epoch_ms, entry.task_id]),
+      [[node.started_at_epoch_ms, "task-a"]],
+    );
+
+    // WORKFLOW variant: same key with a different requested budget refuses identically.
+    const preFreeze = await inspectionOf(run);
+    void preFreeze;
+    const freshRun = await createStaticTimingRun();
+    try {
+      await advanceToRouteSelected(freshRun);
+      const firstWorkflow = await establishWorkflowAtTip(freshRun);
+      const predecessor = await inspectionOf(freshRun);
+      await assert.rejects(
+        establishWorkflowStaticTimeAuthority({
+          ...loc(freshRun),
+          approvedPlanContentSha256: freshRun.planContentSha256,
+          workflowWallBudgetMs: STATIC_BUDGETS.workflow_wall_ms + 1,
+          epoch: {
+            revision: predecessor.revision!,
+            workflow_state_content_sha256: predecessor.workflowState!.content_sha256,
+            transition_commit_content_sha256: predecessor.transitionCommit!.content_sha256,
+          },
+        }),
+        (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+      );
+      const workflowRecords = await readStaticTimeAuthorities(loc(freshRun));
+      assert.deepEqual(workflowRecords.map((entry) => entry.started_at_epoch_ms), [firstWorkflow.started_at_epoch_ms]);
+    } finally {
+      await rm(freshRun.stateRoot, { recursive: true, force: true });
+    }
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
 });

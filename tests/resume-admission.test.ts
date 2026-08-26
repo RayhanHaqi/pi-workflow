@@ -9,6 +9,7 @@ import { canonicalize } from "../src/canonical-json/index.js";
 import type { Sha256Digest } from "../src/identity/index.js";
 import { commitTransition, inspectRunStorage } from "../src/persistence/index.js";
 import { establishNodeStaticTimeAuthority, readM5ManagedRecords } from "../src/persistence/store.js";
+import { nodeStaticTimeAuthorityIdentity } from "../src/persistence/static-time-authority.js";
 import {
   acquireWorktreeLock,
   probeWorktreeLockAvailability,
@@ -28,6 +29,8 @@ import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.
 import { captureGitState } from "../src/repository/fingerprint.js";
 import { processMetadata } from "./persistence-helpers.js";
 import { transitionEvent } from "./helpers.js";
+import { identifyContractDocument, type StaticTimeAuthorityDocument } from "../src/schemas/index.js";
+import { installTestWallClock } from "../src/wall-clock.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -316,6 +319,125 @@ test("stale admission cannot commit a second SELECT_READY_LEAF transition", asyn
     const successor = await inspectRunStorage(location);
     assert.equal(successor.revision, prior.revision! + 1); assert.equal(successor.workflowState?.phase, "LEAF_FAST_PREFLIGHT");
     assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_START_SELECTED_LEAF:a");
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// V1-R2D-TIME-R1: R2B post-establish recheck and invalid current-epoch refusal
+// ---------------------------------------------------------------------------
+
+test("R2B expiry after NODE establishment refuses before SELECT and retains the prepared authority", async () => {
+  const fixture = await interruptFixture("READY");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:a");
+    const location = { stateRoot: join(fixture.root, "state"), runId: "pre-m8-bounded" };
+    const before = await inspectRunStorage(location);
+    const recordsBefore = await readM5ManagedRecords(location);
+    const workflowAuthority = recordsBefore.staticTimeAuthorities.find((entry) => entry.authority_scope === "WORKFLOW");
+    assert.ok(workflowAuthority, "fixture run lacks its durable WORKFLOW timing authority");
+
+    // Seam samples with this counting source: acquisition consumes one sample,
+    // then activation samples (2) pre-establish resolution, (3) NODE establishment,
+    // (4+) the R4 post-establish recheck. The establishment sample defines the new
+    // record's own durable horizon, so the recheck sample must exceed THAT record's
+    // frozen node deadline for expiry to land after establishment but before select.
+    const fakeBase = workflowAuthority.started_at_epoch_ms + 100_000;
+    let establishedAt: number | null = null;
+    let seamCalls = 0;
+    installTestWallClock(() => {
+      seamCalls += 1;
+      if (seamCalls <= 2) return fakeBase;
+      if (establishedAt === null) { establishedAt = fakeBase + 100_000; return establishedAt; }
+      return establishedAt + 700_000;
+    });
+    try {
+      admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+      await rejectsCode(activateDeterministicResumeAdmission(admission), "RESUME_REFUSED_TIMING_AUTHORITY");
+      admission = undefined;
+      assert.ok(seamCalls >= 4, "post-establish recheck did not sample the clock");
+      assert.ok(establishedAt !== null && establishedAt > fakeBase, "NODE establishment did not sample the clock");
+    } finally {
+      installTestWallClock(null);
+    }
+    // SELECT_READY_LEAF was never committed: state stays exactly READY.
+    const after = await inspectRunStorage(location);
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.workflowState?.phase, "READY");
+    assert.equal(after.statePointer?.content_sha256, before.statePointer?.content_sha256);
+    // The prepared NODE authority remains durable at its exact sampled timestamp,
+    // valid, and unreferenced — never deleted and never resampled.
+    const recordsAfter = await readM5ManagedRecords(location);
+    const prepared = recordsAfter.staticTimeAuthorities.filter((entry) => entry.authority_scope === "NODE");
+    assert.equal(prepared.length, 1);
+    assert.equal(prepared[0]!.task_id, "a");
+    assert.equal(prepared[0]!.started_at_epoch_ms, establishedAt);
+    const timingClassification = after.managedRecordClassifications.find((entry) =>
+      entry.object.kind === "M2_STATIC_TIME_AUTHORITY" && entry.object.contentSha256 === prepared[0]!.content_sha256);
+    assert.equal(timingClassification?.classification, "UNREFERENCED_MANAGED_RECORD");
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+test("an invalid current-epoch NODE record refuses activation without committing SELECT_READY_LEAF", async () => {
+  const fixture = await interruptFixture("READY");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:a");
+    const location = { stateRoot: join(fixture.root, "state"), runId: "pre-m8-bounded" };
+    const prior = await inspectRunStorage(location);
+    const records = await readM5ManagedRecords(location);
+    const workflowAuthority = records.staticTimeAuthorities.find((entry) => entry.authority_scope === "WORKFLOW")!;
+    const budget = records.budgets.find((entry) => entry.budget_sha256 === prior.workflowState!.identities.budget_sha256)!;
+
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    // Schema-valid NODE record for the exact current READY epoch bound to the wrong task.
+    const epoch = {
+      revision: prior.revision!,
+      workflow_state_content_sha256: prior.workflowState!.content_sha256,
+      transition_commit_content_sha256: prior.transitionCommit!.content_sha256,
+    };
+    const wrongTask = identifyContractDocument("pi_gacw_static_time_authority_v0", {
+      schema_id: "pi_gacw_static_time_authority_v0",
+      schema_version: "0.1.0",
+      content_projection_id: "document-content-v1",
+      run_id: "pre-m8-bounded",
+      authority_scope: "NODE",
+      authority_id: nodeStaticTimeAuthorityIdentity({
+        run_id: "pre-m8-bounded",
+        workflow_time_authority_content_sha256: workflowAuthority.content_sha256,
+        predecessor_transition_commit_content_sha256: epoch.transition_commit_content_sha256,
+      }),
+      workflow_time_authority_content_sha256: workflowAuthority.content_sha256,
+      predecessor_revision: epoch.revision,
+      predecessor_workflow_state_content_sha256: epoch.workflow_state_content_sha256,
+      predecessor_transition_commit_content_sha256: epoch.transition_commit_content_sha256,
+      task_id: "b", // canonical reducer selection for this epoch is "a"
+      wall_budget_ms: budget.limits.static_time_budgets!.node_wall_ms,
+      started_at_epoch_ms: Date.now(),
+    }) as unknown as StaticTimeAuthorityDocument;
+    const { mkdir: ensureDir, writeFile: putFile } = await import("node:fs/promises");
+    const timingDirectory = join(location.stateRoot, "runs", location.runId, "records", "static-time-authorities");
+    await ensureDir(timingDirectory, { recursive: true, mode: 0o700 });
+    await putFile(
+      join(timingDirectory, `${wrongTask.content_sha256.slice("sha256:".length)}.json`),
+      `${canonicalize(wrongTask)}\n`,
+      { mode: 0o600 },
+    );
+    await rejectsCode(activateDeterministicResumeAdmission(admission), "RESUME_REFUSED_TIMING_AUTHORITY");
+    admission = undefined;
+    // No SELECT_READY_LEAF revision: M2 unchanged.
+    const after = await inspectRunStorage(location);
+    assert.equal(after.revision, prior.revision);
+    assert.equal(after.workflowState?.phase, "READY");
+    const classification = after.managedRecordClassifications.find((entry) =>
+      entry.object.kind === "M2_STATIC_TIME_AUTHORITY" && entry.object.contentSha256 === wrongTask.content_sha256);
+    assert.equal(classification?.classification, "INVALID_MANAGED_RECORD");
   } finally {
     if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
     await fixture.cleanup();

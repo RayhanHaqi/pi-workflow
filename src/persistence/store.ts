@@ -2445,7 +2445,24 @@ export async function establishWorkflowStaticTimeAuthority(input: RunStorageLoca
     predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
   });
   const reusableWorkflow = (await readStaticTimeAuthorities(input)).find((entry) => entry.authority_id === workflowKey);
-  if (reusableWorkflow !== undefined) return reusableWorkflow as WorkflowTimeAuthorityDocument;
+  if (reusableWorkflow !== undefined) {
+    // Defense-in-depth: blind reuse by key is not enough. The durable record must
+    // exactly match the requested immutable semantics; anything else fails closed
+    // WITHOUT resampling.
+    const workflowReuse = reusableWorkflow as WorkflowTimeAuthorityDocument;
+    if (
+      workflowReuse.authority_scope !== "WORKFLOW" ||
+      workflowReuse.authority_id !== workflowKey ||
+      workflowReuse.approved_plan_content_sha256 !== input.approvedPlanContentSha256 ||
+      workflowReuse.predecessor_revision !== input.epoch.revision ||
+      workflowReuse.predecessor_workflow_state_content_sha256 !== input.epoch.workflow_state_content_sha256 ||
+      workflowReuse.predecessor_transition_commit_content_sha256 !== input.epoch.transition_commit_content_sha256 ||
+      workflowReuse.wall_budget_ms !== input.workflowWallBudgetMs
+    ) {
+      throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "a durable WORKFLOW timing document with this semantic key does not match the requested immutable semantics");
+    }
+    return workflowReuse;
+  }
   const startedAtEpochMs = sampleStartedAtEpochMs();
   const document = buildWorkflowStaticTimeAuthority({
     runId: input.runId,
@@ -2478,7 +2495,24 @@ export async function establishNodeStaticTimeAuthority(input: RunStorageLocation
     predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
   });
   const reusableNode = (await readStaticTimeAuthorities(input)).find((entry) => entry.authority_id === nodeKey);
-  if (reusableNode !== undefined) return reusableNode as NodeTimeAuthorityDocument;
+  if (reusableNode !== undefined) {
+    // Same defense-in-depth as the WORKFLOW variant: exact requested semantics or
+    // typed conflict, never a silent reuse and never a resample.
+    const nodeReuse = reusableNode as NodeTimeAuthorityDocument;
+    if (
+      nodeReuse.authority_scope !== "NODE" ||
+      nodeReuse.authority_id !== nodeKey ||
+      nodeReuse.workflow_time_authority_content_sha256 !== input.workflowTimeAuthorityContentSha256 ||
+      nodeReuse.predecessor_revision !== input.epoch.revision ||
+      nodeReuse.predecessor_workflow_state_content_sha256 !== input.epoch.workflow_state_content_sha256 ||
+      nodeReuse.predecessor_transition_commit_content_sha256 !== input.epoch.transition_commit_content_sha256 ||
+      nodeReuse.task_id !== input.taskId ||
+      nodeReuse.wall_budget_ms !== input.nodeWallBudgetMs
+    ) {
+      throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "a durable NODE timing document with this semantic key does not match the requested immutable semantics");
+    }
+    return nodeReuse;
+  }
   const startedAtEpochMs = sampleStartedAtEpochMs();
   const document = buildNodeStaticTimeAuthority({
     runId: input.runId,

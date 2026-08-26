@@ -269,12 +269,6 @@ export interface StaticTimingVerdict {
   readonly detail: string;
 }
 
-type Scope = "WORKFLOW" | "NODE";
-
-function scopeOf(value: StaticTimeAuthorityDocument): Scope {
-  return value.authority_scope;
-}
-
 function projectedAuthorityId(value: StaticTimeAuthorityDocument, predecessorCommitSha: string): string | null {
   if (value.authority_scope === "WORKFLOW") {
     return workflowStaticTimeAuthorityIdentity({
@@ -447,33 +441,6 @@ export type StaticTimingResolution<T extends StaticTimeAuthorityDocument> =
   | { readonly outcome: "ABSENT" }
   | { readonly outcome: "REFUSED"; readonly detail: string };
 
-function validCandidates<T extends StaticTimeAuthorityDocument>(input: {
-  readonly runId: string;
-  readonly scope: Scope;
-  readonly authorities: ReadonlyMap<string, StaticTimeAuthorityDocument>;
-  readonly verdicts: ReadonlyMap<string, StaticTimingVerdict>;
-  readonly epoch: StaticTimeEpoch;
-}, adapt: (value: StaticTimeAuthorityDocument) => T | null): T[] {
-  const candidates: T[] = [];
-  for (const [digest, value] of input.authorities) {
-    if (value.run_id !== input.runId || scopeOf(value) !== input.scope) continue;
-    const verdict = input.verdicts.get(digest);
-    if (verdict === undefined || verdict.decision === "INVALID_MANAGED_RECORD" || verdict.decision === "INCOMPLETE_MANAGED_RECORD_CHAIN") continue;
-    const adapted = adapt(value);
-    if (adapted === null) continue;
-    if (adapted.predecessor_revision === input.epoch.revision &&
-      adapted.predecessor_workflow_state_content_sha256 === input.epoch.workflow_state_content_sha256 &&
-      adapted.predecessor_transition_commit_content_sha256 === input.epoch.transition_commit_content_sha256) {
-      candidates.push(adapted);
-    }
-  }
-  return candidates.sort((left, right) => compareText(left.content_sha256, right.content_sha256));
-}
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
 /** Resolves exactly one matching valid WORKFLOW timing authority; never by timestamp order. */
 export function resolveWorkflowTimingAuthority(input: {
   readonly runId: string;
@@ -485,14 +452,39 @@ export function resolveWorkflowTimingAuthority(input: {
   if (input.freezeEpoch.outcome === "ABSENT") return { outcome: "ABSENT" };
   const conflict = findStaticTimingSemanticConflict(input.authorities);
   if (conflict !== null) return { outcome: "REFUSED", detail: conflict };
-  const candidates = validCandidates({ ...input, scope: "WORKFLOW", epoch: input.freezeEpoch.epoch }, (value) =>
-    value.authority_scope === "WORKFLOW" ? value as WorkflowTimeAuthorityDocument : null);
-  if (candidates.length === 0) return { outcome: "ABSENT" };
-  if (candidates.length > 1) return { outcome: "REFUSED", detail: "multiple matching WORKFLOW timing authorities" };
-  return { outcome: "RESOLVED", authority: candidates[0]! };
+  // Same defensive physical-first shape as NODE resolution: every physical record
+  // naming the exact freeze epoch counts, whatever its classification.
+  const epoch = input.freezeEpoch.epoch;
+  const physical = [...input.authorities.values()].filter((value) =>
+    value.run_id === input.runId &&
+    value.authority_scope === "WORKFLOW" &&
+    value.predecessor_revision === epoch.revision &&
+    value.predecessor_workflow_state_content_sha256 === epoch.workflow_state_content_sha256 &&
+    value.predecessor_transition_commit_content_sha256 === epoch.transition_commit_content_sha256);
+  if (physical.length === 0) return { outcome: "ABSENT" };
+  const broken = physical.find((value) => {
+    const decision = input.verdicts.get(value.content_sha256)?.decision;
+    return decision === undefined || decision === "INVALID_MANAGED_RECORD" || decision === "INCOMPLETE_MANAGED_RECORD_CHAIN";
+  });
+  if (broken !== undefined) {
+    const detail = input.verdicts.get(broken.content_sha256)?.detail ?? "current-epoch WORKFLOW timing record is unclassified";
+    return { outcome: "REFUSED", detail };
+  }
+  if (physical.length > 1) {
+    return { outcome: "REFUSED", detail: "multiple physical WORKFLOW timing records match the exact epoch" };
+  }
+  return { outcome: "RESOLVED", authority: physical[0]! as WorkflowTimeAuthorityDocument };
 }
 
-/** Resolves exactly one matching valid NODE timing authority for an exact NODE epoch. */
+/**
+ * Resolves exactly one valid NODE timing authority for an exact NODE epoch.
+ *
+ * V1-R2D-TIME-R1: matching is over ALL PHYSICAL records naming the exact epoch,
+ * independent of classification. An invalid or incomplete current-epoch record
+ * REFUSES — it must never degrade to ABSENT and invite re-establishment; more
+ * than one physical match refuses regardless of ordering. No timestamp order,
+ * no latest-wins, no file-order arbitration.
+ */
 export function resolveNodeTimingAuthorityForEpoch(input: {
   readonly runId: string;
   readonly authorities: ReadonlyMap<string, StaticTimeAuthorityDocument>;
@@ -503,11 +495,26 @@ export function resolveNodeTimingAuthorityForEpoch(input: {
   if (input.nodeEpoch.outcome === "ABSENT") return { outcome: "ABSENT" };
   const conflict = findStaticTimingSemanticConflict(input.authorities);
   if (conflict !== null) return { outcome: "REFUSED", detail: conflict };
-  const candidates = validCandidates({ ...input, scope: "NODE", epoch: input.nodeEpoch.epoch }, (value) =>
-    value.authority_scope === "NODE" ? value as NodeTimeAuthorityDocument : null);
-  if (candidates.length === 0) return { outcome: "ABSENT" };
-  if (candidates.length > 1) return { outcome: "REFUSED", detail: "multiple matching NODE timing authorities" };
-  return { outcome: "RESOLVED", authority: candidates[0]! };
+  const epoch = input.nodeEpoch.epoch;
+  const physical = [...input.authorities.values()].filter((value) =>
+    value.run_id === input.runId &&
+    value.authority_scope === "NODE" &&
+    value.predecessor_revision === epoch.revision &&
+    value.predecessor_workflow_state_content_sha256 === epoch.workflow_state_content_sha256 &&
+    value.predecessor_transition_commit_content_sha256 === epoch.transition_commit_content_sha256);
+  if (physical.length === 0) return { outcome: "ABSENT" };
+  const broken = physical.find((value) => {
+    const decision = input.verdicts.get(value.content_sha256)?.decision;
+    return decision === undefined || decision === "INVALID_MANAGED_RECORD" || decision === "INCOMPLETE_MANAGED_RECORD_CHAIN";
+  });
+  if (broken !== undefined) {
+    const detail = input.verdicts.get(broken.content_sha256)?.detail ?? "current-epoch NODE timing record is unclassified";
+    return { outcome: "REFUSED", detail };
+  }
+  if (physical.length > 1) {
+    return { outcome: "REFUSED", detail: "multiple physical NODE timing records match the exact epoch" };
+  }
+  return { outcome: "RESOLVED", authority: physical[0]! as NodeTimeAuthorityDocument };
 }
 
 // ---------------------------------------------------------------------------

@@ -275,6 +275,26 @@ export async function activateDeterministicResumeAdmission(admission: Determinis
           },
         });
       }
+      // V1-R2D-TIME-R4: re-resolve and recheck AFTER NODE establishment/reuse,
+      // still under the SAME held flock. Expiry during establishment refuses
+      // before the durable select; the prepared authority stays behind as valid
+      // UNREFERENCED evidence and is never deleted or resampled later.
+      {
+        const postEstablish = await inspectRunStorage(location);
+        if (postEstablish.status !== "HEALTHY" || !sameAdmissionState(binding, postEstablish)) return refused("RESUME_REFUSED_STATE_STORE");
+        const postRecords = await readM5ManagedRecords(location);
+        const postTiming = resolveApplicableResumeTiming({
+          runId: binding.run_id, state: postEstablish.workflowState!, tipCommit: postEstablish.transitionCommit!,
+          records: {
+            transitionCommits: postRecords.transitionCommits, workflowStates: postRecords.workflowStates,
+            transitionEvents: postRecords.transitionEvents, authorities: postRecords.staticTimeAuthorities,
+          },
+          verdicts: staticTimingVerdicts(postEstablish.managedRecordClassifications),
+          nowMs: sampleWallClockMs(),
+        });
+        if (postTiming.outcome === "REFUSED" || postTiming.workflow === null || postTiming.node === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+        if (postTiming.node.task_id !== selectedTaskId) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+      }
     }
     await commitTransition({
       ...location, expectedRevision: prior.revision, expectedStatePointerContentSha256: prior.statePointer.content_sha256 as Sha256Digest,
@@ -563,6 +583,25 @@ export async function authorizeDeterministicResumedLeafWork(resume: Deterministi
       runAuthority: { repositoryIdentity: authority.repositoryIdentity, contract: authority.contract, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval },
       authoritativeSources, production: false,
     });
+    // V1-R2D-TIME-R1 GATE 1: load-bearing durable timing check IMMEDIATELY before
+    // AUTHORIZE_WORK. R2C always operates on an already-selected leaf, so BOTH
+    // workflow and node deadlines must resolve and be unexpired from the freshly
+    // reread state and current classifications. On refusal no reservation/decision
+    // delta and no worker invocation may occur.
+    {
+      const gateOneTiming = resolveApplicableResumeTiming({
+        runId: resume.binding.run_id, state, tipCommit: current.transitionCommit,
+        records: {
+          transitionCommits: records.transitionCommits, workflowStates: records.workflowStates,
+          transitionEvents: records.transitionEvents, authorities: records.staticTimeAuthorities,
+        },
+        verdicts: staticTimingVerdicts(current.managedRecordClassifications),
+        nowMs: sampleWallClockMs(),
+      });
+      if (gateOneTiming.outcome === "REFUSED" || gateOneTiming.workflow === null || gateOneTiming.node === null) {
+        return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+      }
+    }
     let result: Awaited<ReturnType<typeof kernel.evaluateControlDecision>>;
     try {
       result = await kernel.evaluateControlDecision({
@@ -617,6 +656,30 @@ export async function authorizeDeterministicResumedLeafWork(resume: Deterministi
     const gitAfter = await captureGitState(authority.repositoryIdentity);
     if (canonicalize(gitAfter) !== canonicalize(gitBefore)) return refused("RESUME_REFUSED_STATE_DRIFT");
     await assertWorktreeLockHeld(owned.lock);
+    // V1-R2D-TIME-R1 (B): load-bearing final recheck. Immediately before any work
+    // authority is constructed or the flock transfers, reread current storage and
+    // records again and re-resolve durable timing. Expiry in the meantime refuses
+    // here: the committed AUTHORIZE_WORK decision stays put, but NO usable
+    // DeterministicResumeWorkAdmission escapes and no worker may ever be invoked.
+    {
+      const transferInspection = await inspectRunStorage(location);
+      if (transferInspection.status !== "HEALTHY" || transferInspection.revision === null || transferInspection.statePointer === null || transferInspection.workflowState === null || transferInspection.transitionCommit === null) {
+        return refused("RESUME_REFUSED_STATE_STORE");
+      }
+      const transferRecords = await readM5ManagedRecords(location);
+      const transferTiming = resolveApplicableResumeTiming({
+        runId: resume.binding.run_id, state: transferInspection.workflowState!, tipCommit: transferInspection.transitionCommit!,
+        records: {
+          transitionCommits: transferRecords.transitionCommits, workflowStates: transferRecords.workflowStates,
+          transitionEvents: transferRecords.transitionEvents, authorities: transferRecords.staticTimeAuthorities,
+        },
+        verdicts: staticTimingVerdicts(transferInspection.managedRecordClassifications),
+        nowMs: sampleWallClockMs(),
+      });
+      if (transferTiming.outcome === "REFUSED" || transferTiming.workflow === null || transferTiming.node === null) {
+        return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+      }
+    }
     const reservation = result.decision.reservation;
     if (reservation.logical_role !== "TERRA_EXECUTOR" && reservation.logical_role !== "CODING_EXECUTOR") return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
     const frozenRole = reservation.logical_role;

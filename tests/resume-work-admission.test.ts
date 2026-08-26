@@ -31,6 +31,7 @@ import {
   staticWorkDecisionCandidates,
 } from "../src/resume-inspection.js";
 import { PRODUCT_LOGICAL_ROLES } from "../src/workflow-controller.js";
+import { installTestWallClock } from "../src/wall-clock.js";
 
 type FixtureMode = "READY" | "WINDOW_A" | "WINDOW_B" | "RESULT" | "WORKER" | "DELTA" | "WINDOW_A_B" | "WINDOW_B_B" | "WORKER_B" | "RESULT_B";
 type ChildFixture = { readonly child: ReturnType<typeof fork>; readonly root: string; readonly repository: string; readonly cleanup: () => Promise<void> };
@@ -630,4 +631,84 @@ test("resumed role inventory stays canonically equal to the frozen production in
   const codingPolicy = { role_reservation_envelopes: [{ logical_role: "CODING_EXECUTOR" }] } as never;
   assert.equal(canonicalize(resumedAvailableLogicalRoles(legacyPolicy)), canonicalize([...PRODUCT_LOGICAL_ROLES]));
   assert.equal(canonicalize(resumedAvailableLogicalRoles(codingPolicy)), canonicalize(["CODING_EXECUTOR"]));
+});
+
+// ---------------------------------------------------------------------------
+// V1-R2D-TIME-R1: R2C durable timing rechecks around AUTHORIZE_WORK
+// ---------------------------------------------------------------------------
+
+test("expired durable node timing refuses work admission before any reservation is published", async () => {
+  const fixture = await interruptFixture("READY");
+  let activation: Awaited<ReturnType<typeof activateDeterministicResumeAdmission>> | undefined;
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:a");
+    const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
+    const workflowAuthority = recordsBefore.staticTimeAuthorities.find((entry) => entry.authority_scope === "WORKFLOW");
+    assert.ok(workflowAuthority, "fixture run lacks its durable WORKFLOW timing authority");
+
+    // Valid for acquisition and activation; then downtime pushes the clock past
+    // the frozen node_wall_ms (600_000) but within the frozen workflow budget.
+    let fakeNow = workflowAuthority.started_at_epoch_ms + 100_000;
+    installTestWallClock(() => fakeNow);
+    try {
+      const admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+      activation = await activateDeterministicResumeAdmission(admission);
+      const afterActivation = await readM5ManagedRecords(LOCATION(fixture.root));
+      const reservationsAfterActivation = afterActivation.decisions.filter((entry) => entry.reservation !== null).length;
+      fakeNow += 700_000;
+      await rejectsCode(authorizeDeterministicResumedLeafWork(activation), "RESUME_REFUSED_TIMING_AUTHORITY");
+      activation = undefined;
+      // No new M5 reservation/decision delta and no worker invocation evidence.
+      const afterRefusal = await readM5ManagedRecords(LOCATION(fixture.root));
+      assert.equal(afterRefusal.decisions.filter((entry) => entry.reservation !== null).length, reservationsAfterActivation);
+      assert.equal(afterRefusal.boundedWorkerInvocations.length, 0);
+      assert.equal(afterRefusal.boundedWorkerResults.length, 0);
+      const state = (await inspectRunStorage(LOCATION(fixture.root))).workflowState!;
+      assert.equal(state.phase, "LEAF_FAST_PREFLIGHT");
+    } finally {
+      installTestWallClock(null);
+    }
+  } finally {
+    if (activation !== undefined) await releaseDeterministicResumeActivation(activation).catch(() => undefined);
+    await fixture.cleanup();
+  }
+});
+
+test("the load-bearing final recheck blocks work-admission transfer after AUTHORIZE_WORK commits", async () => {
+  const fixture = await interruptFixture("READY");
+  let activation: Awaited<ReturnType<typeof activateDeterministicResumeAdmission>> | undefined;
+  try {
+    assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:a");
+    const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
+    const reservationsBefore = recordsBefore.decisions.filter((entry) => entry.reservation !== null).length;
+
+    // Stable-valid clock covers acquisition and activation...
+    const fakeBase = recordsBefore.staticTimeAuthorities.find((entry) => entry.authority_scope === "WORKFLOW")!.started_at_epoch_ms + 100_000;
+    installTestWallClock(() => fakeBase);
+    const admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    activation = await activateDeterministicResumeAdmission(admission);
+    // ...then a call-counting source arms for authorize, which samples the seam
+    // exactly twice: pre-AUTHORIZE recheck (valid, so AUTHORIZE_WORK commits) and
+    // the final transfer recheck (past the durable deadline).
+    let seamCalls = 0;
+    installTestWallClock(() => {
+      seamCalls += 1;
+      return seamCalls <= 1 ? fakeBase : fakeBase + 700_000;
+    });
+    try {
+      await rejectsCode(authorizeDeterministicResumedLeafWork(activation), "RESUME_REFUSED_TIMING_AUTHORITY");
+      assert.equal(seamCalls, 2, "authorize must sample exactly twice: pre-AUTHORIZE and final transfer recheck");
+      // AUTHORIZE_WORK itself is allowed to be durable; what must NOT happen is a
+      // usable DeterministicResumeWorkAdmission or any worker invocation.
+      const after = await readM5ManagedRecords(LOCATION(fixture.root));
+      assert.equal(after.decisions.filter((entry) => entry.reservation !== null).length, reservationsBefore + 1);
+      assert.equal(after.boundedWorkerInvocations.length, 0);
+      assert.equal(after.boundedWorkerResults.length, 0);
+    } finally {
+      installTestWallClock(null);
+    }
+  } finally {
+    if (activation !== undefined) await releaseDeterministicResumeActivation(activation).catch(() => undefined);
+    await fixture.cleanup();
+  }
 });
