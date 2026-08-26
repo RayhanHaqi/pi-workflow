@@ -2361,6 +2361,11 @@ export async function readBoundedWorkerRecords(input: RunStorageLocation): Promi
 // V1-R2D-TIME: durable M2 static wall-clock timing authority
 // ---------------------------------------------------------------------------
 
+/** All physical timing records carrying one semantic authority key (cardinality decides uniqueness). */
+function timingRecordsForKey(records: readonly StaticTimeAuthorityDocument[], authorityId: string): StaticTimeAuthorityDocument[] {
+  return records.filter((entry) => entry.authority_id === authorityId);
+}
+
 async function readStaticTimeAuthorityDocuments(layout: RunLayout): Promise<StaticTimeAuthorityDocument[]> {
   if (await existingStats(layout.staticTimeAuthorityDirectory) === undefined) return [];
   const names = (await readdir(layout.staticTimeAuthorityDirectory)).filter((name) => JSON_DIGEST_FILE_PATTERN.test(name)).sort(compareText);
@@ -2403,9 +2408,16 @@ export async function publishStaticTimeAuthority(input: RunStorageLocation & {
       throw new StateStoreError("TERMINAL_STATE_IMMUTABLE", "Cannot publish static time authority to a terminal run");
     }
     const existing = await readStaticTimeAuthorityDocuments(layout);
-    const sameKey = existing.find((entry) => entry.authority_id === input.document.authority_id);
-    if (sameKey !== undefined) {
-      if (sameKey.content_sha256 !== input.document.content_sha256 || canonicalize(sameKey) !== canonicalize(input.document)) {
+    // V1-R2D-TIME-R2: semantic uniqueness is decided by CARDINALITY over ALL
+    // physical records for this authority_id, never by which file is found first.
+    const sameKey = timingRecordsForKey(existing, input.document.authority_id);
+    if (sameKey.length > 1) {
+      // Out-of-band duplicates poison the semantic key even when the candidate
+      // byte-exactly equals one of them: no digest/file-order arbitration.
+      throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "multiple immutable timing documents share one semantic authority key");
+    }
+    if (sameKey.length === 1) {
+      if (sameKey[0]!.content_sha256 !== input.document.content_sha256 || canonicalize(sameKey[0]!) !== canonicalize(input.document)) {
         throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "A different immutable timing document already owns this semantic authority key");
       }
       return { reused: true } as const;
@@ -2416,13 +2428,16 @@ export async function publishStaticTimeAuthority(input: RunStorageLocation & {
   });
 }
 
-async function durableStaticTimeAuthority(input: RunStorageLocation, authorityId: string): Promise<StaticTimeAuthorityDocument> {
-  const existing = await readStaticTimeAuthorities(input);
-  const match = existing.find((entry) => entry.authority_id === authorityId);
-  if (match === undefined) {
+/** Package-internal post-publication durable reread; cardinality decides, never file order. */
+export async function durableStaticTimeAuthority(input: RunStorageLocation, authorityId: string): Promise<StaticTimeAuthorityDocument> {
+  const matches = timingRecordsForKey(await readStaticTimeAuthorities(input), authorityId);
+  if (matches.length === 0) {
     throw new StateStoreError("STATIC_TIME_AUTHORITY_DURABILITY_UNKNOWN", "the sampled timing document is not durably readable after publication");
   }
-  return match;
+  if (matches.length > 1) {
+    throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "multiple immutable timing documents share this semantic authority key");
+  }
+  return matches[0]!;
 }
 
 /**
@@ -2438,13 +2453,18 @@ export async function establishWorkflowStaticTimeAuthority(input: RunStorageLoca
   assertRecord(input, "workflow timing establishment input");
   assertExactKeys(input, ["stateRoot", "runId", "approvedPlanContentSha256", "workflowWallBudgetMs", "epoch"], "workflow timing establishment input");
   // Reuse an already-durable semantic key WITHOUT sampling so a post-crash retry
-  // can never mint a newer timestamp for the same epoch.
+  // can never mint a newer timestamp for the same epoch. Cardinality first: more
+  // than one physical record for this key conflicts before anything else happens.
   const workflowKey = workflowStaticTimeAuthorityIdentity({
     run_id: input.runId,
     approved_plan_content_sha256: input.approvedPlanContentSha256,
     predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
   });
-  const reusableWorkflow = (await readStaticTimeAuthorities(input)).find((entry) => entry.authority_id === workflowKey);
+  const workflowMatches = timingRecordsForKey(await readStaticTimeAuthorities(input), workflowKey);
+  if (workflowMatches.length > 1) {
+    throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "multiple immutable WORKFLOW timing documents share this semantic authority key");
+  }
+  const reusableWorkflow = workflowMatches.length === 1 ? workflowMatches[0] as WorkflowTimeAuthorityDocument : undefined;
   if (reusableWorkflow !== undefined) {
     // Defense-in-depth: blind reuse by key is not enough. The durable record must
     // exactly match the requested immutable semantics; anything else fails closed
@@ -2488,13 +2508,18 @@ export async function establishNodeStaticTimeAuthority(input: RunStorageLocation
 }): Promise<NodeTimeAuthorityDocument> {
   assertRecord(input, "node timing establishment input");
   assertExactKeys(input, ["stateRoot", "runId", "taskId", "nodeWallBudgetMs", "workflowTimeAuthorityContentSha256", "epoch"], "node timing establishment input");
-  // Same reuse-first rule as the WORKFLOW variant.
+  // Same reuse-first rule as the WORKFLOW variant, with the same cardinality guard:
+  // duplicate physical records for this key conflict BEFORE any clock sample.
   const nodeKey = nodeStaticTimeAuthorityIdentity({
     run_id: input.runId,
     workflow_time_authority_content_sha256: input.workflowTimeAuthorityContentSha256,
     predecessor_transition_commit_content_sha256: input.epoch.transition_commit_content_sha256,
   });
-  const reusableNode = (await readStaticTimeAuthorities(input)).find((entry) => entry.authority_id === nodeKey);
+  const nodeMatches = timingRecordsForKey(await readStaticTimeAuthorities(input), nodeKey);
+  if (nodeMatches.length > 1) {
+    throw new StateStoreError("STATIC_TIME_AUTHORITY_CONFLICT", "multiple immutable NODE timing documents share this semantic authority key");
+  }
+  const reusableNode = nodeMatches.length === 1 ? nodeMatches[0] as NodeTimeAuthorityDocument : undefined;
   if (reusableNode !== undefined) {
     // Same defense-in-depth as the WORKFLOW variant: exact requested semantics or
     // typed conflict, never a silent reuse and never a resample.

@@ -11,6 +11,7 @@ import { canonicalize } from "../src/canonical-json/index.js";
 import type { Sha256Digest } from "../src/identity/index.js";
 import { commitTransition, initializeRunStorage, inspectRunStorage } from "../src/persistence/index.js";
 import {
+  durableStaticTimeAuthority,
   establishNodeStaticTimeAuthority,
   establishWorkflowStaticTimeAuthority,
   publishStaticTimeAuthority,
@@ -19,6 +20,7 @@ import {
 } from "../src/persistence/store.js";
 import {
   nodeStaticTimeAuthorityIdentity,
+  workflowStaticTimeAuthorityIdentity,
   resolveApplicableResumeTiming,
   staticDeadlineExpired,
   staticNodeDeadlineExpired,
@@ -862,6 +864,247 @@ test("establish reuse verifies requested semantics and never resamples on mismat
     } finally {
       await rm(freshRun.stateRoot, { recursive: true, force: true });
     }
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// V1-R2D-TIME-R2 regressions: duplicate physical records poison one semantic key
+// ---------------------------------------------------------------------------
+
+async function injectDuplicateNodePair(run: TimingRun, workflow: WorkflowTimeAuthorityDocument, epoch: { readonly revision: number; readonly workflow_state_content_sha256: string; readonly transition_commit_content_sha256: string }, startedAtEpochMs: number): Promise<void> {
+  const exact = nodeAuthorityDocument({
+    runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+    taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms, epoch, startedAtEpochMs,
+  });
+  // Same authority_id by construction (same run + workflow ref + predecessor commit);
+  // only the immutable budget differs, so the two documents share one semantic key.
+  const conflicting = nodeAuthorityDocument({
+    runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+    taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms + 1, epoch, startedAtEpochMs,
+  });
+  assert.equal(exact.authority_id, conflicting.authority_id);
+  assert.notEqual(exact.content_sha256, conflicting.content_sha256);
+  await injectTimingRecord(run, exact);
+  await injectTimingRecord(run, conflicting);
+}
+
+test("duplicate NODE records poison the key: establish conflicts without sampling or publishing", async () => {
+  installTestWallClock(() => 160_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const ready = await inspectionOf(run);
+    const epoch = {
+      revision: ready.revision!,
+      workflow_state_content_sha256: ready.workflowState!.content_sha256,
+      transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+    };
+    await injectDuplicateNodePair(run, workflow, epoch, 160_000);
+    let samples = 0;
+    installTestWallClock(() => { samples += 1; return 999_999; });
+    try {
+      await assert.rejects(
+        establishNodeStaticTimeAuthority({
+          ...loc(run), taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms,
+          workflowTimeAuthorityContentSha256: workflow.content_sha256 as Sha256Digest, epoch,
+        }),
+        (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+      );
+      assert.equal(samples, 0); // conflict precedes any clock sample
+      assert.equal((await readStaticTimeAuthorities(loc(run))).filter((entry) => entry.authority_scope === "NODE").length, 2);
+    } finally {
+      installTestWallClock(null);
+    }
+  } finally {
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("duplicate WORKFLOW records poison the key: establish conflicts without sampling", async () => {
+  installTestWallClock(() => 170_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const predecessor = await inspectionOf(run);
+    const epoch = {
+      revision: predecessor.revision!,
+      workflow_state_content_sha256: predecessor.workflowState!.content_sha256,
+      transition_commit_content_sha256: predecessor.transitionCommit!.content_sha256,
+    };
+    const exact = establishWorkflowDoc(run, epoch, STATIC_BUDGETS.workflow_wall_ms, 170_000);
+    const conflicting = establishWorkflowDoc(run, epoch, STATIC_BUDGETS.workflow_wall_ms + 1, 170_000);
+    assert.equal(exact.authority_id, conflicting.authority_id);
+    await injectTimingRecord(run, exact);
+    await injectTimingRecord(run, conflicting);
+    let samples = 0;
+    installTestWallClock(() => { samples += 1; return 999_999; });
+    try {
+      await assert.rejects(
+        establishWorkflowStaticTimeAuthority({
+          ...loc(run), approvedPlanContentSha256: run.planContentSha256,
+          workflowWallBudgetMs: STATIC_BUDGETS.workflow_wall_ms, epoch,
+        }),
+        (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+      );
+      assert.equal(samples, 0);
+    } finally {
+      installTestWallClock(null);
+    }
+  } finally {
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+function establishWorkflowDoc(run: TimingRun, epoch: { readonly revision: number; readonly workflow_state_content_sha256: string; readonly transition_commit_content_sha256: string }, workflowWallBudgetMs: number, startedAtEpochMs: number): StaticTimeAuthorityDocument {
+  return identifyContractDocument("pi_gacw_static_time_authority_v0", {
+    schema_id: "pi_gacw_static_time_authority_v0",
+    schema_version: "0.1.0",
+    content_projection_id: "document-content-v1",
+    run_id: run.runId,
+    authority_scope: "WORKFLOW",
+    authority_id: workflowStaticTimeAuthorityIdentity({
+      run_id: run.runId,
+      approved_plan_content_sha256: run.planContentSha256,
+      predecessor_transition_commit_content_sha256: epoch.transition_commit_content_sha256,
+    }),
+    approved_plan_content_sha256: run.planContentSha256,
+    predecessor_revision: epoch.revision,
+    predecessor_workflow_state_content_sha256: epoch.workflow_state_content_sha256,
+    predecessor_transition_commit_content_sha256: epoch.transition_commit_content_sha256,
+    wall_budget_ms: workflowWallBudgetMs,
+    started_at_epoch_ms: startedAtEpochMs,
+  }) as unknown as StaticTimeAuthorityDocument;
+}
+
+test("direct publish with a byte-identical candidate still refuses a poisoned key", async () => {
+  installTestWallClock(() => 180_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const ready = await inspectionOf(run);
+    const epoch = {
+      revision: ready.revision!,
+      workflow_state_content_sha256: ready.workflowState!.content_sha256,
+      transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+    };
+    const exact = nodeAuthorityDocument({
+      runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms, epoch, startedAtEpochMs: 180_000,
+    });
+    const conflicting = nodeAuthorityDocument({
+      runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms + 1, epoch, startedAtEpochMs: 180_001,
+    });
+    await injectTimingRecord(run, exact);
+    await injectTimingRecord(run, conflicting);
+    // Even though `exact` byte-for-byte equals an existing record, cardinality wins.
+    await assert.rejects(
+      publishStaticTimeAuthority({ ...loc(run), document: exact }),
+      (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+    );
+    assert.equal((await readStaticTimeAuthorities(loc(run))).filter((entry) => entry.authority_scope === "NODE").length, 2);
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("single-record exact reuse stays green and zero-record establishment samples exactly once", async () => {
+  installTestWallClock(() => 190_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const ready = await inspectionOf(run);
+    const epoch = {
+      revision: ready.revision!,
+      workflow_state_content_sha256: ready.workflowState!.content_sha256,
+      transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+    };
+    // D. Exact single-record reuse keeps the durable timestamp without sampling.
+    const seededAt = 190_123;
+    await injectTimingRecord(run, nodeAuthorityDocument({
+      runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms, epoch, startedAtEpochMs: seededAt,
+    }));
+    let samples = 0;
+    installTestWallClock(() => { samples += 1; return 555_555; });
+    try {
+      const reused = await establishNodeStaticTimeAuthority({
+        ...loc(run), taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms,
+        workflowTimeAuthorityContentSha256: workflow.content_sha256 as Sha256Digest, epoch,
+      });
+      assert.equal(samples, 0);
+      assert.equal(reused.started_at_epoch_ms, seededAt);
+
+      // E. Zero-record establishment samples exactly once and adopts that sample.
+      const freshRun = await createStaticTimingRun();
+      try {
+        await advanceToRouteSelected(freshRun);
+        let freshSamples = 0;
+        installTestWallClock(() => { freshSamples += 1; return 777_777; });
+        const freshWorkflow = await establishWorkflowAtTip(freshRun);
+        assert.equal(freshSamples, 1);
+        assert.equal(freshWorkflow.started_at_epoch_ms, 777_777);
+        assert.equal((await readStaticTimeAuthorities(loc(freshRun))).length, 1);
+      } finally {
+        installTestWallClock(null);
+        await rm(freshRun.stateRoot, { recursive: true, force: true });
+      }
+    } finally {
+      installTestWallClock(null);
+    }
+  } finally {
+    installTestWallClock(null);
+    await rm(run.stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("the post-publication durable reread is cardinality-strict for one semantic key", async () => {
+  installTestWallClock(() => 200_000);
+  const run = await createStaticTimingRun();
+  try {
+    await advanceToRouteSelected(run);
+    const workflow = await freezeAndActivate(run, run.planContentSha256);
+    const ready = await inspectionOf(run);
+    const epoch = {
+      revision: ready.revision!,
+      workflow_state_content_sha256: ready.workflowState!.content_sha256,
+      transition_commit_content_sha256: ready.transitionCommit!.content_sha256,
+    };
+    // Zero matches: durability unknown.
+    const nodeKey = nodeStaticTimeAuthorityIdentity({
+      run_id: run.runId,
+      workflow_time_authority_content_sha256: workflow.content_sha256,
+      predecessor_transition_commit_content_sha256: epoch.transition_commit_content_sha256,
+    });
+    await assert.rejects(
+      durableStaticTimeAuthority(loc(run), nodeKey),
+      (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_DURABILITY_UNKNOWN",
+    );
+    // Exactly one match: that exact record returns.
+    const only = nodeAuthorityDocument({
+      runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms, epoch, startedAtEpochMs: 200_000,
+    });
+    await injectTimingRecord(run, only);
+    assert.equal((await durableStaticTimeAuthority(loc(run), nodeKey)).content_sha256, only.content_sha256);
+    // Two physical matches (one byte-exact member among them): still conflict.
+    const conflicting = nodeAuthorityDocument({
+      runId: run.runId, workflowContentSha256: workflow.content_sha256 as Sha256Digest,
+      taskId: "task-a", nodeWallBudgetMs: STATIC_BUDGETS.node_wall_ms + 1, epoch, startedAtEpochMs: 200_000,
+    });
+    await injectTimingRecord(run, conflicting);
+    assert.equal(only.authority_id, conflicting.authority_id);
+    await assert.rejects(
+      durableStaticTimeAuthority(loc(run), nodeKey),
+      (error: unknown) => (error as { code?: string }).code === "STATIC_TIME_AUTHORITY_CONFLICT",
+    );
   } finally {
     installTestWallClock(null);
     await rm(run.stateRoot, { recursive: true, force: true });
