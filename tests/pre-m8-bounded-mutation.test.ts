@@ -13,6 +13,7 @@ import type { M5FailureInput } from "../src/control/types.js";
 import { sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
 import { inspectRunStorage } from "../src/persistence/index.js";
 import { resolveAuthoritativeBoundedExecution } from "../src/persistence/bounded-worker-authority.js";
+import { resolveStaticMaxM4MutationCalls } from "../src/persistence/m5-authority.js";
 import { publishBoundedWorkerRecord, readM5ManagedRecords } from "../src/persistence/store.js";
 import { releaseWorktreeLock, resolveRepositoryIdentity } from "../src/repository/index.js";
 import {
@@ -1819,4 +1820,84 @@ test("planner identity expansion and rejected resolver bindings fail closed with
   assert.equal(resolved.accepted, false);
   assert.equal(resolved.acceptedWorkerInvocations, 0);
   assert.equal(resolved.acceptedM4ToolCalls, 0);
+});
+
+test("static mutation allowance is durably persisted and distinct from total tool envelope", async (t) => {
+  const staticOutputs = ["a.txt", "b.txt"] as const;
+  const runRetainedStatic = async (hardLimit: 1 | undefined): Promise<{ readonly policy: any; readonly evidenceRoot: string; readonly retained: string; readonly root: string }> => {
+    const root = await fixture();
+    const retained = await mkdtemp(join(tmpdir(), "pre-m8-static-mutation-"));
+    let calls = 0;
+    const outputs = [...staticOutputs];
+    const runtime: BoundedWorkerRuntime = {
+      async execute({ profile, tools }) {
+        if (profile === "MUTATION_EXECUTOR") {
+          const path = outputs[calls++]!;
+          await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`written:${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+        }
+        tools.submitReport("bounded report");
+        return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+      },
+    };
+    const auth: BoundedMutationAuthority = hardLimit === undefined ? authority() : { ...authority(), hard_mutation_tool_limit: 1 as const };
+    const result = await run(root, goal("STATIC_APPROVED_DAG", [...staticOutputs]), runtime, { authority: auth, retainedArtifactRoot: retained });
+    assert.equal(result.outcome, "PASS", result.reason);
+    assert.ok(result.evidenceRoot !== undefined);
+    const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot!, "state"), runId: "pre-m8-bounded" });
+    const policy: any = records.policies[0];
+    assert.ok(policy !== undefined);
+    return { policy, evidenceRoot: result.evidenceRoot!, retained, root };
+  };
+  await t.test("STATIC default persists 32", async () => {
+    const { policy, retained, root } = await runRetainedStatic(undefined);
+    try {
+      assert.equal(policy.requested_mode, "STATIC_APPROVED_DAG");
+      assert.equal(policy.static_max_m4_mutation_calls, 32);
+      assert.deepEqual(resolveStaticMaxM4MutationCalls(policy), { outcome: "RESOLVED", value: 32 });
+      // total TOOL_CALL envelope is workers*32 (2 leaves => 64) and remains the product envelope
+      const tool = policy.limits.find((e: any) => e.dimension === "TOOL_CALL");
+      assert.ok(tool !== undefined);
+      assert.equal(tool.hard_limit, 64);
+    } finally {
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  await t.test("STATIC hard limit 1 persists 1", async () => {
+    const { policy, retained, root } = await runRetainedStatic(1);
+    try {
+      assert.equal(policy.requested_mode, "STATIC_APPROVED_DAG");
+      assert.equal(policy.static_max_m4_mutation_calls, 1);
+      assert.deepEqual(resolveStaticMaxM4MutationCalls(policy), { outcome: "RESOLVED", value: 1 });
+      const tool = policy.limits.find((e: any) => e.dimension === "TOOL_CALL");
+      assert.equal(tool.hard_limit, 64);
+    } finally {
+      await rm(retained, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  await t.test("LOAD-BEARING DISTINCTION: same TOOL_CALL envelope but static differs, route max remains 32", async () => {
+    const a = await runRetainedStatic(undefined);
+    const b = await runRetainedStatic(1);
+    try {
+      // Both have same total TOOL_CALL envelope (64 for 2 leaves) and same per-route max 32
+      const toolA = a.policy.limits.find((e: any) => e.dimension === "TOOL_CALL");
+      const toolB = b.policy.limits.find((e: any) => e.dimension === "TOOL_CALL");
+      assert.equal(toolA.hard_limit, toolB.hard_limit);
+      assert.equal(toolA.hard_limit, 64);
+      // Route tool maximum is frozen at 32 per worker and not derived from mutation limit
+      // The M5 limits envelope stays equal while the durable mutation allowance differs
+      assert.equal(a.policy.static_max_m4_mutation_calls, 32);
+      assert.equal(b.policy.static_max_m4_mutation_calls, 1);
+      assert.notEqual(a.policy.static_max_m4_mutation_calls, b.policy.static_max_m4_mutation_calls);
+      // Explicitly prove route/tool maximum would be 32 in both (product invariant)
+      assert.equal(toolA.hard_limit, 2 * 32);
+      assert.equal(toolB.hard_limit, 2 * 32);
+    } finally {
+      await rm(a.retained, { recursive: true, force: true });
+      await rm(a.root, { recursive: true, force: true });
+      await rm(b.retained, { recursive: true, force: true });
+      await rm(b.root, { recursive: true, force: true });
+    }
+  });
 });

@@ -10,6 +10,8 @@ import type { M5ImmutableRunAuthoritySources } from "../src/control/types.js";
 import { sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
 import { commitTransition, initializeRunStorage, inspectRunStorage } from "../src/persistence/index.js";
 import {
+  ContractValidationError,
+  assertDocumentValid,
   identifyContractDocument,
   validateSchema,
   verifyContractDocument,
@@ -17,6 +19,7 @@ import {
   type M5UsageEvidenceDocument,
   type ReducerPolicy,
 } from "../src/schemas/index.js";
+import { resolveStaticMaxM4MutationCalls } from "../src/persistence/m5-authority.js";
 import { createInitialState } from "../src/state-machine/index.js";
 import { applyEvent, digest, makePolicy, stateIdentities, transitionEvent, type MutableJson } from "./helpers.js";
 import { m5RunAuthority } from "./m5-r3-fixtures.js";
@@ -183,4 +186,147 @@ test("built control package exposes only the high-level immutable boundary", asy
   for (const path of ["pi-bounded-coding-workflow/control/evaluate", "pi-bounded-coding-workflow/src/control/kernel", "pi-bounded-coding-workflow/dist/src/control/evaluate.js"]) {
     await assert.rejects(import(path), (error: unknown) => (error as { code?: string }).code === "ERR_PACKAGE_PATH_NOT_EXPORTED");
   }
+});
+
+test("static mutation allowance resolver pins RESOLVED 1/32/ABSENT/NOT_STATIC", () => {
+  const base = makePolicy("STATIC_APPROVED_DAG");
+  const state = createInitialState(base, stateIdentities(base));
+  const dims = ["WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL", "INPUT_TOKEN", "OUTPUT_TOKEN", "COST_MICROUSD", "WALL_TIME_MS"] as const;
+  const obligation = { declaration: "src/result.ts", direction: "OUTPUT" as const, stage: 1, producer: "task-only", consumers: ["contract"], grammar: "PATH" as const, evidence_kind: "FILE" as const, literal: null, prefix: null };
+  const limitsFor = (toolHard: number | null) => dims.map((dimension) => ({ dimension, hard_limit: dimension === "PROVIDER_REQUEST" ? null : dimension === "TOOL_CALL" ? toolHard : 100, soft_limit: dimension === "PROVIDER_REQUEST" ? null : dimension === "TOOL_CALL" ? toolHard : 80, enforcement_class: dimension === "WORKER_INVOCATION" || dimension === "TOOL_CALL" ? "HARD_ENFORCEABLE" as const : dimension === "MODEL_TURN" ? "SOFT_ENFORCEABLE" as const : dimension === "PROVIDER_REQUEST" ? "UNAVAILABLE" as const : "OBSERVABLE_ONLY" as const }));
+  const makeStatic = (value: 1 | 32 | undefined, toolHard: number | null = 100): M5ControlPolicyDocument => {
+    const doc: any = {
+      schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+      run_id: base.run_id, repository_identity_content_sha256: digest(300), worktree_key: digest(301), starting_state_content_sha256: state.content_sha256,
+      objective_sha256: digest(50), contract_sha256: digest(51), budget_sha256: base.frozen_bindings.budget_sha256,
+      route_map_sha256: digest(302), route_map_approval_sha256: digest(303), reducer_policy_content_sha256: base.content_sha256,
+      authority_lock_sha256: digest(53), baseline_approval_sha256: digest(52), scope_sha256: base.frozen_bindings.scope_sha256,
+      acceptance_sha256: base.frozen_bindings.acceptance_sha256, plan_approval_sha256: base.frozen_bindings.plan_approval_sha256,
+      task_graph_sha256: base.frozen_bindings.task_graph_sha256, tool_policy_content_sha256: digest(304), command_catalog_content_sha256: digest(305),
+      route_map_approved: true, production_authority: "TEST_FIXTURE", requested_mode: "STATIC_APPROVED_DAG",
+      route_facts: { hard_sol_conditions: [], task_count: 2, coherent_single_task: false, failure_domain_count: 2, deterministic_acceptance: true, ownership_ambiguous: false, leaf_count: 2, dag_valid: true, leaves_separable: true, unique_write_ownership: true, leaf_acceptance_machine_checkable: true },
+      obligations: [{ descriptor_sha256: sha256Canonical(obligation), ...obligation }],
+      limits: limitsFor(toolHard),
+      role_reservation_envelopes: [{ logical_role: "TERRA_EXECUTOR", purpose: "ORDINARY", amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] }],
+      failure_action_table_version: "m5-failure-actions-v1", progress_rule_version: "m5-progress-v1", contract_gate_rule_version: "m5-contract-gate-v1",
+      route_selection_rule_version: "m5-route-selection-v1", insufficient_routing_evidence: "BLOCK", maximum_control_decisions: 100, maximum_usage_records: 100, maximum_authority_depth: 64,
+      ...(value === undefined ? {} : { static_max_m4_mutation_calls: value }),
+    };
+    return identifyContractDocument("pi_gacw_m5_control_policy_v0", doc) as unknown as M5ControlPolicyDocument;
+  };
+  const p1 = makeStatic(1);
+  const p32 = makeStatic(32);
+  const pAbsent = makeStatic(undefined);
+  const nonStatic = (() => {
+    const directBase = makePolicy("DIRECT_LUNA_HIGH");
+    const directState = createInitialState(directBase, stateIdentities(directBase));
+    return identifyContractDocument("pi_gacw_m5_control_policy_v0", {
+      schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+      run_id: directBase.run_id, repository_identity_content_sha256: digest(310), worktree_key: digest(311), starting_state_content_sha256: directState.content_sha256,
+      objective_sha256: digest(50), contract_sha256: digest(51), budget_sha256: directBase.frozen_bindings.budget_sha256,
+      route_map_sha256: digest(312), route_map_approval_sha256: digest(313), reducer_policy_content_sha256: directBase.content_sha256,
+      authority_lock_sha256: digest(53), baseline_approval_sha256: digest(52), scope_sha256: directBase.frozen_bindings.scope_sha256,
+      acceptance_sha256: directBase.frozen_bindings.acceptance_sha256, plan_approval_sha256: directBase.frozen_bindings.plan_approval_sha256,
+      task_graph_sha256: directBase.frozen_bindings.task_graph_sha256, tool_policy_content_sha256: digest(314), command_catalog_content_sha256: digest(315),
+      route_map_approved: true, production_authority: "TEST_FIXTURE", requested_mode: "DIRECT_LUNA_HIGH",
+      route_facts: { hard_sol_conditions: [], task_count: 1, coherent_single_task: true, failure_domain_count: 1, deterministic_acceptance: true, ownership_ambiguous: false, leaf_count: 1, dag_valid: true, leaves_separable: true, unique_write_ownership: true, leaf_acceptance_machine_checkable: true },
+      obligations: [{ descriptor_sha256: sha256Canonical(obligation), ...obligation }],
+      limits: limitsFor(100),
+      role_reservation_envelopes: [{ logical_role: "LUNA_EXECUTOR", purpose: "ORDINARY", amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] }],
+      failure_action_table_version: "m5-failure-actions-v1", progress_rule_version: "m5-progress-v1", contract_gate_rule_version: "m5-contract-gate-v1",
+      route_selection_rule_version: "m5-route-selection-v1", insufficient_routing_evidence: "BLOCK", maximum_control_decisions: 100, maximum_usage_records: 100, maximum_authority_depth: 64,
+    }) as unknown as M5ControlPolicyDocument;
+  })();
+  assert.deepEqual(resolveStaticMaxM4MutationCalls(p1), { outcome: "RESOLVED", value: 1 });
+  assert.deepEqual(resolveStaticMaxM4MutationCalls(p32), { outcome: "RESOLVED", value: 32 });
+  assert.deepEqual(resolveStaticMaxM4MutationCalls(pAbsent), { outcome: "ABSENT" });
+  assert.deepEqual(resolveStaticMaxM4MutationCalls(nonStatic), { outcome: "NOT_STATIC" });
+  // never default absent to 32
+  assert.notDeepEqual(resolveStaticMaxM4MutationCalls(pAbsent), { outcome: "RESOLVED", value: 32 });
+});
+
+test("legacy STATIC policy without field remains schema-valid, resolver ABSENT, not rewritten", () => {
+  const base = makePolicy("STATIC_APPROVED_DAG");
+  const state = createInitialState(base, stateIdentities(base));
+  const obligation = { declaration: "src/result.ts", direction: "OUTPUT" as const, stage: 1, producer: "task-only", consumers: ["contract"], grammar: "PATH" as const, evidence_kind: "FILE" as const, literal: null, prefix: null };
+  const dims = ["WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL", "INPUT_TOKEN", "OUTPUT_TOKEN", "COST_MICROUSD", "WALL_TIME_MS"] as const;
+  const legacy = identifyContractDocument("pi_gacw_m5_control_policy_v0", {
+    schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+    run_id: base.run_id, repository_identity_content_sha256: digest(300), worktree_key: digest(301), starting_state_content_sha256: state.content_sha256,
+    objective_sha256: digest(50), contract_sha256: digest(51), budget_sha256: base.frozen_bindings.budget_sha256,
+    route_map_sha256: digest(302), route_map_approval_sha256: digest(303), reducer_policy_content_sha256: base.content_sha256,
+    authority_lock_sha256: digest(53), baseline_approval_sha256: digest(52), scope_sha256: base.frozen_bindings.scope_sha256,
+    acceptance_sha256: base.frozen_bindings.acceptance_sha256, plan_approval_sha256: base.frozen_bindings.plan_approval_sha256,
+    task_graph_sha256: base.frozen_bindings.task_graph_sha256, tool_policy_content_sha256: digest(304), command_catalog_content_sha256: digest(305),
+    route_map_approved: true, production_authority: "TEST_FIXTURE", requested_mode: "STATIC_APPROVED_DAG",
+    route_facts: { hard_sol_conditions: [], task_count: 2, coherent_single_task: false, failure_domain_count: 2, deterministic_acceptance: true, ownership_ambiguous: false, leaf_count: 2, dag_valid: true, leaves_separable: true, unique_write_ownership: true, leaf_acceptance_machine_checkable: true },
+    obligations: [{ descriptor_sha256: sha256Canonical(obligation), ...obligation }],
+    limits: dims.map((dimension) => ({ dimension, hard_limit: dimension === "PROVIDER_REQUEST" ? null : 100, soft_limit: dimension === "PROVIDER_REQUEST" ? null : 80, enforcement_class: dimension === "WORKER_INVOCATION" || dimension === "TOOL_CALL" ? "HARD_ENFORCEABLE" as const : dimension === "MODEL_TURN" ? "SOFT_ENFORCEABLE" as const : dimension === "PROVIDER_REQUEST" ? "UNAVAILABLE" as const : "OBSERVABLE_ONLY" as const })),
+    role_reservation_envelopes: [{ logical_role: "TERRA_EXECUTOR", purpose: "ORDINARY", amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] }],
+    failure_action_table_version: "m5-failure-actions-v1", progress_rule_version: "m5-progress-v1", contract_gate_rule_version: "m5-contract-gate-v1",
+    route_selection_rule_version: "m5-route-selection-v1", insufficient_routing_evidence: "BLOCK", maximum_control_decisions: 100, maximum_usage_records: 100, maximum_authority_depth: 64,
+  }) as unknown as M5ControlPolicyDocument;
+  // schema-valid
+  assert.equal(validateSchema("pi_gacw_m5_control_policy_v0", legacy).valid, true);
+  // classification/storage would be healthy — via validator
+  assertDocumentValid("pi_gacw_m5_control_policy_v0", legacy);
+  // resolver returns ABSENT
+  assert.deepEqual(resolveStaticMaxM4MutationCalls(legacy), { outcome: "ABSENT" });
+  // not rewritten
+  assert.equal((legacy as any).static_max_m4_mutation_calls, undefined);
+  assert.equal("static_max_m4_mutation_calls" in (legacy as any), false);
+  // clone remains without field
+  const cloned = structuredClone(legacy) as any;
+  assert.equal(cloned.static_max_m4_mutation_calls, undefined);
+});
+
+test("M5 policy static_max=2 fails schema validation", () => {
+  const base = makePolicy("STATIC_APPROVED_DAG");
+  const state = createInitialState(base, stateIdentities(base));
+  const bad: any = {
+    schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", content_sha256: digest(999),
+    run_id: base.run_id, repository_identity_content_sha256: digest(300), worktree_key: digest(301), starting_state_content_sha256: state.content_sha256,
+    objective_sha256: digest(50), contract_sha256: digest(51), budget_sha256: base.frozen_bindings.budget_sha256,
+    route_map_sha256: digest(302), route_map_approval_sha256: digest(303), reducer_policy_content_sha256: base.content_sha256,
+    authority_lock_sha256: digest(53), baseline_approval_sha256: digest(52), scope_sha256: base.frozen_bindings.scope_sha256,
+    acceptance_sha256: base.frozen_bindings.acceptance_sha256, plan_approval_sha256: base.frozen_bindings.plan_approval_sha256,
+    task_graph_sha256: base.frozen_bindings.task_graph_sha256, tool_policy_content_sha256: digest(304), command_catalog_content_sha256: digest(305),
+    route_map_approved: true, production_authority: "TEST_FIXTURE", requested_mode: "STATIC_APPROVED_DAG",
+    route_facts: { hard_sol_conditions: [], task_count: 2, coherent_single_task: false, failure_domain_count: 2, deterministic_acceptance: true, ownership_ambiguous: false, leaf_count: 2, dag_valid: true, leaves_separable: true, unique_write_ownership: true, leaf_acceptance_machine_checkable: true },
+    obligations: [{ descriptor_sha256: sha256Canonical({ declaration: "src/result.ts", direction: "OUTPUT", stage: 1, producer: "task-only", consumers: ["contract"], grammar: "PATH", evidence_kind: "FILE", literal: null, prefix: null }), declaration: "src/result.ts", direction: "OUTPUT", stage: 1, producer: "task-only", consumers: ["contract"], grammar: "PATH", evidence_kind: "FILE", literal: null, prefix: null }],
+    limits: (["WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL", "INPUT_TOKEN", "OUTPUT_TOKEN", "COST_MICROUSD", "WALL_TIME_MS"] as const).map((dimension) => ({ dimension, hard_limit: dimension === "PROVIDER_REQUEST" ? null : 100, soft_limit: dimension === "PROVIDER_REQUEST" ? null : 80, enforcement_class: dimension === "WORKER_INVOCATION" || dimension === "TOOL_CALL" ? "HARD_ENFORCEABLE" as const : dimension === "MODEL_TURN" ? "SOFT_ENFORCEABLE" as const : dimension === "PROVIDER_REQUEST" ? "UNAVAILABLE" as const : "OBSERVABLE_ONLY" as const })),
+    role_reservation_envelopes: [{ logical_role: "TERRA_EXECUTOR", purpose: "ORDINARY", amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] }],
+    failure_action_table_version: "m5-failure-actions-v1", progress_rule_version: "m5-progress-v1", contract_gate_rule_version: "m5-contract-gate-v1",
+    route_selection_rule_version: "m5-route-selection-v1", insufficient_routing_evidence: "BLOCK", maximum_control_decisions: 100, maximum_usage_records: 100, maximum_authority_depth: 64,
+    static_max_m4_mutation_calls: 2,
+  };
+  const result = validateSchema("pi_gacw_m5_control_policy_v0", bad);
+  assert.equal(result.valid, false);
+  assert.throws(() => identifyContractDocument("pi_gacw_m5_control_policy_v0", bad), (e: unknown) => e instanceof ContractValidationError || (e as any)?.code === "SCHEMA_INVALID" || /SCHEMA_INVALID/.test(String(e)));
+});
+
+test("non-STATIC M5 policy with static_max field is rejected by semantic validation", () => {
+  const base = makePolicy("DIRECT_LUNA_HIGH");
+  const state = createInitialState(base, stateIdentities(base));
+  const doc: any = {
+    schema_id: "pi_gacw_m5_control_policy_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1", content_sha256: digest(999),
+    run_id: base.run_id, repository_identity_content_sha256: digest(320), worktree_key: digest(321), starting_state_content_sha256: state.content_sha256,
+    objective_sha256: digest(50), contract_sha256: digest(51), budget_sha256: base.frozen_bindings.budget_sha256,
+    route_map_sha256: digest(322), route_map_approval_sha256: digest(323), reducer_policy_content_sha256: base.content_sha256,
+    authority_lock_sha256: digest(53), baseline_approval_sha256: digest(52), scope_sha256: base.frozen_bindings.scope_sha256,
+    acceptance_sha256: base.frozen_bindings.acceptance_sha256, plan_approval_sha256: base.frozen_bindings.plan_approval_sha256,
+    task_graph_sha256: base.frozen_bindings.task_graph_sha256, tool_policy_content_sha256: digest(324), command_catalog_content_sha256: digest(325),
+    route_map_approved: true, production_authority: "TEST_FIXTURE", requested_mode: "DIRECT_LUNA_HIGH",
+    route_facts: { hard_sol_conditions: [], task_count: 1, coherent_single_task: true, failure_domain_count: 1, deterministic_acceptance: true, ownership_ambiguous: false, leaf_count: 1, dag_valid: true, leaves_separable: true, unique_write_ownership: true, leaf_acceptance_machine_checkable: true },
+    obligations: [{ descriptor_sha256: sha256Canonical({ declaration: "src/result.ts", direction: "OUTPUT", stage: 1, producer: "task-only", consumers: ["contract"], grammar: "PATH", evidence_kind: "FILE", literal: null, prefix: null }), declaration: "src/result.ts", direction: "OUTPUT", stage: 1, producer: "task-only", consumers: ["contract"], grammar: "PATH", evidence_kind: "FILE", literal: null, prefix: null }],
+    limits: (["WORKER_INVOCATION", "MODEL_TURN", "PROVIDER_REQUEST", "TOOL_CALL", "INPUT_TOKEN", "OUTPUT_TOKEN", "COST_MICROUSD", "WALL_TIME_MS"] as const).map((dimension) => ({ dimension, hard_limit: dimension === "PROVIDER_REQUEST" ? null : 100, soft_limit: dimension === "PROVIDER_REQUEST" ? null : 80, enforcement_class: dimension === "WORKER_INVOCATION" || dimension === "TOOL_CALL" ? "HARD_ENFORCEABLE" as const : dimension === "MODEL_TURN" ? "SOFT_ENFORCEABLE" as const : dimension === "PROVIDER_REQUEST" ? "UNAVAILABLE" as const : "OBSERVABLE_ONLY" as const })),
+    role_reservation_envelopes: [{ logical_role: "LUNA_EXECUTOR", purpose: "ORDINARY", amounts: [{ dimension: "WORKER_INVOCATION", amount: 1 }] }],
+    failure_action_table_version: "m5-failure-actions-v1", progress_rule_version: "m5-progress-v1", contract_gate_rule_version: "m5-contract-gate-v1",
+    route_selection_rule_version: "m5-route-selection-v1", insufficient_routing_evidence: "BLOCK", maximum_control_decisions: 100, maximum_usage_records: 100, maximum_authority_depth: 64,
+    static_max_m4_mutation_calls: 32,
+  };
+  // schema allows the literal 32, but semantic must reject because mode is not STATIC
+  assert.equal(validateSchema("pi_gacw_m5_control_policy_v0", doc).valid, true);
+  assert.throws(() => assertDocumentValid("pi_gacw_m5_control_policy_v0", doc), (e: unknown) => e instanceof ContractValidationError && e.code === "STATIC_MUTATION_MODE_MISMATCH");
+  assert.throws(() => identifyContractDocument("pi_gacw_m5_control_policy_v0", doc), (e: unknown) => e instanceof ContractValidationError && e.code === "STATIC_MUTATION_MODE_MISMATCH");
 });
