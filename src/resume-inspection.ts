@@ -5,7 +5,7 @@ import { canonicalize } from "./canonical-json/index.js";
 import { inspectRunStorage } from "./persistence/index.js";
 import { readM5ManagedRecords } from "./persistence/store.js";
 import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/preflight.js";
-import { selectReadyLeafUnchecked } from "./state-machine/index.js";
+import { selectReadyLeafUnchecked } from "./state-machine/reducer.js";
 import { captureGitState } from "./repository/fingerprint.js";
 import { resolveRepositoryIdentity } from "./repository/index.js";
 import { probeWorktreeLockAvailability } from "./repository/lock.js";
