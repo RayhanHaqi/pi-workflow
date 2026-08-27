@@ -1,11 +1,19 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/kernel.js";
+import { boundedWorkerSystemPrompt, BOUNDED_WORKER_MAX_TOOL_CALLS, BOUNDED_WORKER_MAX_WALL_TIME_MS, partitionProviderVisibleReadScope, providerVisibleTaskContract } from "./control/launch-authority.js";
+import type { BoundedWorkerExecutionResult, RunBoundedWorkerInput } from "./pi-adapter/bounded-worker.js";
+import { createScopedToolGateway } from "./scoped-tools/index.js";
 import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
 import type { M5AuthoritativeSources } from "./control/types.js";
 import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { commitTransition, inspectRunStorage } from "./persistence/index.js";
 import { establishNodeStaticTimeAuthority, readM5ManagedRecords } from "./persistence/store.js";
 import { resolveApplicableResumeTiming, staticTimingVerdicts } from "./persistence/static-time-authority.js";
+import { resolveStaticMaxM4MutationCalls } from "./persistence/m5-authority.js";
+import { resolveAuthoritativeBoundedExecution } from "./persistence/bounded-worker-authority.js";
 import { sampleWallClockMs } from "./wall-clock.js";
 import {
   acquireWorktreeLock,
@@ -13,6 +21,8 @@ import {
   releaseWorktreeLock,
   type WorktreeLockHandle,
 } from "./repository/index.js";
+import { runResumeLockHandover } from "./repository/resume-handover.js";
+import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import {
   currentOperationWorkerRecords,
   deriveStaticDagPreProviderResumePoint,
@@ -36,6 +46,7 @@ import {
   type BudgetDocument,
   type ContractDocument,
   type M3BaselineApprovalRuntimeDocument,
+  type M3BaselineRuntimeDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
   type M4CommandCatalogDocument,
@@ -52,7 +63,7 @@ import {
 } from "./schemas/index.js";
 import type { ManagedRecordClassification } from "./persistence/types.js";
 
-export type ResumeAdmissionRefusalCode = ResumeRefusalReason | "LOCK_BUSY";
+export type ResumeAdmissionRefusalCode = ResumeRefusalReason | "LOCK_BUSY" | "FROZEN_MUTATION_ALLOWANCE_NOT_DURABLE" | "STATE_TOKEN_CHAIN_TOO_DEEP";
 
 export class DeterministicResumeAdmissionError extends Error {
   public constructor(readonly code: ResumeAdmissionRefusalCode) {
@@ -109,6 +120,8 @@ interface OwnedLockState {
   consumed: boolean;
   /** Set only by a completed V1-R2C work-admission flock transfer. */
   workTransferred: boolean;
+  /** Controller temporary root owned by a resumed worker result capability; removed on release. */
+  temporaryRoot?: string;
 }
 
 const admissions = new WeakMap<object, OwnedLockState>();
@@ -419,6 +432,8 @@ interface RehydratedStaticLeafAuthority {
   readonly policy: M5ControlPolicyDocument;
   readonly reducerPolicy: ReducerPolicy;
   readonly repositoryIdentity: M3RepositoryIdentityDocument;
+  readonly baseline: M3BaselineRuntimeDocument;
+  readonly baselineApproval: M3BaselineApprovalRuntimeDocument | null;
   readonly contract: ContractDocument;
   readonly budget: BudgetDocument;
   readonly routeMap: RouteMapDocument;
@@ -470,7 +485,8 @@ function rehydrateStaticLeafAuthority(
   const selectedTasks = records.tasks.filter((entry) => state.active_task_id !== null && entry.task_id === state.active_task_id);
   if (stateToken === null || selectedTasks.length !== 1 || state.active_task_id === null) return null;
   return Object.freeze({
-    policy, reducerPolicy: reducerPolicies[0]!, repositoryIdentity: baseline.repository, contract, budget, routeMap, routeMapApproval,
+    policy, reducerPolicy: reducerPolicies[0]!, repositoryIdentity: baseline.repository, baseline, baselineApproval: approval,
+    contract, budget, routeMap, routeMapApproval,
     toolPolicy: toolPolicyCandidates[0]!, commandCatalog: catalogCandidates[0]!, planApprovals, taskGraphs, tasks: records.tasks,
     selectedTask: selectedTasks[0]!, stateToken,
   });
@@ -721,4 +737,355 @@ export async function releaseDeterministicResumeWorkAdmission(admission: Determi
   const state = workAdmissionState(admission);
   if (state.consumed) throw new Error("resume work admission ownership was transferred");
   await releaseOwnedLock(state);
+}
+
+export interface DeterministicResumeWorkerResultBinding {
+  readonly run_id: string;
+  readonly selected_task_id: string;
+  readonly selected_task_content_sha256: Sha256Digest;
+  readonly operation_id: string;
+  readonly attempt_number: 1;
+  readonly m5_decision_content_sha256: Sha256Digest;
+  readonly reservation_decision_key: Sha256Digest | null;
+  readonly invocation_content_sha256: Sha256Digest;
+  readonly result_content_sha256: Sha256Digest;
+  readonly input_m3_state_token_content_sha256: Sha256Digest;
+  readonly final_gateway_state_token_content_sha256: Sha256Digest;
+  readonly accepted_m4_evidence_count: number;
+  readonly frozen_logical_role: "TERRA_EXECUTOR" | "CODING_EXECUTOR";
+  readonly provider_id: string;
+  readonly model_id: string;
+  readonly effort: string;
+  readonly model_definition_sha256: Sha256Digest | null;
+  readonly result_outcome: "COMPLETED" | "BLOCKED";
+  readonly cleanup_certain: boolean;
+}
+
+export interface DeterministicResumeWorkerResult {
+  readonly binding: DeterministicResumeWorkerResultBinding;
+}
+
+const workerResults = new WeakMap<object, OwnedLockState>();
+
+class DeterministicResumeWorkerResultImpl implements DeterministicResumeWorkerResult {
+  public constructor(public readonly binding: DeterministicResumeWorkerResultBinding, state: OwnedLockState) {
+    workerResults.set(this, state); Object.freeze(this);
+  }
+}
+
+function workerResultState(result: DeterministicResumeWorkerResult): OwnedLockState {
+  if (result === null || typeof result !== "object") throw new Error("resume worker result is invalid");
+  const state = workerResults.get(result as object);
+  if (state === undefined) throw new Error("resume worker result was not created by this package instance");
+  return state;
+}
+
+/** Package-internal deterministic resumed-worker proof seam; no supported entrypoint documents it. */
+export type ResumeWorkerCheckpoint = "AFTER_RESUME_HANDOVER" | "AFTER_RESUME_GATEWAY_CREATED" | "AFTER_RESUMED_RESULT_PERSISTED";
+interface ResumeWorkerTestHooks { readonly checkpoint?: (checkpoint: ResumeWorkerCheckpoint) => void | Promise<void> }
+let resumeWorkerHooks: ResumeWorkerTestHooks | undefined;
+
+/** Package-internal test-only seam; production never configures it. */
+export function configureResumeWorkerTestHooks(hooks: ResumeWorkerTestHooks | undefined): void {
+  resumeWorkerHooks = hooks;
+}
+
+async function resumeWorkerCheckpoint(checkpoint: ResumeWorkerCheckpoint): Promise<void> {
+  await resumeWorkerHooks?.checkpoint?.(checkpoint);
+}
+
+type ResumedWorkerRunner = (input: RunBoundedWorkerInput) => Promise<BoundedWorkerExecutionResult>;
+
+/**
+ * V1-R2D: execute exactly one bounded worker for the admitted resumed leaf through the existing
+ * bounded-worker protocol and a freshly recreated M4 scoped-tool gateway, all under the SAME M3 flock.
+ * Stops before controller COMPLETE_LEAF_ATTEMPT: reducer reconciliation belongs to R2E.
+ */
+async function executeResumedLeafWorkerImpl(admission: DeterministicResumeWorkAdmission, runner: ResumedWorkerRunner): Promise<DeterministicResumeWorkerResult> {
+  const owned = workAdmissionState(admission);
+  if (owned.released || owned.consumed) throw new Error("resume work admission is no longer active");
+  let temporaryRoot: string | undefined;
+  try {
+    await assertWorktreeLockHeld(owned.lock);
+    const binding = admission.binding;
+    const location = { stateRoot: owned.stateRoot, runId: binding.run_id };
+    // Fresh revalidation of the exact R2C binding while holding the flock.
+    const current = await inspectRunStorage(location);
+    if (current.status !== "HEALTHY" || current.revision === null || current.statePointer === null || current.workflowState === null || current.transitionCommit === null) return refused("RESUME_REFUSED_STATE_STORE");
+    const state = current.workflowState;
+    if (current.revision !== binding.successor_revision || current.statePointer.content_sha256 !== binding.successor_state_pointer_content_sha256 ||
+      state.content_sha256 !== binding.successor_workflow_state_content_sha256 ||
+      current.transitionCommit.content_sha256 !== binding.successor_transition_commit_content_sha256 ||
+      state.frozen_policy_content_sha256 !== binding.reducer_policy_content_sha256) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const taskId = binding.selected_task_id;
+    if (state.phase !== "LEAF_RUNNING" || state.active_task_id !== taskId) return refused("RESUME_REFUSED_STATE_STORE");
+    const selectedTask = state.tasks.find((entry) => entry.task_id === taskId);
+    if (selectedTask === undefined || selectedTask.status !== "RUNNING" || selectedTask.attempts !== 1) return refused("RESUME_REFUSED_STATE_STORE");
+    const records = await readM5ManagedRecords(location);
+    const authority = rehydrateStaticLeafAuthority(state, records, current.managedRecordClassifications);
+    if (authority === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    if (!classificationsInclude(current.managedRecordClassifications, "M5_CONTROL_POLICY", authority.policy.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")) {
+      return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    }
+    if (binding.m5_policy_content_sha256 !== authority.policy.content_sha256 ||
+      binding.repository_identity_content_sha256 !== authority.repositoryIdentity.content_sha256 ||
+      binding.worktree_key !== authority.repositoryIdentity.worktree_key || binding.worktree_root !== authority.repositoryIdentity.worktree_root ||
+      binding.git_common_dir !== authority.repositoryIdentity.git_common_dir) {
+      return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    }
+    if (binding.selected_task_content_sha256 !== authority.selectedTask.content_sha256 as Sha256Digest ||
+      binding.task_graph_sha256 !== (authority.policy.task_graph_sha256 ?? null) ||
+      binding.plan_approval_sha256 !== (authority.policy.plan_approval_sha256 ?? null)) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    // Exact M5 decision/reservation identity from the R2C admission.
+    const decisions = records.decisions.filter((entry) => entry.content_sha256 === binding.m5_decision_content_sha256);
+    const decision = decisions.length === 1 ? decisions[0]! : null;
+    if (decision === null || decision.operation_id !== binding.operation_id || decision.reservation === null ||
+      decision.policy_content_sha256 !== binding.m5_policy_content_sha256 ||
+      decision.reservation.future_operation_id !== binding.operation_id ||
+      decision.reservation.reservation_decision_key !== binding.reservation_decision_key ||
+      decision.reducer_policy_content_sha256 !== binding.reducer_policy_content_sha256) {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    // Exact frozen route identity; no rerouting, no substitution, no fallback.
+    const roleRoutes = authority.routeMap.routes.filter((entry) => entry.logical_role === binding.frozen_logical_role);
+    const roleRoute = roleRoutes.length === 1 ? roleRoutes[0]! : null;
+    if (roleRoute === null || roleRoute.provider_id !== binding.provider_id || roleRoute.model_id !== binding.model_id || roleRoute.effort !== binding.effort ||
+      (("model_definition_sha256" in roleRoute ? roleRoute.model_definition_sha256 : null) ?? null) !== binding.model_definition_sha256) {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    // Exact bound input M3 token: authoritative, still the unique chain tip, matching the live repository.
+    const inputTokens = records.stateTokens.filter((entry) => entry.content_sha256 === binding.input_m3_state_token_content_sha256 &&
+      classificationsInclude(current.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+    if (inputTokens.length !== 1 || tokenTip(records.stateTokens.filter((entry) => entry.run_id === authority.policy.run_id &&
+      entry.repository_identity_content_sha256 === authority.policy.repository_identity_content_sha256 && entry.worktree_key === authority.policy.worktree_key &&
+      entry.task_scope_identity === authority.policy.scope_sha256 && classificationsInclude(current.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")))?.content_sha256 !== binding.input_m3_state_token_content_sha256) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const inputToken = inputTokens[0]!;
+    // Provider-safety boundary: no CURRENT-operation worker evidence may exist.
+    const priorCurrent = currentOperationWorkerRecords(records, binding.operation_id);
+    if (priorCurrent.invocations.length !== 0 || priorCurrent.results.length !== 0) return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    const countersBefore = state.counters.worker_invocations;
+    const reservationsBefore = records.decisions.filter((entry) => entry.reservation !== null).length;
+    // Gate A: reread durable state and timing immediately before allowance/depth
+    // admission. No handover or M4 publication is legal before this check.
+    const gateAInspection = await inspectRunStorage(location);
+    if (gateAInspection.status !== "HEALTHY" || gateAInspection.revision === null || gateAInspection.statePointer === null ||
+      gateAInspection.workflowState === null || gateAInspection.transitionCommit === null ||
+      gateAInspection.revision !== binding.successor_revision || gateAInspection.statePointer.content_sha256 !== binding.successor_state_pointer_content_sha256 ||
+      gateAInspection.workflowState.content_sha256 !== binding.successor_workflow_state_content_sha256 ||
+      gateAInspection.transitionCommit.content_sha256 !== binding.successor_transition_commit_content_sha256) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const gateARecords = await readM5ManagedRecords(location);
+    const gateATiming = resolveApplicableResumeTiming({
+      runId: binding.run_id, state: gateAInspection.workflowState, tipCommit: gateAInspection.transitionCommit,
+      records: { transitionCommits: gateARecords.transitionCommits, workflowStates: gateARecords.workflowStates,
+        transitionEvents: gateARecords.transitionEvents, authorities: gateARecords.staticTimeAuthorities },
+      verdicts: staticTimingVerdicts(gateAInspection.managedRecordClassifications), nowMs: sampleWallClockMs(),
+    });
+    if (gateATiming.outcome === "REFUSED" || gateATiming.workflow === null || gateATiming.node === null) {
+      return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+    }
+    let inputTokenAuthority: Awaited<ReturnType<typeof loadAuthoritativeToken>>;
+    try {
+      inputTokenAuthority = await loadAuthoritativeToken(location, inputToken, authority.baseline);
+    } catch {
+      return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    }
+    const mutation = resolveStaticMaxM4MutationCalls(authority.policy);
+    if (mutation.outcome === "NOT_STATIC") return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    if (mutation.outcome === "ABSENT") return refused("FROZEN_MUTATION_ALLOWANCE_NOT_DURABLE");
+    if (inputTokenAuthority.token.content_sha256 !== inputToken.content_sha256 ||
+      inputTokenAuthority.chainDepth + 1 + mutation.value > 64) {
+      return refused("STATE_TOKEN_CHAIN_TOO_DEEP");
+    }
+    // R2D0: explicitly transfer T_A to a fresh T_B under the same held flock.
+    const handover = await runResumeLockHandover({
+      stateRoot: owned.stateRoot, runId: binding.run_id, acceptedState: inputToken, baseline: authority.baseline,
+      instructionFiles: [], authorityFiles: [], taskScopeIdentity: authority.policy.scope_sha256 as Sha256Digest, lock: owned.lock,
+    });
+    const workerInputToken = handover.acceptedState;
+    if (workerInputToken.content_sha256 === inputToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    await resumeWorkerCheckpoint("AFTER_RESUME_HANDOVER");
+    // Gate B: timing is reread after T_A -> T_B and before M4 gateway creation.
+    const gateBInspection = await inspectRunStorage(location);
+    if (gateBInspection.status !== "HEALTHY" || gateBInspection.workflowState === null || gateBInspection.transitionCommit === null) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const gateBRecords = await readM5ManagedRecords(location);
+    const gateBTiming = resolveApplicableResumeTiming({
+      runId: binding.run_id, state: gateBInspection.workflowState, tipCommit: gateBInspection.transitionCommit,
+      records: { transitionCommits: gateBRecords.transitionCommits, workflowStates: gateBRecords.workflowStates,
+        transitionEvents: gateBRecords.transitionEvents, authorities: gateBRecords.staticTimeAuthorities },
+      verdicts: staticTimingVerdicts(gateBInspection.managedRecordClassifications), nowMs: sampleWallClockMs(),
+    });
+    if (gateBTiming.outcome === "REFUSED" || gateBTiming.workflow === null || gateBTiming.node === null) {
+      return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+    }
+    const tipAfterHandover = tokenTip(gateBRecords.stateTokens.filter((entry) => entry.run_id === authority.policy.run_id &&
+      entry.repository_identity_content_sha256 === authority.policy.repository_identity_content_sha256 && entry.worktree_key === authority.policy.worktree_key &&
+      entry.task_scope_identity === authority.policy.scope_sha256 && classificationsInclude(gateBInspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")));
+    if (tipAfterHandover?.content_sha256 !== workerInputToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    // Recreate the existing M4 gateway under the same lock with a fresh safe temporary root.
+    temporaryRoot = await mkdtemp(join(tmpdir(), "pi-resumed-worker-"));
+    const planDocument = authority.planApprovals[0]!;
+    const graphDocument = authority.taskGraphs[0]!;
+    const gateway = await createScopedToolGateway({
+      stateRoot: owned.stateRoot, runId: binding.run_id, repository: authority.repositoryIdentity, baseline: authority.baseline,
+      acceptedState: workerInputToken, lock: owned.lock, instructionFiles: [], authorityFiles: [],
+      editablePaths: [...planDocument.bindings.scope.editable_paths], frozenPaths: [...planDocument.bindings.scope.frozen_paths],
+      taskScopeIdentity: authority.policy.scope_sha256 as Sha256Digest, toolPolicy: authority.toolPolicy, commandCatalog: authority.commandCatalog,
+      temporaryRoot: temporaryRoot as string,
+    });
+    await resumeWorkerCheckpoint("AFTER_RESUME_GATEWAY_CREATED");
+    // Gate C: gateway setup is non-provider, but the final pre-provider boundary
+    // still rereads timing and rejects any current-operation replay.
+    const gateCInspection = await inspectRunStorage(location);
+    if (gateCInspection.status !== "HEALTHY" || gateCInspection.workflowState === null || gateCInspection.transitionCommit === null) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const gateCRecords = await readM5ManagedRecords(location);
+    const gateCTiming = resolveApplicableResumeTiming({
+      runId: binding.run_id, state: gateCInspection.workflowState, tipCommit: gateCInspection.transitionCommit,
+      records: { transitionCommits: gateCRecords.transitionCommits, workflowStates: gateCRecords.workflowStates,
+        transitionEvents: gateCRecords.transitionEvents, authorities: gateCRecords.staticTimeAuthorities },
+      verdicts: staticTimingVerdicts(gateCInspection.managedRecordClassifications), nowMs: sampleWallClockMs(),
+    });
+    if (gateCTiming.outcome === "REFUSED" || gateCTiming.workflow === null || gateCTiming.node === null) {
+      return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+    }
+    const gateCCurrent = currentOperationWorkerRecords(gateCRecords, binding.operation_id);
+    if (gateCCurrent.invocations.length !== 0 || gateCCurrent.results.length !== 0) {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    const tipAtGateC = tokenTip(gateCRecords.stateTokens.filter((entry) => entry.run_id === authority.policy.run_id &&
+      entry.repository_identity_content_sha256 === authority.policy.repository_identity_content_sha256 && entry.worktree_key === authority.policy.worktree_key &&
+      entry.task_scope_identity === authority.policy.scope_sha256 && classificationsInclude(gateCInspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")));
+    if (tipAtGateC?.content_sha256 !== workerInputToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    // Launch contract identical to ordinary STATIC_APPROVED_DAG execution for this leaf.
+    const readableScope = partitionProviderVisibleReadScope(authority.selectedTask.scope.readable_paths, authority.toolPolicy.path_authorities);
+    // Consume the exact durable P0 mutation allowance for both the worker and
+    // the pre-handover token-depth reservation; no default or alternate source is used.
+    const maxM4MutationCalls = mutation.value;
+    const hardMutationToolLimit: 1 | null = maxM4MutationCalls === 1 ? 1 : null;
+    const modelTurnBudget = decision.budget.find((entry) => entry.dimension === "MODEL_TURN")?.soft_remaining;
+    if (modelTurnBudget === undefined || modelTurnBudget === null) {
+      throw Object.assign(new Error("M5 did not provide an enforceable model-turn admission remainder"), { code: "M5_MODEL_TURN_AUTHORITY" });
+    }
+    await assertWorktreeLockHeld(owned.lock);
+    const execution = await runner({
+      stateRoot: owned.stateRoot, runId: binding.run_id, operationId: binding.operation_id, reservation: decision,
+      task: authority.selectedTask, taskGraph: graphDocument, plan: planDocument, inputStateToken: workerInputToken, lock: owned.lock, gateway,
+      route: { logicalRole: binding.frozen_logical_role, providerId: binding.provider_id, modelId: binding.model_id, effort: binding.effort as "high",
+        modelDefinitionSha256: binding.model_definition_sha256 },
+      profile: "MUTATION_EXECUTOR", systemPrompt: boundedWorkerSystemPrompt("MUTATION_EXECUTOR"),
+      userPrompt: providerVisibleTaskContract(authority.selectedTask.objective, readableScope, authority.selectedTask.scope.editable_paths, null, hardMutationToolLimit === 1 ? 1 : null),
+      allowedReadPaths: readableScope.regularFilePaths, allowedEditPaths: authority.selectedTask.scope.editable_paths,
+      maxM4ToolCalls: roleRoute.tool_policy.maximum_tool_calls ?? BOUNDED_WORKER_MAX_TOOL_CALLS, maxM4MutationCalls,
+      maxModelTurns: modelTurnBudget,
+      deadlineMs: planDocument.bindings.limits.static_time_budgets?.worker_deadline_ms ?? BOUNDED_WORKER_MAX_WALL_TIME_MS,
+    });
+    // Durable verification against freshly reread records.
+    const successor = await inspectRunStorage(location);
+    if (successor.status !== "HEALTHY" || successor.workflowState === null) return refused("RESUME_REFUSED_STATE_STORE");
+    const successorTask = successor.workflowState.tasks.find((entry) => entry.task_id === taskId);
+    if (successor.workflowState.phase !== "LEAF_RUNNING" || successor.workflowState.active_task_id !== taskId || successorTask?.status !== "RUNNING" || successorTask.attempts !== 1 ||
+      canonicalize(successor.workflowState.counters.worker_invocations) !== canonicalize(countersBefore)) {
+      return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    const recordsAfter = await readM5ManagedRecords(location);
+    const afterCurrent = currentOperationWorkerRecords(recordsAfter, binding.operation_id);
+    if (afterCurrent.invocations.length !== 1 || afterCurrent.results.length !== 1 ||
+      afterCurrent.invocations[0]!.content_sha256 !== execution.invocation.content_sha256 || afterCurrent.results[0]!.content_sha256 !== execution.result.content_sha256 ||
+      afterCurrent.invocations[0]!.input_m3_state_token_content_sha256 !== workerInputToken.content_sha256 ||
+      recordsAfter.boundedWorkerInvocations.length !== records.boundedWorkerInvocations.length + 1 ||
+      recordsAfter.boundedWorkerResults.length !== records.boundedWorkerResults.length + 1 ||
+      recordsAfter.decisions.filter((entry) => entry.reservation !== null).length !== reservationsBefore ||
+      !classificationsInclude(successor.managedRecordClassifications, "BOUNDED_WORKER_INVOCATION", execution.invocation.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      !classificationsInclude(successor.managedRecordClassifications, "BOUNDED_WORKER_RESULT", execution.result.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")) {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    const finalToken = tokenTip(recordsAfter.stateTokens.filter((entry) => entry.run_id === authority.policy.run_id &&
+      entry.repository_identity_content_sha256 === authority.policy.repository_identity_content_sha256 && entry.worktree_key === authority.policy.worktree_key &&
+      entry.task_scope_identity === authority.policy.scope_sha256 && classificationsInclude(successor.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")));
+    if (finalToken?.content_sha256 !== gateway.acceptedState.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    const reservationStates = recordsAfter.workflowStates.filter((entry) => entry.content_sha256 === decision.current_state_content_sha256);
+    const resolvedExecution = reservationStates.length === 1
+      ? resolveAuthoritativeBoundedExecution({
+        invocation: execution.invocation, result: execution.result, reservation: decision,
+        reservationState: reservationStates[0]!, policy: authority.policy, baseline: authority.baseline, approval: authority.baselineApproval,
+        stateToken: workerInputToken, task: authority.selectedTask, taskGraph: graphDocument, plan: planDocument,
+        admissionRefusals: new Map(recordsAfter.admissionRefusals.map((entry) => [entry.content_sha256, entry])),
+        classifications: successor.managedRecordClassifications,
+      })
+      : null;
+    if (resolvedExecution === null || !resolvedExecution.accepted || resolvedExecution.acceptedWorkerInvocations !== 1) {
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    if (execution.result.outcome === "COMPLETED" && resolvedExecution.acceptedM4Evidence.length === 0) {
+      return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    }
+    await assertWorktreeLockHeld(owned.lock);
+    const resultBinding: DeterministicResumeWorkerResultBinding = Object.freeze({
+      run_id: binding.run_id, selected_task_id: taskId, selected_task_content_sha256: binding.selected_task_content_sha256,
+      operation_id: binding.operation_id, attempt_number: 1,
+      m5_decision_content_sha256: binding.m5_decision_content_sha256, reservation_decision_key: binding.reservation_decision_key,
+      invocation_content_sha256: execution.invocation.content_sha256 as Sha256Digest, result_content_sha256: execution.result.content_sha256 as Sha256Digest,
+      input_m3_state_token_content_sha256: workerInputToken.content_sha256 as Sha256Digest,
+      final_gateway_state_token_content_sha256: gateway.acceptedState.content_sha256 as Sha256Digest,
+      accepted_m4_evidence_count: resolvedExecution.acceptedM4Evidence.length,
+      frozen_logical_role: binding.frozen_logical_role, provider_id: binding.provider_id, model_id: binding.model_id, effort: binding.effort,
+      model_definition_sha256: binding.model_definition_sha256,
+      result_outcome: execution.result.outcome, cleanup_certain: execution.result.cleanup_certain,
+    });
+    await resumeWorkerCheckpoint("AFTER_RESUMED_RESULT_PERSISTED");
+    owned.consumed = true; owned.workTransferred = true;
+    const tempRoot = temporaryRoot; temporaryRoot = undefined;
+    return new DeterministicResumeWorkerResultImpl(resultBinding, { lock: owned.lock, stateRoot: owned.stateRoot, released: false, consumed: false, workTransferred: false, temporaryRoot: tempRoot });
+  } catch (error: unknown) {
+    if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
+    try { await releaseOwnedLock(owned); } catch (releaseError: unknown) { throw releaseError; }
+    throw error;
+  }
+}
+
+function classificationsInclude(classifications: readonly ManagedRecordClassification[], kind: string, digest: string, classification: string): boolean {
+  return classifications.some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest && entry.classification === classification);
+}
+
+/** Production entry: executes the resumed leaf through the real bounded-worker path. */
+export async function executeDeterministicResumedLeafWorker(admission: DeterministicResumeWorkAdmission): Promise<DeterministicResumeWorkerResult> {
+  const { runBoundedWorker } = await import("./pi-adapter/bounded-worker.js");
+  return executeResumedLeafWorkerImpl(admission, runBoundedWorker);
+}
+
+/** Package-internal faux-runtime-only seam; acceptance tests must use this so REAL_PROVIDER_RUNS stays zero. */
+export async function executeDeterministicResumedLeafWorkerForTests(admission: DeterministicResumeWorkAdmission): Promise<DeterministicResumeWorkerResult> {
+  const { runBoundedWorkerForTests } = await import("./pi-adapter/bounded-worker.js");
+  return executeResumedLeafWorkerImpl(admission, runBoundedWorkerForTests);
+}
+
+export async function assertDeterministicResumeWorkerResultHeld(result: DeterministicResumeWorkerResult): Promise<void> {
+  const state = workerResultState(result);
+  if (state.released || state.consumed) throw new Error("resume worker result is no longer active");
+  await assertWorktreeLockHeld(state.lock);
+}
+
+export async function releaseDeterministicResumeWorkerResult(result: DeterministicResumeWorkerResult): Promise<void> {
+  const state = workerResultState(result);
+  if (state.consumed) throw new Error("resume worker result ownership was transferred");
+  if (!state.released) {
+    const temporaryRoot = state.temporaryRoot;
+    delete state.temporaryRoot;
+    try {
+      if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
+    } finally {
+      await releaseOwnedLock(state);
+    }
+  }
 }

@@ -11,6 +11,14 @@ import { promisify } from "node:util";
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/index.js";
 import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
+import {
+  BOUNDED_WORKER_MAX_TOOL_CALLS,
+  BOUNDED_WORKER_MAX_WALL_TIME_MS,
+  boundedWorkerSystemPrompt,
+  partitionProviderVisibleReadScope,
+  providerVisibleTaskContract,
+} from "./control/launch-authority.js";
+export { partitionProviderVisibleReadScope, providerVisibleTaskContract } from "./control/launch-authority.js";
 import type { M5AuthoritativeSources, M5FailureInput, M5ObligationEvidenceInput } from "./control/types.js";
 import { sha256Bytes, sha256Canonical, assertSha256Digest, type Sha256Digest } from "./identity/index.js";
 import { m3ScopeIdentity } from "./identity/m3-scope.js";
@@ -78,8 +86,8 @@ import { configureBoundedWorkerFauxRuntimeForTests, runBoundedWorker, runBounded
 const execFileAsync = promisify(execFile);
 const RUN_ID = "pre-m8-bounded";
 const CONTROLLER_VERSION = "0.1.0";
-const MAX_TOOL_CALLS_PER_WORKER = 32;
-const MAX_WALL_TIME_MS = 120_000;
+const MAX_TOOL_CALLS_PER_WORKER = BOUNDED_WORKER_MAX_TOOL_CALLS;
+const MAX_WALL_TIME_MS = BOUNDED_WORKER_MAX_WALL_TIME_MS;
 type StaticTerraEffort = "high" | "xhigh";
 const PRODUCT_ROLES = ["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const;
 /** Historical frozen product-role inventory under its exported identity name; resume admission drift-guards against this list. */
@@ -634,30 +642,6 @@ function normalizeGoal(value: unknown): BoundedMutationGoal & { readonly tasks: 
     scope, required_outputs: required, tasks: Object.freeze(candidate), baseline_mode: baseline });
 }
 
-type ProviderVisibleReadScope = {
-  readonly regularFilePaths: readonly string[];
-  readonly prefixPaths: readonly string[];
-};
-
-function partitionProviderVisibleReadScope(readablePaths: readonly string[], pathAuthorities: M4ScopedToolPolicyDocument["path_authorities"]): ProviderVisibleReadScope {
-  const authorityKinds = new Map(pathAuthorities.map((entry) => [entry.path, entry.kind]));
-  const regularFilePaths: string[] = [];
-  const prefixPaths: string[] = [];
-  for (const readablePath of readablePaths) {
-    const kind = authorityKinds.get(readablePath);
-    if (kind === "EXACT") regularFilePaths.push(readablePath);
-    else if (kind === "PREFIX") prefixPaths.push(readablePath);
-    else fail("CONTROLLER_AUTHORITY_INVALID", `frozen readable path ${readablePath} has no M4 path-kind authority`);
-  }
-  return { regularFilePaths, prefixPaths };
-}
-
-function providerVisibleTaskContract(objective: string, readableScope: ProviderVisibleReadScope, editablePaths: readonly string[], plannerPlan: PlanApprovalDocument | null, hardMutationToolLimit: 1 | null): string {
-  const paths = (values: readonly string[]) => values.map((entry) => `- ${entry}`).join("\n") || "- (none)";
-  const plannerInstruction = plannerPlan === null ? "" : `\nPlanner instruction: submit exactly candidate_plan_sha256:${plannerPlan.content_sha256}; topology, scope, and identity expansion are forbidden.`;
-  const boundedMutationInstruction = hardMutationToolLimit !== 1 ? "" : "\n\nFrozen productive mutation sequence:\n- Make the first productive mutation request a genuine observable byte-changing edit to one task-owned editable path; a no-op replacement is not productive.\n- After that first productive mutation succeeds, do not stop: issue a second genuinely productive mutation request on that same task-owned editable path, requesting another byte-changing edit from its then-current contents.\n- Do not simulate the second attempt. Use only the supplied bounded tools and let the controller/M4 mutation-budget boundary decide that request.";
-  return `Frozen task contract\n\nObjective (exact frozen text):\n${objective}\n\nReadable paths (exact frozen scope):\nRegular-file read targets (valid read_scoped.path values):\n${paths(readableScope.regularFilePaths)}\n\nDirectory/prefix authority (not valid read_scoped.path values):\n${paths(readableScope.prefixPaths)}\n\nEditable paths (exact frozen scope):\n${paths(editablePaths)}\n\nScoped path requirements:\n- Scoped tool path arguments are exact canonical repository-relative paths; use the listed spelling exactly.\n- read_scoped.path must name one authorized regular-file read target listed above.\n- Directory/prefix authority establishes frozen scope and command/cwd authority; it is not a regular-file read target and must not be passed directly to read_scoped.path.\n- Repository-root aliases and discovery are not authorized. Invalid forms include ., an empty path, ./..., root aliases, .. or traversal, and absolute paths.\n- Do not normalize an alias into another path.${boundedMutationInstruction}${plannerInstruction}`;
-}
 function processMetadata() { return { controller_instance_id: "pre-m8-bounded-controller", process_id: Math.max(1, process.pid), invocation_id: "pre-m8-bounded-invocation" }; }
 function evidence(value: unknown): { readonly bytes: Buffer; readonly mediaType: string } { return { bytes: Buffer.from(`${canonicalize(value)}\n`, "utf8"), mediaType: "application/json" }; }
 function event(type: TransitionEvent["event_type"], payload: Record<string, unknown> = {}): TransitionEvent {
@@ -1313,7 +1297,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
       const execution = await workerRunner({ stateRoot, runId: RUN_ID, operationId, reservation: admission, task, taskGraph: graph, plan: workerPlan, inputStateToken: invocationState, lock: lock!, gateway,
         route: { logicalRole: routeRole, providerId: selectedRoute.provider_id, modelId: selectedRoute.model_id, effort: selectedRoute.effort,
           modelDefinitionSha256: ("model_definition_sha256" in selectedRoute ? selectedRoute.model_definition_sha256 : null) as Sha256Digest | null }, profile,
-        systemPrompt: `Pre-M8 bounded ${profile}; use only supplied M4 tools; no retry, replan, commands, shell, filesystem, or network.`,
+        systemPrompt: boundedWorkerSystemPrompt(profile),
         userPrompt: providerVisibleTaskContract(task?.objective ?? goal.objective, readableScope, task?.scope.editable_paths ?? goal.scope.editable_paths, profile === "SOL_PLANNER" ? workerPlan : null, maxM4MutationCalls === 1 ? 1 : null),
         allowedReadPaths: readableScope.regularFilePaths, allowedEditPaths: task?.scope.editable_paths ?? [], maxM4ToolCalls, maxM4MutationCalls,
         maxModelTurns: (() => { const remaining = admission.budget.find((entry) => entry.dimension === "MODEL_TURN")?.soft_remaining; if (remaining === undefined || remaining === null) throw new BoundedWorkflowError("M5_MODEL_TURN_AUTHORITY", "M5 did not provide an enforceable model-turn admission remainder"); return remaining; })(),
