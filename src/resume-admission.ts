@@ -23,6 +23,7 @@ import {
 } from "./repository/index.js";
 import { runResumeLockHandover } from "./repository/resume-handover.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
+import { resumeWorkerCheckpoint } from "./resume-worker-test-hooks.js";
 import {
   currentOperationWorkerRecords,
   deriveStaticDagPreProviderResumePoint,
@@ -120,8 +121,6 @@ interface OwnedLockState {
   consumed: boolean;
   /** Set only by a completed V1-R2C work-admission flock transfer. */
   workTransferred: boolean;
-  /** Controller temporary root owned by a resumed worker result capability; removed on release. */
-  temporaryRoot?: string;
 }
 
 const admissions = new WeakMap<object, OwnedLockState>();
@@ -184,6 +183,18 @@ function sameAdmissionState(binding: DeterministicResumeAdmissionBinding, inspec
 async function releaseOwnedLock(state: OwnedLockState): Promise<void> {
   if (state.released) return;
   await releaseWorktreeLock(state.lock); state.released = true;
+}
+
+async function cleanupResumedWorkerOwnership(state: OwnedLockState, temporaryRoot: string | undefined): Promise<void> {
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  if (temporaryRoot !== undefined) {
+    try { await rm(temporaryRoot, { recursive: true, force: true }); }
+    catch (error: unknown) { cleanupFailed = true; cleanupError = error; }
+  }
+  try { await releaseOwnedLock(state); }
+  catch (error: unknown) { if (!cleanupFailed) cleanupError = error; cleanupFailed = true; }
+  if (cleanupFailed) throw cleanupError;
 }
 
 /** Acquires M3's existing flock and derives admission only from authority freshly revalidated under it. */
@@ -765,35 +776,6 @@ export interface DeterministicResumeWorkerResult {
   readonly binding: DeterministicResumeWorkerResultBinding;
 }
 
-const workerResults = new WeakMap<object, OwnedLockState>();
-
-class DeterministicResumeWorkerResultImpl implements DeterministicResumeWorkerResult {
-  public constructor(public readonly binding: DeterministicResumeWorkerResultBinding, state: OwnedLockState) {
-    workerResults.set(this, state); Object.freeze(this);
-  }
-}
-
-function workerResultState(result: DeterministicResumeWorkerResult): OwnedLockState {
-  if (result === null || typeof result !== "object") throw new Error("resume worker result is invalid");
-  const state = workerResults.get(result as object);
-  if (state === undefined) throw new Error("resume worker result was not created by this package instance");
-  return state;
-}
-
-/** Package-internal deterministic resumed-worker proof seam; no supported entrypoint documents it. */
-export type ResumeWorkerCheckpoint = "AFTER_RESUME_HANDOVER" | "AFTER_RESUME_GATEWAY_CREATED" | "AFTER_RESUMED_RESULT_PERSISTED";
-interface ResumeWorkerTestHooks { readonly checkpoint?: (checkpoint: ResumeWorkerCheckpoint) => void | Promise<void> }
-let resumeWorkerHooks: ResumeWorkerTestHooks | undefined;
-
-/** Package-internal test-only seam; production never configures it. */
-export function configureResumeWorkerTestHooks(hooks: ResumeWorkerTestHooks | undefined): void {
-  resumeWorkerHooks = hooks;
-}
-
-async function resumeWorkerCheckpoint(checkpoint: ResumeWorkerCheckpoint): Promise<void> {
-  await resumeWorkerHooks?.checkpoint?.(checkpoint);
-}
-
 type ResumedWorkerRunner = (input: RunBoundedWorkerInput) => Promise<BoundedWorkerExecutionResult>;
 
 /**
@@ -805,6 +787,7 @@ async function executeResumedLeafWorkerImpl(admission: DeterministicResumeWorkAd
   const owned = workAdmissionState(admission);
   if (owned.released || owned.consumed) throw new Error("resume work admission is no longer active");
   let temporaryRoot: string | undefined;
+  let cleanupAttempted = false;
   try {
     await assertWorktreeLockHeld(owned.lock);
     const binding = admission.binding;
@@ -1045,11 +1028,15 @@ async function executeResumedLeafWorkerImpl(admission: DeterministicResumeWorkAd
     });
     await resumeWorkerCheckpoint("AFTER_RESUMED_RESULT_PERSISTED");
     owned.consumed = true; owned.workTransferred = true;
-    const tempRoot = temporaryRoot; temporaryRoot = undefined;
-    return new DeterministicResumeWorkerResultImpl(resultBinding, { lock: owned.lock, stateRoot: owned.stateRoot, released: false, consumed: false, workTransferred: false, temporaryRoot: tempRoot });
+    cleanupAttempted = true;
+    await cleanupResumedWorkerOwnership(owned, temporaryRoot);
+    temporaryRoot = undefined;
+    return Object.freeze({ binding: resultBinding });
   } catch (error: unknown) {
-    if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
-    try { await releaseOwnedLock(owned); } catch (releaseError: unknown) { throw releaseError; }
+    if (!cleanupAttempted) {
+      cleanupAttempted = true;
+      await cleanupResumedWorkerOwnership(owned, temporaryRoot);
+    }
     throw error;
   }
 }
@@ -1068,24 +1055,4 @@ export async function executeDeterministicResumedLeafWorker(admission: Determini
 export async function executeDeterministicResumedLeafWorkerForTests(admission: DeterministicResumeWorkAdmission): Promise<DeterministicResumeWorkerResult> {
   const { runBoundedWorkerForTests } = await import("./pi-adapter/bounded-worker.js");
   return executeResumedLeafWorkerImpl(admission, runBoundedWorkerForTests);
-}
-
-export async function assertDeterministicResumeWorkerResultHeld(result: DeterministicResumeWorkerResult): Promise<void> {
-  const state = workerResultState(result);
-  if (state.released || state.consumed) throw new Error("resume worker result is no longer active");
-  await assertWorktreeLockHeld(state.lock);
-}
-
-export async function releaseDeterministicResumeWorkerResult(result: DeterministicResumeWorkerResult): Promise<void> {
-  const state = workerResultState(result);
-  if (state.consumed) throw new Error("resume worker result ownership was transferred");
-  if (!state.released) {
-    const temporaryRoot = state.temporaryRoot;
-    delete state.temporaryRoot;
-    try {
-      if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
-    } finally {
-      await releaseOwnedLock(state);
-    }
-  }
 }

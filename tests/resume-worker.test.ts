@@ -46,7 +46,7 @@ async function interruptFixture(mode: FixtureMode): Promise<ChildFixture> {
 type WorkerMessage = Record<string, unknown>;
 type WorkerChild = { readonly child: ReturnType<typeof fork>; readonly next: (label: string) => Promise<WorkerMessage> };
 
-function startWorkerChild(root: string, mode: "EXEC_HOLD" | "HANG_IN_RUNTIME" | "RESULT_PAUSE" | "HANDOVER_PAUSE" | "DEPTH_REFUSE" | "EXPIRE_BEFORE_HANDOVER" | "EXPIRE_AFTER_HANDOVER" | "EXPIRE_BEFORE_INVOCATION", waitMs = 120_000): WorkerChild {
+function startWorkerChild(root: string, mode: "EXECUTE" | "HANG_IN_RUNTIME" | "RESULT_PAUSE" | "HANDOVER_PAUSE" | "DEPTH_REFUSE" | "EXPIRE_BEFORE_HANDOVER" | "EXPIRE_AFTER_HANDOVER" | "EXPIRE_BEFORE_INVOCATION", waitMs = 120_000): WorkerChild {
   const child = fork(new URL("./resume-worker-child.ts", import.meta.url), [root, mode], { execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "ignore", "ipc"] });
   const queue: WorkerMessage[] = [];
   const waiters: ((message: WorkerMessage) => void)[] = [];
@@ -192,7 +192,7 @@ function digest(letter: string): `sha256:${string}` { return `sha256:${letter.re
 test("first-leaf resumed faux worker executes through the real M4 path with exact authority transfer", async () => {
   const fixture = await interruptFixture("READY");
   const temporaryRootsBefore = new Set((await readdir(tmpdir())).filter((entry) => entry.startsWith("pi-resumed-worker-")));
-  const worker = startWorkerChild(fixture.root, "EXEC_HOLD");
+  const worker = startWorkerChild(fixture.root, "EXECUTE");
   try {
     // READY fixtures pause at selection; the resumed-worker child performs admission → activation → authorization.
     assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:a");
@@ -210,6 +210,7 @@ test("first-leaf resumed faux worker executes through the real M4 path with exac
       };
     };
     assert.equal(executed.type, "EXECUTED");
+    assert.equal(await probeWorktreeLockAvailability({ stateRoot: join(fixture.root, "state"), repository: await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }) }), "LOCK_AVAILABLE"); // R2D released ownership before returning EXECUTED
     // WORKER_AUTHORITY_REHYDRATION + identity binding
     assert.equal(executed.binding.operation_id, "static-leaf-a-attempt-1");
     assert.equal(executed.binding.result_outcome, "COMPLETED");
@@ -258,13 +259,9 @@ test("first-leaf resumed faux worker executes through the real M4 path with exac
     const expectedUserPrompt = providerVisibleTaskContract(taskObjective, partitionProviderVisibleReadScope(["verify"], toolPolicy.path_authorities), ["a.txt"], null, null);
     assert.equal(invocations[0]!.system_prompt_sha256, sha256Bytes(Buffer.from(boundedWorkerSystemPrompt("MUTATION_EXECUTOR"), "utf8")));
     assert.equal(invocations[0]!.user_prompt_sha256, sha256Bytes(Buffer.from(expectedUserPrompt, "utf8")));
-    // CAPABILITY TRANSFER: old work admission consumed; result capability holds the same flock.
-    await rejectsCode(acquireWorktreeLock({ stateRoot: join(fixture.root, "state"), repository: await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }) }), "LOCK_BUSY");
-    worker.child.send({ command: "RELEASE" });
-    await worker.next("RELEASED");
+    // CAPABILITY TRANSFER: work admission is consumed; R2D returns only immutable data binding.
     const temporaryRootsAfter = (await readdir(tmpdir())).filter((entry) => entry.startsWith("pi-resumed-worker-") && !temporaryRootsBefore.has(entry));
     assert.deepEqual(temporaryRootsAfter, []); // successful release removes the controller-owned temporary root
-    assert.equal(await probeWorktreeLockAvailability({ stateRoot: join(fixture.root, "state"), repository: await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true }) }), "LOCK_AVAILABLE");
     await stopChild(worker.child);
     await fixture.cleanup();
   } catch (error) {
@@ -276,7 +273,7 @@ test("first-leaf resumed faux worker executes through the real M4 path with exac
 
 test("two-leaf resumed faux worker executes leaf b without touching settled a evidence", async () => {
   const fixture = await interruptFixture("DELTA");
-  const worker = startWorkerChild(fixture.root, "EXEC_HOLD");
+  const worker = startWorkerChild(fixture.root, "EXECUTE");
   try {
     assert.equal((await eventuallyResumable(fixture.root)).resume_point, "STATIC_DAG_SELECT_READY_LEAF:b");
     const history = await readM5ManagedRecords(LOCATION(fixture.root));
@@ -301,7 +298,6 @@ test("two-leaf resumed faux worker executes leaf b without touching settled a ev
     assert.equal(await readFile(join(fixture.repository, "a.txt"), "utf8"), "a.txt\n"); // b never rewrote a's settled output
     // B_COUNTER_DELTA = 0 during R2D (R2C already charged both leaves).
     assert.equal(executed.terraExecutor, 2);
-    worker.child.send({ command: "RELEASE" });
     await stopChild(worker.child);
     await fixture.cleanup();
   } catch (error) {
@@ -387,7 +383,7 @@ test("crash after durable T_A→T_B handover is recovered by a fresh R2C without
     assert.equal(afterCrash.boundedWorkerInvocations.length, 0); // crash before invocation
     assert.equal(afterCrash.boundedWorkerResults.length, 0);
 
-    recovery = startWorkerChild(fixture.root, "EXEC_HOLD");
+    recovery = startWorkerChild(fixture.root, "EXECUTE");
     await recovery.next("AUTHORIZED"); // fresh R2C binds the durable current tip T_B
     const executed = await recovery.next("EXECUTED") as unknown as { readonly type: string; readonly phase: string | null; readonly binding: { readonly input_m3_state_token_content_sha256: Sha256Digest; readonly result_content_sha256: Sha256Digest } };
     assert.equal(executed.type, "EXECUTED");
@@ -401,8 +397,6 @@ test("crash after durable T_A→T_B handover is recovered by a fresh R2C without
     assert.equal(afterRecovery.boundedWorkerResults[0]!.content_sha256, executed.binding.result_content_sha256);
     assert.equal(afterRecovery.decisions.filter((decision) => decision.operation_id === "static-leaf-a-attempt-1" && decision.reservation !== null).length,
       beforeCrash.decisions.filter((decision) => decision.operation_id === "static-leaf-a-attempt-1" && decision.reservation !== null).length);
-    recovery.child.send({ command: "RELEASE" });
-    await recovery.next("RELEASED");
   } finally {
     await stopChild(first.child).catch(() => undefined);
     await stopChild(recovery?.child).catch(() => undefined);
@@ -466,7 +460,7 @@ test("R2D M3 depth gate N=1 exact boundary depth 62 succeeds and reaches depth 6
   try {
     await advanceTokenChain(fixture, 62);
     const before = await readM5ManagedRecords(LOCATION(fixture.root));
-    worker = startWorkerChild(fixture.root, "EXEC_HOLD", 600_000);
+    worker = startWorkerChild(fixture.root, "EXECUTE", 600_000);
     const executed = await worker.next("EXECUTED") as unknown as { readonly type: string; readonly binding: { readonly final_gateway_state_token_content_sha256: Sha256Digest } };
     assert.equal(executed.type, "EXECUTED");
     const after = await readM5ManagedRecords(LOCATION(fixture.root));
@@ -475,8 +469,6 @@ test("R2D M3 depth gate N=1 exact boundary depth 62 succeeds and reaches depth 6
     assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length,
       before.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length + 1);
     assert.equal(executed.binding.final_gateway_state_token_content_sha256, durableTokenTip(after).content_sha256);
-    worker.child.send({ command: "RELEASE" });
-    await worker.next("RELEASED");
   } finally {
     await stopChild(worker?.child).catch(() => undefined);
     await fixture.cleanup().catch(() => undefined);
@@ -507,14 +499,12 @@ test("R2D M3 depth gate N=32 exact boundary depth 31 succeeds", async () => {
   try {
     await advanceTokenChain(fixture, 31);
     const before = await readM5ManagedRecords(LOCATION(fixture.root));
-    worker = startWorkerChild(fixture.root, "EXEC_HOLD");
+    worker = startWorkerChild(fixture.root, "EXECUTE");
     const executed = await worker.next("EXECUTED") as unknown as { readonly type: string };
     assert.equal(executed.type, "EXECUTED");
     const after = await readM5ManagedRecords(LOCATION(fixture.root));
     assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length,
       before.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length + 1);
-    worker.child.send({ command: "RELEASE" });
-    await worker.next("RELEASED");
   } finally {
     await stopChild(worker?.child).catch(() => undefined);
     await fixture.cleanup().catch(() => undefined);

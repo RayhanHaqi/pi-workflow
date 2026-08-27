@@ -7,15 +7,14 @@ import {
   acquireDeterministicResumeAdmission,
   activateDeterministicResumeAdmission,
   authorizeDeterministicResumedLeafWork,
-  configureResumeWorkerTestHooks,
   executeDeterministicResumedLeafWorkerForTests,
-  releaseDeterministicResumeWorkerResult,
 } from "../src/resume-admission.js";
+import { configureResumeWorkerTestHooks } from "../src/resume-worker-test-hooks.js";
 import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
 
 const retainedRunRoot = process.argv[2]!;
 const mode = process.argv[3]!;
-if (process.send === undefined || retainedRunRoot === undefined || !["EXEC_HOLD", "HANG_IN_RUNTIME", "RESULT_PAUSE", "HANDOVER_PAUSE", "DEPTH_REFUSE", "EXPIRE_BEFORE_HANDOVER", "EXPIRE_AFTER_HANDOVER", "EXPIRE_BEFORE_INVOCATION"].includes(mode ?? "")) {
+if (process.send === undefined || retainedRunRoot === undefined || !["EXECUTE", "HANG_IN_RUNTIME", "RESULT_PAUSE", "HANDOVER_PAUSE", "DEPTH_REFUSE", "EXPIRE_BEFORE_HANDOVER", "EXPIRE_AFTER_HANDOVER", "EXPIRE_BEFORE_INVOCATION"].includes(mode ?? "")) {
   throw new Error("resume-worker-child requires a retained run root, a mode, and IPC");
 }
 
@@ -61,7 +60,7 @@ async function main(): Promise<void> {
   if (["RESULT_PAUSE", "HANDOVER_PAUSE", "EXPIRE_AFTER_HANDOVER", "EXPIRE_BEFORE_INVOCATION"].includes(mode)) {
     configureResumeWorkerTestHooks({ checkpoint: async (checkpoint) => {
       if (mode === "RESULT_PAUSE" && checkpoint === "AFTER_RESUMED_RESULT_PERSISTED") {
-        // Durable result exists; the R2D response and capability transfer never complete.
+        // Durable result exists; the R2D response is not returned before cleanup.
         process.send?.({ type: "RESULT_PERSISTED" });
         await new Promise<void>(() => {});
       } else if (mode === "HANDOVER_PAUSE" && checkpoint === "AFTER_RESUME_HANDOVER") {
@@ -97,13 +96,6 @@ async function main(): Promise<void> {
   const state = (await inspectRunStorage({ stateRoot: `${retainedRunRoot}/state`, runId: runs[0]! })).workflowState;
   process.send?.({ type: "EXECUTED", binding: result.binding,
     phase: state?.phase, terraExecutor: state?.counters.worker_invocations.terra_executor, taskId: activeTaskId });
-  if (mode === "EXEC_HOLD") {
-    await new Promise<void>((resolve) => process.once("message", (message: unknown) => {
-      if (message !== null && typeof message === "object" && (message as { readonly command?: unknown }).command === "RELEASE") resolve();
-    }));
-    await releaseDeterministicResumeWorkerResult(result);
-    process.send?.({ type: "RELEASED" });
-  }
 }
 
 main().catch((error: unknown) => {
