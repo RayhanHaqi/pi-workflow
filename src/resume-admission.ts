@@ -1131,10 +1131,12 @@ function assertR2ETiming(context: R2EContext): void {
   if (timing.outcome === "REFUSED" || timing.workflow === null || timing.node === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
 }
 
-function assertR2ECapacity(context: R2EContext): void {
+function assertR2ECapacity(
+  context: R2EContext,
+  verifierPostflightCount = context.authority.task.verification_commands.length,
+): void {
   const current = context.currentTokenAuthority;
   if (current.token.content_sha256 !== context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
-  const verifierPostflightCount = context.authority.task.verification_commands.length;
   if (current.chainDepth + 1 + Math.max(1, verifierPostflightCount) > 64) return refused("STATE_TOKEN_CHAIN_TOO_DEEP");
 }
 
@@ -1301,6 +1303,56 @@ function advanceResumeHandoverTokens(context: R2EContext, workerTip: M3Repositor
   return chain[index]!.content_sha256;
 }
 
+interface DurableVerifierProgress {
+  readonly workerTip: M3RepositoryStateTokenDocument;
+  readonly completed: readonly DurableVerifierEvidence[];
+  readonly remaining: readonly M4CommandSpecification[];
+  readonly cursor: string;
+  readonly failureClass: string | null;
+  readonly failureCode: string | null;
+}
+
+function durableVerifierPrefix(context: R2EContext): DurableVerifierProgress {
+  const specs = frozenVerificationSpecs(context.authority);
+  const workerTip = workerTerminalToken(context.authority, context.records, context.inspection.managedRecordClassifications);
+  if (workerTip === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  const chain = authoritativeTokenChain(context.records, context.inspection.managedRecordClassifications, workerTip.content_sha256, context.authority.currentStateToken);
+  if (chain === null) return refused("RESUME_REFUSED_STATE_STORE");
+  let cursor = workerTip.content_sha256;
+  const completed: DurableVerifierEvidence[] = [];
+  for (let index = 0; index < specs.length; index += 1) {
+    const spec = specs[index]!;
+    let evidence = durableVerifierEvidence(context.authority, context.records, context.inspection.managedRecordClassifications, spec, cursor);
+    if (evidence === null) {
+      const advancedCursor = advanceResumeHandoverTokens(context, workerTip, cursor);
+      if (advancedCursor === null) return refused("RESUME_REFUSED_STATE_STORE");
+      cursor = advancedCursor;
+      evidence = durableVerifierEvidence(context.authority, context.records, context.inspection.managedRecordClassifications, spec, cursor);
+    }
+    if (evidence === null) {
+      if (cursor !== context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+      return { workerTip, completed, remaining: specs.slice(index), cursor, failureClass: null, failureCode: null };
+    }
+    const cursorIndex = chain.findIndex((entry) => entry.content_sha256 === cursor);
+    if (cursorIndex < 0 || chain[cursorIndex + 1]?.content_sha256 !== evidence.nextToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    completed.push(evidence);
+    cursor = evidence.nextToken.content_sha256;
+    if (evidence.result.outcome === "BLOCKED") {
+      const failureCode = evidence.result.failure_code;
+      if (failureCode === null) return refused("RESUME_REFUSED_STATE_STORE");
+      const finalCursor = advanceResumeHandoverTokens(context, workerTip, cursor);
+      if (finalCursor === null || finalCursor !== context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+      return {
+        workerTip, completed, remaining: [], cursor, failureCode,
+        failureClass: failureCode === "COMMAND_EXIT_CODE_UNEXPECTED" ? "LOCAL_IMPLEMENTATION_DEFECT" : mapLowerLayerFailureCode(failureCode, "M4"),
+      };
+    }
+  }
+  const finalCursor = advanceResumeHandoverTokens(context, workerTip, cursor);
+  if (finalCursor === null || finalCursor !== context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+  return { workerTip, completed, remaining: [], cursor, failureClass: null, failureCode: null };
+}
+
 interface R2EVerificationRun {
   readonly context: R2EContext;
   readonly commandResults: readonly M4CommandResultDocument[];
@@ -1313,25 +1365,23 @@ async function runR2EVerification(
   admission: DeterministicResumeAdmission,
   context: R2EContext,
   gateway: Awaited<ReturnType<typeof createScopedToolGateway>>,
+  progress: DurableVerifierProgress,
 ): Promise<R2EVerificationRun> {
-  const { authority } = context;
-  const specs = frozenVerificationSpecs(authority);
-  const workerTip = workerTerminalToken(authority, context.records, context.inspection.managedRecordClassifications);
-  if (workerTip === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
   let latest = context;
-  let cursor = workerTip.content_sha256;
-  let commandResults: M4CommandResultDocument[] = [];
-  let postflights: M3PostflightDocument[] = [];
-  let failureClass: string | null = null;
-  let failureCode: string | null = null;
-  for (const spec of specs) {
+  let cursor = progress.cursor;
+  const workerTip = progress.workerTip;
+  const commandResults: M4CommandResultDocument[] = progress.completed.map((entry) => entry.result);
+  const postflights: M3PostflightDocument[] = progress.completed.map((entry) => entry.postflight);
+  let failureClass = progress.failureClass;
+  let failureCode = progress.failureCode;
+  for (const spec of progress.remaining) {
     assertR2ETiming(latest);
-    let evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
+    let evidence = durableVerifierEvidence(latest.authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
     if (evidence === null) {
       const advancedCursor = advanceResumeHandoverTokens(latest, workerTip, cursor);
       if (advancedCursor === null) return refused("RESUME_REFUSED_STATE_STORE");
       cursor = advancedCursor;
-      evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
+      evidence = durableVerifierEvidence(latest.authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
     }
     if (evidence === null) {
       if (cursor !== latest.authority.currentStateToken.content_sha256 || gateway.acceptedState.content_sha256 !== cursor) return refused("RESUME_REFUSED_STATE_STORE");
@@ -1342,10 +1392,12 @@ async function runR2EVerification(
         // A command failure is recoverable only from the exact durable result and postflight.
       }
       latest = await readR2EContext(admission, false);
-      evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
+      evidence = durableVerifierEvidence(latest.authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
       if (evidence === null || evidence.nextToken.content_sha256 !== latest.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
     }
-    commandResults.push(evidence.result); postflights.push(evidence.postflight); cursor = evidence.nextToken.content_sha256;
+    commandResults.push(evidence.result);
+    postflights.push(evidence.postflight);
+    cursor = evidence.nextToken.content_sha256;
     await resumeReconciliationCheckpoint("AFTER_VERIFICATION_COMMAND");
     assertR2ETiming(latest);
     if (evidence.result.outcome === "BLOCKED") {
@@ -1390,27 +1442,51 @@ async function reconcileDeterministicResumeAdmissionImpl(admission: Deterministi
   if (!context.inspection.workflowState.active_task_id || !admission.binding.resume_point.startsWith("STATIC_DAG_RECONCILE_")) return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
   try {
     assertR2ETiming(context);
-    assertR2ECapacity(context);
-    const handover = await runResumeLockHandover({
-      stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, acceptedState: context.authority.currentStateToken, baseline: context.authority.baseline,
-      instructionFiles: [], authorityFiles: [], taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, lock: owned.lock,
-    });
-    if (handover.acceptedState.content_sha256 === context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
-    context = await readR2EContext(admission, false);
-    assertR2ETiming(context);
-    context = await reconcileSettledWorkerUsage(admission, context);
-    await resumeReconciliationCheckpoint("AFTER_COMPLETE_LEAF_ATTEMPT");
-    assertR2ETiming(context);
-    temporaryRoot = await mkdtemp(join(tmpdir(), "pi-resumed-reconcile-"));
-    const gateway = await createScopedToolGateway({
-      stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, repository: context.authority.repositoryIdentity, baseline: context.authority.baseline,
-      acceptedState: context.authority.currentStateToken, lock: owned.lock, instructionFiles: [], authorityFiles: [],
-      editablePaths: [...context.authority.plan.bindings.scope.editable_paths], frozenPaths: [...context.authority.plan.bindings.scope.frozen_paths],
-      taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, toolPolicy: context.authority.toolPolicy, commandCatalog: context.authority.commandCatalog,
-      temporaryRoot,
-    });
-    assertR2ETiming(context);
-    const verification = await runR2EVerification(admission, context, gateway);
+    let progress = durableVerifierPrefix(context);
+    const initialPoint = admission.binding.resume_point.startsWith("STATIC_DAG_RECONCILE_SETTLED_LEAF:");
+    const continuationPoint = admission.binding.resume_point.startsWith("STATIC_DAG_RECONCILE_LEAF_POSTFLIGHT:") || admission.binding.resume_point.startsWith("STATIC_DAG_RECONCILE_LEAF_VERIFYING:");
+    if (!initialPoint && !continuationPoint) return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+    if (continuationPoint && progress.remaining.length === 0) {
+      // Revalidate under the freshly acquired flock before reusing a complete durable prefix.
+      context = await readR2EContext(admission, false);
+      progress = durableVerifierPrefix(context);
+    }
+    const handoverRequired = initialPoint || progress.remaining.length > 0;
+    if (initialPoint) assertR2ECapacity(context);
+    else if (progress.remaining.length > 0) assertR2ECapacity(context, progress.remaining.length);
+    if (handoverRequired) {
+      const handover = await runResumeLockHandover({
+        stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, acceptedState: context.authority.currentStateToken, baseline: context.authority.baseline,
+        instructionFiles: [], authorityFiles: [], taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, lock: owned.lock,
+      });
+      if (handover.acceptedState.content_sha256 === context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+      context = await readR2EContext(admission, false);
+      assertR2ETiming(context);
+      context = await reconcileSettledWorkerUsage(admission, context);
+      await resumeReconciliationCheckpoint("AFTER_COMPLETE_LEAF_ATTEMPT");
+      assertR2ETiming(context);
+    }
+    let verification: R2EVerificationRun;
+    if (initialPoint || progress.remaining.length > 0) {
+      temporaryRoot = await mkdtemp(join(tmpdir(), "pi-resumed-reconcile-"));
+      const gateway = await createScopedToolGateway({
+        stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, repository: context.authority.repositoryIdentity, baseline: context.authority.baseline,
+        acceptedState: context.authority.currentStateToken, lock: owned.lock, instructionFiles: [], authorityFiles: [],
+        editablePaths: [...context.authority.plan.bindings.scope.editable_paths], frozenPaths: [...context.authority.plan.bindings.scope.frozen_paths],
+        taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, toolPolicy: context.authority.toolPolicy, commandCatalog: context.authority.commandCatalog,
+        temporaryRoot,
+      });
+      assertR2ETiming(context);
+      verification = await runR2EVerification(admission, context, gateway, progress);
+    } else {
+      verification = {
+        context,
+        commandResults: progress.completed.map((entry) => entry.result),
+        postflights: progress.completed.map((entry) => entry.postflight),
+        failureClass: progress.failureClass,
+        failureCode: progress.failureCode,
+      };
+    }
     context = verification.context;
     if (context.inspection.workflowState.phase === "LEAF_POSTFLIGHT") {
       assertR2ETiming(context);

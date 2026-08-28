@@ -571,6 +571,17 @@ async function snapshotStateRoot(root: string): Promise<{ readonly restore: () =
   };
 }
 
+async function crashR2EAt(fixture: ChildFixture, checkpoint: "AFTER_VERIFICATION_COMMAND" | "AFTER_PASS_LEAF_POSTFLIGHT"): Promise<void> {
+  configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+    if (value === checkpoint) throw new Error(`R2E crash at ${checkpoint}`);
+  } });
+  try {
+    await assert.rejects(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), /R2E crash/);
+  } finally {
+    configureResumeReconciliationTestHooks(undefined);
+  }
+}
+
 test("R2E reconciles a settled leaf exactly once through verification to READY", async () => {
   const fixture = await settledWorkerFixture("READY_VERIFY");
   try {
@@ -769,6 +780,140 @@ test("R2E capacity reserves the fresh handover and every frozen verifier postfli
       });
     } finally {
       await twoDepth61.cleanup();
+    }
+  } finally {
+    await two.cleanup();
+  }
+});
+
+test("R2E capacity is restart-aware at verifier boundaries", async (t) => {
+  const single = await settledWorkerFixture("READY_VERIFY");
+  try {
+    await advanceTokenChain(single, 62);
+    const singleDepth62 = await snapshotStateRoot(single.root);
+    try {
+      await t.test("single verifier after durable result resumes at depth 64 without handover or rerun", async () => {
+        const workflow = await r2eWorkflowAuthority(single.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          await crashR2EAt(single, "AFTER_VERIFICATION_COMMAND");
+          const crashed = await readM5ManagedRecords(LOCATION(single.root));
+          const crashedDepth = await loadAuthoritativeToken(LOCATION(single.root), durableTokenTip(crashed), crashed.baselines[0]!);
+          assert.equal((await inspectRunStorage(LOCATION(single.root))).workflowState?.phase, "LEAF_POSTFLIGHT");
+          assert.equal(crashedDepth.chainDepth, 64);
+          assert.equal(crashed.commandResults.length, 1);
+          assert.equal(crashed.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+          const handoversBefore = crashed.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length;
+          const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: single.root });
+          assert.equal(result.final_phase, "READY");
+          const after = await readM5ManagedRecords(LOCATION(single.root));
+          assert.equal(result.m3_tip_content_sha256, durableTokenTip(after).content_sha256);
+          assert.deepEqual(result.command_result_content_sha256, [crashed.commandResults[0]!.content_sha256]);
+          assert.deepEqual(result.postflight_content_sha256, [crashed.postflights.find((entry) => entry.content_sha256 === crashed.commandResults[0]!.postflight_content_sha256)!.content_sha256]);
+          const afterDepth = await loadAuthoritativeToken(LOCATION(single.root), durableTokenTip(after), after.baselines[0]!);
+          assert.equal(afterDepth.chainDepth, 64);
+          assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length, handoversBefore);
+          assert.equal(after.commandResults.length, 1);
+          assert.equal(after.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+          assert.equal(after.transitionEvents.filter((event) => event.event_type === "PASS_LEAF_POSTFLIGHT").length, 1);
+          assert.equal(after.transitionEvents.filter((event) => event.event_type === "LEAF_VERIFICATION_PASSED").length, 1);
+        } finally {
+          installTestWallClock(null);
+        }
+      });
+
+      await singleDepth62.restore();
+      await t.test("single verifier from LEAF_VERIFYING resumes at depth 64 with only the final transition", async () => {
+        const workflow = await r2eWorkflowAuthority(single.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          await crashR2EAt(single, "AFTER_PASS_LEAF_POSTFLIGHT");
+          const crashed = await readM5ManagedRecords(LOCATION(single.root));
+          const crashedDepth = await loadAuthoritativeToken(LOCATION(single.root), durableTokenTip(crashed), crashed.baselines[0]!);
+          assert.equal((await inspectRunStorage(LOCATION(single.root))).workflowState?.phase, "LEAF_VERIFYING");
+          assert.equal(crashedDepth.chainDepth, 64);
+          const handoversBefore = crashed.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length;
+          const commandsBefore = crashed.commandResults.length;
+          const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: single.root });
+          assert.equal(result.final_phase, "READY");
+          const after = await readM5ManagedRecords(LOCATION(single.root));
+          const afterDepth = await loadAuthoritativeToken(LOCATION(single.root), durableTokenTip(after), after.baselines[0]!);
+          assert.equal(afterDepth.chainDepth, 64);
+          assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length, handoversBefore);
+          assert.equal(after.commandResults.length, commandsBefore);
+          assert.equal(after.transitionEvents.filter((event) => event.event_type === "PASS_LEAF_POSTFLIGHT").length, crashed.transitionEvents.filter((event) => event.event_type === "PASS_LEAF_POSTFLIGHT").length);
+          assert.equal(after.transitionEvents.filter((event) => event.event_type === "LEAF_VERIFICATION_PASSED").length, crashed.transitionEvents.filter((event) => event.event_type === "LEAF_VERIFICATION_PASSED").length + 1);
+          assert.equal(after.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+        } finally {
+          installTestWallClock(null);
+        }
+      });
+    } finally {
+      await singleDepth62.cleanup();
+    }
+  } finally {
+    await single.cleanup();
+  }
+
+  const two = await settledWorkerFixture("READY_VERIFY_TWO");
+  try {
+    await advanceTokenChain(two, 60);
+    const twoDepth60 = await snapshotStateRoot(two.root);
+    try {
+      await t.test("two verifiers resume from a durable prefix with only the remaining verifier", async () => {
+        const workflow = await r2eWorkflowAuthority(two.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          await crashR2EAt(two, "AFTER_VERIFICATION_COMMAND");
+          const crashed = await readM5ManagedRecords(LOCATION(two.root));
+          const crashedDepth = await loadAuthoritativeToken(LOCATION(two.root), durableTokenTip(crashed), crashed.baselines[0]!);
+          assert.equal((await inspectRunStorage(LOCATION(two.root))).workflowState?.phase, "LEAF_POSTFLIGHT");
+          assert.equal(crashedDepth.chainDepth, 62);
+          assert.equal(crashed.commandResults.filter((entry) => entry.command_id === "verify").length, 1);
+          assert.equal(crashed.commandResults.filter((entry) => entry.command_id === "verify2").length, 0);
+          assert.equal(crashed.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+          const handoversBefore = crashed.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length;
+          const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: two.root });
+          assert.equal(result.final_phase, "READY");
+          const after = await readM5ManagedRecords(LOCATION(two.root));
+          const afterDepth = await loadAuthoritativeToken(LOCATION(two.root), durableTokenTip(after), after.baselines[0]!);
+          assert.equal(afterDepth.chainDepth, 64);
+          assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length, handoversBefore + 1);
+          assert.equal(after.commandResults.length, 2);
+          assert.equal(after.commandResults.filter((entry) => entry.command_id === "verify").length, 1);
+          assert.equal(after.commandResults.filter((entry) => entry.command_id === "verify2").length, 1);
+          assert.equal(after.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+        } finally {
+          installTestWallClock(null);
+        }
+      });
+
+      await twoDepth60.restore();
+      await t.test("two verifiers refuse when the remaining prefix cannot fit", async () => {
+        await advanceTokenChain(two, 61);
+        const workflow = await r2eWorkflowAuthority(two.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          await crashR2EAt(two, "AFTER_VERIFICATION_COMMAND");
+          const crashed = await readM5ManagedRecords(LOCATION(two.root));
+          const crashedDepth = await loadAuthoritativeToken(LOCATION(two.root), durableTokenTip(crashed), crashed.baselines[0]!);
+          assert.equal(crashedDepth.chainDepth, 63);
+          assert.equal(crashed.commandResults.length, 1);
+          assert.equal(crashed.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+          const handoversBefore = crashed.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length;
+          await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: two.root }), "STATE_TOKEN_CHAIN_TOO_DEEP");
+          const after = await readM5ManagedRecords(LOCATION(two.root));
+          assert.equal((await inspectRunStorage(LOCATION(two.root))).workflowState?.phase, "LEAF_POSTFLIGHT");
+          assert.equal((await loadAuthoritativeToken(LOCATION(two.root), durableTokenTip(after), after.baselines[0]!)).chainDepth, 63);
+          assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length, handoversBefore);
+          assert.equal(after.commandResults.length, 1);
+          assert.equal(after.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+        } finally {
+          installTestWallClock(null);
+        }
+      });
+    } finally {
+      await twoDepth60.cleanup();
     }
   } finally {
     await two.cleanup();
