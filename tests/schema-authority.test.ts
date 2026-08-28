@@ -105,6 +105,7 @@ const canonicalSchemaIds = [
   "pi_gacw_m5_control_decision_v0",
   "pi_gacw_m6_worker_invocation_v0",
   "pi_gacw_m6_worker_result_v0",
+  "pi_gacw_static_time_authority_v0",
   "pi_gacw_bounded_worker_invocation_v0",
   "pi_gacw_bounded_worker_result_v0",
 ] as const;
