@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { fork } from "node:child_process";
-import { rm } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -28,7 +27,7 @@ import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.
 import { configureResumeReconciliationTestHooks } from "../src/resume-reconciliation-test-hooks.js";
 import { installTestWallClock } from "../src/wall-clock.js";
 
-type FixtureMode = "READY" | "READY_LIMIT_1" | "DELTA" | "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "DELTA_VERIFY";
+type FixtureMode = "READY" | "READY_LIMIT_1" | "DELTA" | "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "READY_VERIFY_TWO" | "READY_VERIFY_TIMEOUT" | "DELTA_VERIFY";
 type ChildFixture = { readonly root: string; readonly repository: string; readonly cleanup: () => Promise<void> };
 
 async function interruptFixture(mode: FixtureMode): Promise<ChildFixture> {
@@ -154,7 +153,7 @@ async function eventuallyResumable(root: string) {
   return report;
 }
 
-async function settledWorkerFixture(mode: Extract<FixtureMode, "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "DELTA_VERIFY">): Promise<ChildFixture> {
+async function settledWorkerFixture(mode: Extract<FixtureMode, "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "READY_VERIFY_TWO" | "READY_VERIFY_TIMEOUT" | "DELTA_VERIFY">): Promise<ChildFixture> {
   const fixture = await interruptFixture(mode);
   const worker = startWorkerChild(fixture.root, "EXECUTE");
   try {
@@ -562,6 +561,15 @@ async function r2eWorkflowAuthority(root: string) {
   assert.ok(authority, "R2E fixture has no workflow timing authority");
   return authority;
 }
+async function snapshotStateRoot(root: string): Promise<{ readonly restore: () => Promise<void>; readonly cleanup: () => Promise<void> }> {
+  const backupRoot = await mkdtemp(join(tmpdir(), "r2e-capacity-state-"));
+  const stateRoot = join(root, "state");
+  await cp(stateRoot, join(backupRoot, "state"), { recursive: true });
+  return {
+    restore: async () => { await rm(stateRoot, { recursive: true, force: true }); await cp(join(backupRoot, "state"), stateRoot, { recursive: true }); },
+    cleanup: async () => { await rm(backupRoot, { recursive: true, force: true }); },
+  };
+}
 
 test("R2E reconciles a settled leaf exactly once through verification to READY", async () => {
   const fixture = await settledWorkerFixture("READY_VERIFY");
@@ -637,6 +645,133 @@ test("R2E maps verifier failure without starting a repair worker", async (t) => 
         await fixture.cleanup();
       }
     });
+  }
+});
+
+test("R2E maps non-local verifier failure to a common BLOCK with exact lower-layer reason", async () => {
+  const fixture = await settledWorkerFixture("READY_VERIFY_TIMEOUT");
+  try {
+    const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(result.verification_outcome, "FAILED");
+    assert.equal(result.failure_class, "TRANSIENT_TOOL_FAILURE");
+    assert.equal(result.final_phase, "BLOCKED");
+    assert.equal(result.final_state.terminal_reason, "BLOCKED_TRANSIENT_TOOL_FAILURE:COMMAND_TIMEOUT");
+    const records = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(records.boundedWorkerInvocations.length, 1);
+    assert.equal(records.boundedWorkerResults.length, 1);
+    assert.equal(records.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+    assert.equal(records.commandResults.length, 1);
+    assert.equal(records.commandResults[0]!.outcome, "BLOCKED");
+    assert.equal(records.commandResults[0]!.failure_code, "COMMAND_TIMEOUT");
+    assert.notEqual(records.commandResults[0]!.postflight_content_sha256, null);
+    assert.ok(records.transitionEvents.some((event) => event.event_type === "PASS_LEAF_POSTFLIGHT"));
+    assert.ok(records.workflowStates.some((state) => state.phase === "LEAF_VERIFYING"));
+    const block = records.transitionEvents.find((event) => event.event_type === "BLOCK");
+    assert.equal(block?.payload.reason, "BLOCKED_TRANSIENT_TOOL_FAILURE:COMMAND_TIMEOUT");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2E capacity reserves the fresh handover and every frozen verifier postflight", async (t) => {
+  const single = await settledWorkerFixture("READY_VERIFY");
+  try {
+    await advanceTokenChain(single, 62);
+    const singleDepth62 = await snapshotStateRoot(single.root);
+    try {
+      await t.test("single verifier at depth 63 refuses before handover", async () => {
+        await advanceTokenChain(single, 63);
+        const before = await readM5ManagedRecords(LOCATION(single.root));
+        const tipBefore = durableTokenTip(before).content_sha256;
+        const handoversBefore = before.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length;
+        const workflow = await r2eWorkflowAuthority(single.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: single.root }), "STATE_TOKEN_CHAIN_TOO_DEEP");
+        } finally {
+          installTestWallClock(null);
+        }
+        const after = await readM5ManagedRecords(LOCATION(single.root));
+        assert.equal((await inspectRunStorage(LOCATION(single.root))).workflowState?.phase, "LEAF_RUNNING");
+        assert.equal(durableTokenTip(after).content_sha256, tipBefore);
+        assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length, handoversBefore);
+        assert.equal(after.usage.length, before.usage.length);
+        assert.equal(after.commandResults.length, before.commandResults.length);
+        assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+        assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
+      });
+
+      await singleDepth62.restore();
+      await t.test("single verifier at depth 62 reaches depth 64", async () => {
+        const before = await readM5ManagedRecords(LOCATION(single.root));
+        const workflow = await r2eWorkflowAuthority(single.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: single.root });
+          assert.equal(result.final_phase, "READY");
+        } finally {
+          installTestWallClock(null);
+        }
+        const after = await readM5ManagedRecords(LOCATION(single.root));
+        assert.equal((await loadAuthoritativeToken(LOCATION(single.root), durableTokenTip(after), after.baselines[0]!)).chainDepth, 64);
+        assert.equal(after.usage.length, before.usage.length + 1);
+        assert.equal(after.commandResults.length, before.commandResults.length + 1);
+      });
+    } finally {
+      await singleDepth62.cleanup();
+    }
+  } finally {
+    await single.cleanup();
+  }
+
+  const two = await settledWorkerFixture("READY_VERIFY_TWO");
+  try {
+    await advanceTokenChain(two, 61);
+    const twoDepth61 = await snapshotStateRoot(two.root);
+    try {
+      await t.test("two verifiers at depth 62 refuse before handover", async () => {
+        await advanceTokenChain(two, 62);
+        const before = await readM5ManagedRecords(LOCATION(two.root));
+        const tipBefore = durableTokenTip(before).content_sha256;
+        const handoversBefore = before.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length;
+        const workflow = await r2eWorkflowAuthority(two.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: two.root }), "STATE_TOKEN_CHAIN_TOO_DEEP");
+        } finally {
+          installTestWallClock(null);
+        }
+        const after = await readM5ManagedRecords(LOCATION(two.root));
+        assert.equal((await inspectRunStorage(LOCATION(two.root))).workflowState?.phase, "LEAF_RUNNING");
+        assert.equal(durableTokenTip(after).content_sha256, tipBefore);
+        assert.equal(after.stateTokens.filter((token) => token.source === "RESUME_LOCK_HANDOVER").length, handoversBefore);
+        assert.equal(after.usage.length, before.usage.length);
+        assert.equal(after.commandResults.length, before.commandResults.length);
+        assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+        assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
+      });
+
+      await twoDepth61.restore();
+      await t.test("two verifiers at depth 61 reach depth 64", async () => {
+        const before = await readM5ManagedRecords(LOCATION(two.root));
+        const workflow = await r2eWorkflowAuthority(two.root);
+        installTestWallClock(() => workflow.started_at_epoch_ms);
+        try {
+          const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: two.root });
+          assert.equal(result.final_phase, "READY");
+        } finally {
+          installTestWallClock(null);
+        }
+        const after = await readM5ManagedRecords(LOCATION(two.root));
+        assert.equal((await loadAuthoritativeToken(LOCATION(two.root), durableTokenTip(after), after.baselines[0]!)).chainDepth, 64);
+        assert.equal(after.usage.length, before.usage.length + 1);
+        assert.equal(after.commandResults.length, before.commandResults.length + 2);
+      });
+    } finally {
+      await twoDepth61.cleanup();
+    }
+  } finally {
+    await two.cleanup();
   }
 });
 

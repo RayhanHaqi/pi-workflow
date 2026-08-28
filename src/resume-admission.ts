@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/kernel.js";
+import { mapLowerLayerFailureCode } from "./control/evaluate.js";
 import { boundedWorkerSystemPrompt, BOUNDED_WORKER_MAX_TOOL_CALLS, BOUNDED_WORKER_MAX_WALL_TIME_MS, partitionProviderVisibleReadScope, providerVisibleTaskContract } from "./control/launch-authority.js";
 import type { BoundedWorkerExecutionResult, RunBoundedWorkerInput } from "./pi-adapter/bounded-worker.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
@@ -1104,6 +1105,7 @@ interface R2EContext {
   readonly inspection: R2EHealthyInspection;
   readonly records: R2ERecords;
   readonly authority: import("./resume-inspection.js").SettledStaticLeafAuthority;
+  readonly currentTokenAuthority: Awaited<ReturnType<typeof loadAuthoritativeToken>>;
 }
 
 function isHealthyR2EInspection(value: R2EInspection): value is R2EHealthyInspection {
@@ -1127,6 +1129,13 @@ function assertR2ETiming(context: R2EContext): void {
     }, verdicts: staticTimingVerdicts(context.inspection.managedRecordClassifications), nowMs: sampleWallClockMs(),
   });
   if (timing.outcome === "REFUSED" || timing.workflow === null || timing.node === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+}
+
+function assertR2ECapacity(context: R2EContext): void {
+  const current = context.currentTokenAuthority;
+  if (current.token.content_sha256 !== context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  const verifierPostflightCount = context.authority.task.verification_commands.length;
+  if (current.chainDepth + 1 + Math.max(1, verifierPostflightCount) > 64) return refused("STATE_TOKEN_CHAIN_TOO_DEEP");
 }
 
 function authoritativeTokenChain(
@@ -1184,10 +1193,10 @@ async function readR2EContext(admission: DeterministicResumeAdmission, requireBi
     const fingerprint = await captureGitState(repository);
     assertNoGitBlockers(fingerprint);
     if (canonicalize(fingerprint) !== canonicalize(authority.currentStateToken.git_fingerprint)) return refused("RESUME_REFUSED_STATE_DRIFT");
+    return { inspection, records, authority, currentTokenAuthority: current };
   } catch {
     return refused("RESUME_REFUSED_REPOSITORY_IDENTITY");
   }
-  return { inspection, records, authority };
 }
 
 function reconciliationSources(context: R2EContext): M5AuthoritativeSources {
@@ -1297,6 +1306,7 @@ interface R2EVerificationRun {
   readonly commandResults: readonly M4CommandResultDocument[];
   readonly postflights: readonly M3PostflightDocument[];
   readonly failureClass: string | null;
+  readonly failureCode: string | null;
 }
 
 async function runR2EVerification(
@@ -1313,6 +1323,7 @@ async function runR2EVerification(
   let commandResults: M4CommandResultDocument[] = [];
   let postflights: M3PostflightDocument[] = [];
   let failureClass: string | null = null;
+  let failureCode: string | null = null;
   for (const spec of specs) {
     assertR2ETiming(latest);
     let evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
@@ -1338,16 +1349,17 @@ async function runR2EVerification(
     await resumeReconciliationCheckpoint("AFTER_VERIFICATION_COMMAND");
     assertR2ETiming(latest);
     if (evidence.result.outcome === "BLOCKED") {
-      const failureCode = evidence.result.failure_code;
-      if (failureCode === null) return refused("RESUME_REFUSED_STATE_STORE");
-      failureClass = failureCode === "COMMAND_EXIT_CODE_UNEXPECTED" ? "LOCAL_IMPLEMENTATION_DEFECT" : failureCode;
+      const durableFailureCode = evidence.result.failure_code;
+      if (durableFailureCode === null) return refused("RESUME_REFUSED_STATE_STORE");
+      failureCode = durableFailureCode;
+      failureClass = durableFailureCode === "COMMAND_EXIT_CODE_UNEXPECTED" ? "LOCAL_IMPLEMENTATION_DEFECT" : mapLowerLayerFailureCode(durableFailureCode, "M4");
       break;
     }
   }
   latest = await readR2EContext(admission, false);
   const finalCursor = advanceResumeHandoverTokens(latest, workerTip, cursor);
   if (finalCursor === null || finalCursor !== latest.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
-  return { context: latest, commandResults, postflights, failureClass };
+  return { context: latest, commandResults, postflights, failureClass, failureCode };
 }
 
 async function commitR2ETransition(
@@ -1378,6 +1390,7 @@ async function reconcileDeterministicResumeAdmissionImpl(admission: Deterministi
   if (!context.inspection.workflowState.active_task_id || !admission.binding.resume_point.startsWith("STATIC_DAG_RECONCILE_")) return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
   try {
     assertR2ETiming(context);
+    assertR2ECapacity(context);
     const handover = await runResumeLockHandover({
       stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, acceptedState: context.authority.currentStateToken, baseline: context.authority.baseline,
       instructionFiles: [], authorityFiles: [], taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, lock: owned.lock,
@@ -1408,8 +1421,24 @@ async function reconcileDeterministicResumeAdmissionImpl(admission: Deterministi
     if (context.inspection.workflowState.phase !== "LEAF_VERIFYING") return refused("RESUME_REFUSED_STATE_STORE");
     const outcome: R2EVerificationOutcome = verification.failureClass === null ? "PASSED" : "FAILED";
     assertR2ETiming(context);
-    await commitR2ETransition(admission, context, outcome === "PASSED" ? "LEAF_VERIFICATION_PASSED" : "LEAF_VERIFICATION_FAILED",
-      staticLeafVerificationTransitionId(context.authority.taskId, outcome), outcome === "FAILED" ? { failure_class: verification.failureClass } : {});
+    let finalEventType: TransitionEvent["event_type"];
+    let finalTransitionId: string;
+    let finalPayload: Record<string, unknown>;
+    if (verification.failureCode === null) {
+      finalEventType = "LEAF_VERIFICATION_PASSED";
+      finalTransitionId = staticLeafVerificationTransitionId(context.authority.taskId, "PASSED");
+      finalPayload = {};
+    } else if (verification.failureClass === "LOCAL_IMPLEMENTATION_DEFECT") {
+      finalEventType = "LEAF_VERIFICATION_FAILED";
+      finalTransitionId = staticLeafVerificationTransitionId(context.authority.taskId, "FAILED");
+      finalPayload = { failure_class: verification.failureClass };
+    } else {
+      if (verification.failureClass === null) return refused("RESUME_REFUSED_STATE_STORE");
+      finalEventType = "BLOCK";
+      finalTransitionId = `r2e-verification-blocked-${sha256Canonical({ task_id: context.authority.taskId, failure_class: verification.failureClass, failure_code: verification.failureCode }).slice(7, 39)}`;
+      finalPayload = { reason: `BLOCKED_${verification.failureClass}:${verification.failureCode}` };
+    }
+    await commitR2ETransition(admission, context, finalEventType, finalTransitionId, finalPayload);
     await resumeReconciliationCheckpoint("AFTER_LEAF_VERIFICATION_TRANSITION");
     const final = await readR2EContextAfterTransition(admission);
     return {
