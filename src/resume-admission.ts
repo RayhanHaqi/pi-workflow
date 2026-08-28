@@ -17,6 +17,7 @@ import { resolveAuthoritativeBoundedExecution } from "./persistence/bounded-work
 import { sampleWallClockMs } from "./wall-clock.js";
 import {
   acquireWorktreeLock,
+  resolveRepositoryIdentity,
   assertWorktreeLockHeld,
   releaseWorktreeLock,
   type WorktreeLockHandle,
@@ -24,13 +25,20 @@ import {
 import { runResumeLockHandover } from "./repository/resume-handover.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import { resumeWorkerCheckpoint } from "./resume-worker-test-hooks.js";
+import { resumeReconciliationCheckpoint } from "./resume-reconciliation-test-hooks.js";
 import {
   currentOperationWorkerRecords,
   deriveStaticDagPreProviderResumePoint,
+  deriveStaticDagR2EResumePoint,
   deriveStaticDagResumePoint,
   exactStaticWorkDecision,
   loadDeterministicResumeLockTarget,
   resolveExactStaticM5Policy,
+  resolveSettledStaticLeafAuthority,
+  exactStaticLeafReconciliationDecision,
+  staticLeafPostflightTransitionId,
+  staticLeafReconciliationTransitionId,
+  staticLeafVerificationTransitionId,
   resumedAvailableLogicalRoles,
   revalidateDeterministicResumeEligibilityWhileLocked,
   staticLeafOperationId,
@@ -42,15 +50,19 @@ import {
 } from "./resume-inspection.js";
 import { selectReadyLeafUnchecked } from "./state-machine/reducer.js";
 import { captureGitState } from "./repository/fingerprint.js";
+import { assertNoGitBlockers, assertRepositoryMatches } from "./repository/preflight.js";
 import {
   identifyContractDocument,
   type BudgetDocument,
   type ContractDocument,
   type M3BaselineApprovalRuntimeDocument,
   type M3BaselineRuntimeDocument,
+  type M3PostflightDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
   type M4CommandCatalogDocument,
+  type M4CommandResultDocument,
+  type M4CommandSpecification,
   type M4ScopedToolPolicyDocument,
   type M5ControlPolicyDocument,
   type PlanApprovalDocument,
@@ -1055,4 +1067,387 @@ export async function executeDeterministicResumedLeafWorker(admission: Determini
 export async function executeDeterministicResumedLeafWorkerForTests(admission: DeterministicResumeWorkAdmission): Promise<DeterministicResumeWorkerResult> {
   const { runBoundedWorkerForTests } = await import("./pi-adapter/bounded-worker.js");
   return executeResumedLeafWorkerImpl(admission, runBoundedWorkerForTests);
+}
+
+
+type R2EInspection = Awaited<ReturnType<typeof inspectRunStorage>>;
+type R2ERecords = Awaited<ReturnType<typeof readM5ManagedRecords>>;
+type R2EHealthyInspection = R2EInspection & {
+  readonly revision: number;
+  readonly statePointer: NonNullable<R2EInspection["statePointer"]>;
+  readonly workflowState: WorkflowState;
+  readonly transitionCommit: NonNullable<R2EInspection["transitionCommit"]>;
+};
+
+type R2EVerificationOutcome = "PASSED" | "FAILED";
+
+export interface DeterministicResumeReconciliationResult {
+  readonly run_id: string;
+  readonly task_id: string;
+  readonly operation_id: string;
+  readonly invocation_content_sha256: Sha256Digest;
+  readonly result_content_sha256: Sha256Digest;
+  readonly usage_content_sha256: Sha256Digest;
+  readonly command_result_content_sha256: readonly Sha256Digest[];
+  readonly postflight_content_sha256: readonly Sha256Digest[];
+  readonly verification_outcome: R2EVerificationOutcome;
+  readonly failure_class: string | null;
+  readonly final_phase: WorkflowState["phase"];
+  readonly final_state: WorkflowState;
+  readonly m3_tip_content_sha256: Sha256Digest;
+  readonly worker_replay: false;
+  readonly usage_reconciled: true;
+  readonly lock_released: true;
+}
+
+interface R2EContext {
+  readonly inspection: R2EHealthyInspection;
+  readonly records: R2ERecords;
+  readonly authority: import("./resume-inspection.js").SettledStaticLeafAuthority;
+}
+
+function isHealthyR2EInspection(value: R2EInspection): value is R2EHealthyInspection {
+  return value.status === "HEALTHY" && value.revision !== null && value.statePointer !== null && value.workflowState !== null && value.transitionCommit !== null;
+}
+
+function r2eProcessMetadata() {
+  return { controller_instance_id: "deterministic-resume-reconciliation", process_id: Math.max(1, process.pid), invocation_id: "deterministic-resume-reconciliation" };
+}
+
+function r2eEventId(transitionId: string, state: WorkflowState, payload: Record<string, unknown>): string {
+  return `r2e-event-${sha256Canonical({ transitionId, state: state.content_sha256, payload }).slice(7, 39)}`;
+}
+
+function assertR2ETiming(context: R2EContext): void {
+  const timing = resolveApplicableResumeTiming({
+    runId: context.inspection.workflowState.run_id, state: context.inspection.workflowState, tipCommit: context.inspection.transitionCommit,
+    records: {
+      transitionCommits: context.records.transitionCommits, workflowStates: context.records.workflowStates,
+      transitionEvents: context.records.transitionEvents, authorities: context.records.staticTimeAuthorities,
+    }, verdicts: staticTimingVerdicts(context.inspection.managedRecordClassifications), nowMs: sampleWallClockMs(),
+  });
+  if (timing.outcome === "REFUSED" || timing.workflow === null || timing.node === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+}
+
+function authoritativeTokenChain(
+  records: R2ERecords,
+  classifications: readonly ManagedRecordClassification[],
+  ancestorContentSha256: string,
+  tip: M3RepositoryStateTokenDocument,
+): readonly M3RepositoryStateTokenDocument[] | null {
+  const byDigest = new Map(records.stateTokens.map((entry) => [entry.content_sha256, entry]));
+  const chain: M3RepositoryStateTokenDocument[] = [];
+  const seen = new Set<string>();
+  let cursor: M3RepositoryStateTokenDocument | undefined = tip;
+  while (cursor !== undefined && !seen.has(cursor.content_sha256)) {
+    seen.add(cursor.content_sha256);
+    if (!classificationsInclude(classifications, "M3_REPOSITORY_STATE_TOKEN", cursor.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")) return null;
+    chain.push(cursor);
+    if (cursor.content_sha256 === ancestorContentSha256) return chain.reverse();
+    cursor = cursor.prior_token_content_sha256 === null ? undefined : byDigest.get(cursor.prior_token_content_sha256);
+  }
+  return null;
+}
+
+function workerTerminalToken(
+  authority: import("./resume-inspection.js").SettledStaticLeafAuthority,
+  records: R2ERecords,
+  classifications: readonly ManagedRecordClassification[],
+): M3RepositoryStateTokenDocument | null {
+  const evidenced = new Set([authority.inputStateToken.content_sha256, ...authority.result.m3_evidence_content_sha256]);
+  const tokens = records.stateTokens.filter((entry) => evidenced.has(entry.content_sha256) &&
+    classificationsInclude(classifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  const tips = tokens.filter((entry) => !tokens.some((candidate) => candidate.prior_token_content_sha256 === entry.content_sha256));
+  return tips.length === 1 ? tips[0]! : null;
+}
+
+async function readR2EContext(admission: DeterministicResumeAdmission, requireBinding: boolean): Promise<R2EContext> {
+  const owned = admissionState(admission);
+  await assertWorktreeLockHeld(owned.lock);
+  const location = { stateRoot: owned.stateRoot, runId: admission.binding.run_id };
+  const inspection = await inspectRunStorage(location);
+  if (!isHealthyR2EInspection(inspection)) return refused("RESUME_REFUSED_STATE_STORE");
+  const records = await readM5ManagedRecords(location);
+  const authority = resolveSettledStaticLeafAuthority(inspection.workflowState, records, inspection.managedRecordClassifications);
+  if (authority === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  const point = deriveStaticDagR2EResumePoint(inspection.workflowState, inspection.transitionCommit, records, inspection.managedRecordClassifications);
+  if (point === null || (requireBinding && point !== admission.binding.resume_point)) return refused("RESUME_REFUSED_STATE_STORE");
+  try {
+    const repository = await resolveRepositoryIdentity({ requestedPath: authority.repositoryIdentity.worktree_root, requireHead: true });
+    assertRepositoryMatches(authority.repositoryIdentity, repository);
+    const current = await loadAuthoritativeToken(location, authority.currentStateToken, authority.baseline);
+    const input = await loadAuthoritativeToken(location, authority.inputStateToken, authority.baseline);
+    if (current.token.content_sha256 !== authority.currentStateToken.content_sha256 || input.token.content_sha256 !== authority.inputStateToken.content_sha256 ||
+        authoritativeTokenChain(records, inspection.managedRecordClassifications, authority.inputStateToken.content_sha256, authority.currentStateToken) === null) {
+      return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    }
+    const fingerprint = await captureGitState(repository);
+    assertNoGitBlockers(fingerprint);
+    if (canonicalize(fingerprint) !== canonicalize(authority.currentStateToken.git_fingerprint)) return refused("RESUME_REFUSED_STATE_DRIFT");
+  } catch {
+    return refused("RESUME_REFUSED_REPOSITORY_IDENTITY");
+  }
+  return { inspection, records, authority };
+}
+
+function reconciliationSources(context: R2EContext): M5AuthoritativeSources {
+  const { authority, records, inspection } = context;
+  return {
+    boundedStaticPreM8: true, contract: authority.contract, budget: authority.budget, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval,
+    m4ToolPolicy: authority.toolPolicy, m4CommandCatalog: authority.commandCatalog, planApprovals: [authority.plan], taskGraphs: [authority.taskGraph], tasks: records.tasks,
+    boundedWorkerResults: [authority.result],
+    m3StateTokens: records.stateTokens.filter((entry) => classificationsInclude(inspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")),
+    m3Postflights: records.postflights.filter((entry) => classificationsInclude(inspection.managedRecordClassifications, "M3_POSTFLIGHT", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")),
+    workflowStates: records.workflowStates, transitionEvents: records.transitionEvents, transitionCommits: records.transitionCommits,
+  };
+}
+
+async function reconcileSettledWorkerUsage(admission: DeterministicResumeAdmission, context: R2EContext): Promise<R2EContext> {
+  const { authority, inspection } = context;
+  if (inspection.workflowState.phase !== "LEAF_RUNNING") return context;
+  const usage = buildBoundedWorkerUsageEvidence({
+    runId: authority.policy.run_id, policy: authority.policy, decision: authority.reservation,
+    executionMode: inspection.workflowState.execution_mode, logicalRole: authority.reservation.reservation!.logical_role, result: authority.result,
+  });
+  assertR2ETiming(context);
+  await resumeReconciliationCheckpoint("BEFORE_USAGE_RECONCILIATION");
+  const sources = reconciliationSources(context);
+  const kernel = createControlDecisionKernel({
+    stateRoot: admissionState(admission).stateRoot, runId: authority.policy.run_id, policy: authority.policy, reducerPolicy: authority.reducerPolicy,
+    runAuthority: { repositoryIdentity: authority.repositoryIdentity, contract: authority.contract, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval },
+    authoritativeSources: sources, production: false,
+  });
+  const startEvent = context.records.transitionEvents.find((entry) => entry.content_sha256 === inspection.transitionCommit.transition_event_content_sha256);
+  if (startEvent?.event_type !== "START_LEAF_ATTEMPT") return refused("RESUME_REFUSED_STATE_STORE");
+  const result = await kernel.evaluateControlDecision({
+    intent: "AUTHORIZE_CONTINUATION", expectedRevision: inspection.revision, expectedStatePointerContentSha256: inspection.statePointer.content_sha256 as Sha256Digest,
+    expectedWorkflowStateContentSha256: inspection.workflowState.content_sha256 as Sha256Digest,
+    transitionId: staticLeafReconciliationTransitionId(authority.taskId), operationId: authority.operationId, processMetadata: r2eProcessMetadata(),
+    authoritativeSources: sources, usageEvidence: [usage],
+    progressEvidence: { claimedKind: "STATE_TRANSITION", evidenceContentSha256: [inspection.transitionCommit.content_sha256 as Sha256Digest], priorStateOrDecisionContentSha256: authority.reservation.content_sha256 as Sha256Digest },
+    availableLogicalRoles: resumedAvailableLogicalRoles(authority.policy),
+  });
+  if (!result.committed || result.decision.outcome !== "AUTHORIZE" || result.decision.reservation !== null ||
+      result.decision.transition_id !== staticLeafReconciliationTransitionId(authority.taskId) || result.decision.transition_event?.event_type !== "COMPLETE_LEAF_ATTEMPT") {
+    return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  }
+  const after = await readR2EContext(admission, false);
+  if (after.inspection.workflowState.phase !== "LEAF_POSTFLIGHT" || exactStaticLeafReconciliationDecision(after.inspection.workflowState, after.inspection.transitionCommit, after.records, after.inspection.managedRecordClassifications, after.authority) === null) {
+    return refused("RESUME_REFUSED_STATE_STORE");
+  }
+  await resumeReconciliationCheckpoint("AFTER_USAGE_RECONCILIATION");
+  return after;
+}
+
+function frozenVerificationSpecs(authority: import("./resume-inspection.js").SettledStaticLeafAuthority): readonly M4CommandSpecification[] {
+  return authority.task.verification_commands.map((reference) => {
+    const matches = authority.commandCatalog.commands.filter((spec) => spec.command_id === reference.command_id && spec.command_class === "VERIFICATION" &&
+      canonicalize(spec.argv) === canonicalize(reference.argv) && (spec.cwd === "REPOSITORY_ROOT" ? "repository" : spec.cwd) === reference.cwd &&
+      spec.timeout_ms === reference.timeout_ms && spec.network_policy === reference.network && canonicalize(spec.read_paths ?? null) === canonicalize(reference.readable_paths ?? null));
+    if (matches.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    return matches[0]!;
+  });
+}
+
+interface DurableVerifierEvidence {
+  readonly result: M4CommandResultDocument;
+  readonly postflight: M3PostflightDocument;
+  readonly nextToken: M3RepositoryStateTokenDocument;
+}
+
+function durableVerifierEvidence(
+  authority: import("./resume-inspection.js").SettledStaticLeafAuthority,
+  records: R2ERecords,
+  classifications: readonly ManagedRecordClassification[],
+  spec: M4CommandSpecification,
+  stateTokenBefore: string,
+): DurableVerifierEvidence | null {
+  const candidates = records.commandResults.filter((entry) => entry.command_id === spec.command_id && entry.command_class === "VERIFICATION" &&
+    entry.command_spec_sha256 === spec.command_spec_sha256 && entry.state_token_before === stateTokenBefore);
+  if (candidates.length === 0) return null;
+  if (candidates.length !== 1) return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  const result = candidates[0]!;
+  if (result.run_id !== authority.policy.run_id || !classificationsInclude(classifications, "M4_COMMAND_RESULT", result.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      result.command_catalog_content_sha256 !== authority.commandCatalog.content_sha256 || result.executable_sha256 !== spec.executable_sha256 ||
+      result.argv_identity !== sha256Canonical(spec.argv) || result.cwd !== (spec.cwd === "REPOSITORY_ROOT" ? authority.repositoryIdentity.worktree_root : join(authority.repositoryIdentity.worktree_root, spec.cwd)) ||
+      ((result.outcome === "PASS") !== (result.failure_code === null)) || result.postflight_content_sha256 === null || result.state_token_after === null) {
+    return refused("RESUME_REFUSED_STATE_STORE");
+  }
+  const postflight = records.postflights.find((entry) => entry.content_sha256 === result.postflight_content_sha256);
+  const nextToken = records.stateTokens.find((entry) => entry.content_sha256 === result.state_token_after);
+  if (postflight === undefined || nextToken === undefined || postflight.run_id !== authority.policy.run_id || nextToken.run_id !== authority.policy.run_id ||
+      !classificationsInclude(classifications, "M3_POSTFLIGHT", postflight.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      !classificationsInclude(classifications, "M3_REPOSITORY_STATE_TOKEN", nextToken.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      postflight.prior_token_content_sha256 !== stateTokenBefore || nextToken.source !== "POSTFLIGHT" || nextToken.source_content_sha256 !== postflight.content_sha256 ||
+      nextToken.prior_token_content_sha256 !== stateTokenBefore) return refused("RESUME_REFUSED_STATE_STORE");
+  return { result, postflight, nextToken };
+}
+
+function advanceResumeHandoverTokens(context: R2EContext, workerTip: M3RepositoryStateTokenDocument, cursor: string): string | null {
+  const chain = authoritativeTokenChain(context.records, context.inspection.managedRecordClassifications, workerTip.content_sha256, context.authority.currentStateToken);
+  if (chain === null) return null;
+  let index = chain.findIndex((entry) => entry.content_sha256 === cursor);
+  if (index < 0) return null;
+  while (index + 1 < chain.length && chain[index + 1]!.source === "RESUME_LOCK_HANDOVER") index += 1;
+  return chain[index]!.content_sha256;
+}
+
+interface R2EVerificationRun {
+  readonly context: R2EContext;
+  readonly commandResults: readonly M4CommandResultDocument[];
+  readonly postflights: readonly M3PostflightDocument[];
+  readonly failureClass: string | null;
+}
+
+async function runR2EVerification(
+  admission: DeterministicResumeAdmission,
+  context: R2EContext,
+  gateway: Awaited<ReturnType<typeof createScopedToolGateway>>,
+): Promise<R2EVerificationRun> {
+  const { authority } = context;
+  const specs = frozenVerificationSpecs(authority);
+  const workerTip = workerTerminalToken(authority, context.records, context.inspection.managedRecordClassifications);
+  if (workerTip === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  let latest = context;
+  let cursor = workerTip.content_sha256;
+  let commandResults: M4CommandResultDocument[] = [];
+  let postflights: M3PostflightDocument[] = [];
+  let failureClass: string | null = null;
+  for (const spec of specs) {
+    assertR2ETiming(latest);
+    let evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
+    if (evidence === null) {
+      const advancedCursor = advanceResumeHandoverTokens(latest, workerTip, cursor);
+      if (advancedCursor === null) return refused("RESUME_REFUSED_STATE_STORE");
+      cursor = advancedCursor;
+      evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
+    }
+    if (evidence === null) {
+      if (cursor !== latest.authority.currentStateToken.content_sha256 || gateway.acceptedState.content_sha256 !== cursor) return refused("RESUME_REFUSED_STATE_STORE");
+      await resumeReconciliationCheckpoint("BEFORE_VERIFICATION_COMMAND");
+      try {
+        await gateway.run_verification_command({ commandId: spec.command_id, stateTokenContentSha256: cursor as Sha256Digest });
+      } catch {
+        // A command failure is recoverable only from the exact durable result and postflight.
+      }
+      latest = await readR2EContext(admission, false);
+      evidence = durableVerifierEvidence(authority, latest.records, latest.inspection.managedRecordClassifications, spec, cursor);
+      if (evidence === null || evidence.nextToken.content_sha256 !== latest.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    }
+    commandResults.push(evidence.result); postflights.push(evidence.postflight); cursor = evidence.nextToken.content_sha256;
+    await resumeReconciliationCheckpoint("AFTER_VERIFICATION_COMMAND");
+    assertR2ETiming(latest);
+    if (evidence.result.outcome === "BLOCKED") {
+      const failureCode = evidence.result.failure_code;
+      if (failureCode === null) return refused("RESUME_REFUSED_STATE_STORE");
+      failureClass = failureCode === "COMMAND_EXIT_CODE_UNEXPECTED" ? "LOCAL_IMPLEMENTATION_DEFECT" : failureCode;
+      break;
+    }
+  }
+  latest = await readR2EContext(admission, false);
+  const finalCursor = advanceResumeHandoverTokens(latest, workerTip, cursor);
+  if (finalCursor === null || finalCursor !== latest.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+  return { context: latest, commandResults, postflights, failureClass };
+}
+
+async function commitR2ETransition(
+  admission: DeterministicResumeAdmission,
+  context: R2EContext,
+  eventType: TransitionEvent["event_type"],
+  transitionId: string,
+  payload: Record<string, unknown> = {},
+): Promise<void> {
+  await assertWorktreeLockHeld(admissionState(admission).lock);
+  const event = identifyContractDocument("pi_gacw_transition_event_v0", {
+    schema_id: "pi_gacw_transition_event_v0", schema_version: "0.1.0", content_projection_id: "document-content-v1",
+    event_id: r2eEventId(transitionId, context.inspection.workflowState, payload), event_type: eventType, payload,
+  }) as unknown as TransitionEvent;
+  await commitTransition({
+    stateRoot: admissionState(admission).stateRoot, runId: context.inspection.workflowState.run_id,
+    expectedRevision: context.inspection.revision, expectedStatePointerContentSha256: context.inspection.statePointer.content_sha256 as Sha256Digest,
+    expectedWorkflowStateContentSha256: context.inspection.workflowState.content_sha256 as Sha256Digest, transitionId,
+    policy: context.authority.reducerPolicy, event, processMetadata: r2eProcessMetadata(),
+  });
+}
+
+async function reconcileDeterministicResumeAdmissionImpl(admission: DeterministicResumeAdmission): Promise<Omit<DeterministicResumeReconciliationResult, "lock_released">> {
+  const owned = admissionState(admission);
+  if (owned.released || owned.consumed || owned.workTransferred) throw new Error("resume admission is no longer active");
+  let temporaryRoot: string | undefined;
+  let context = await readR2EContext(admission, true);
+  if (!context.inspection.workflowState.active_task_id || !admission.binding.resume_point.startsWith("STATIC_DAG_RECONCILE_")) return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+  try {
+    assertR2ETiming(context);
+    const handover = await runResumeLockHandover({
+      stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, acceptedState: context.authority.currentStateToken, baseline: context.authority.baseline,
+      instructionFiles: [], authorityFiles: [], taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, lock: owned.lock,
+    });
+    if (handover.acceptedState.content_sha256 === context.authority.currentStateToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    context = await readR2EContext(admission, false);
+    assertR2ETiming(context);
+    context = await reconcileSettledWorkerUsage(admission, context);
+    await resumeReconciliationCheckpoint("AFTER_COMPLETE_LEAF_ATTEMPT");
+    assertR2ETiming(context);
+    temporaryRoot = await mkdtemp(join(tmpdir(), "pi-resumed-reconcile-"));
+    const gateway = await createScopedToolGateway({
+      stateRoot: owned.stateRoot, runId: context.authority.policy.run_id, repository: context.authority.repositoryIdentity, baseline: context.authority.baseline,
+      acceptedState: context.authority.currentStateToken, lock: owned.lock, instructionFiles: [], authorityFiles: [],
+      editablePaths: [...context.authority.plan.bindings.scope.editable_paths], frozenPaths: [...context.authority.plan.bindings.scope.frozen_paths],
+      taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, toolPolicy: context.authority.toolPolicy, commandCatalog: context.authority.commandCatalog,
+      temporaryRoot,
+    });
+    assertR2ETiming(context);
+    const verification = await runR2EVerification(admission, context, gateway);
+    context = verification.context;
+    if (context.inspection.workflowState.phase === "LEAF_POSTFLIGHT") {
+      assertR2ETiming(context);
+      await commitR2ETransition(admission, context, "PASS_LEAF_POSTFLIGHT", staticLeafPostflightTransitionId(context.authority.taskId));
+      context = await readR2EContext(admission, false);
+      await resumeReconciliationCheckpoint("AFTER_PASS_LEAF_POSTFLIGHT");
+    }
+    if (context.inspection.workflowState.phase !== "LEAF_VERIFYING") return refused("RESUME_REFUSED_STATE_STORE");
+    const outcome: R2EVerificationOutcome = verification.failureClass === null ? "PASSED" : "FAILED";
+    assertR2ETiming(context);
+    await commitR2ETransition(admission, context, outcome === "PASSED" ? "LEAF_VERIFICATION_PASSED" : "LEAF_VERIFICATION_FAILED",
+      staticLeafVerificationTransitionId(context.authority.taskId, outcome), outcome === "FAILED" ? { failure_class: verification.failureClass } : {});
+    await resumeReconciliationCheckpoint("AFTER_LEAF_VERIFICATION_TRANSITION");
+    const final = await readR2EContextAfterTransition(admission);
+    return {
+      run_id: final.workflowState.run_id, task_id: context.authority.taskId, operation_id: context.authority.operationId,
+      invocation_content_sha256: context.authority.invocation.content_sha256 as Sha256Digest, result_content_sha256: context.authority.result.content_sha256 as Sha256Digest,
+      usage_content_sha256: buildBoundedWorkerUsageEvidence({ runId: context.authority.policy.run_id, policy: context.authority.policy, decision: context.authority.reservation,
+        executionMode: "STATIC_APPROVED_DAG", logicalRole: context.authority.reservation.reservation!.logical_role, result: context.authority.result }).content_sha256 as Sha256Digest,
+      command_result_content_sha256: Object.freeze(verification.commandResults.map((entry) => entry.content_sha256 as Sha256Digest)),
+      postflight_content_sha256: Object.freeze(verification.postflights.map((entry) => entry.content_sha256 as Sha256Digest)),
+      verification_outcome: outcome, failure_class: verification.failureClass, final_phase: final.workflowState.phase, final_state: final.workflowState,
+      m3_tip_content_sha256: final.currentToken.content_sha256 as Sha256Digest, worker_replay: false, usage_reconciled: true,
+    };
+  } finally {
+    if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+async function readR2EContextAfterTransition(admission: DeterministicResumeAdmission): Promise<R2EHealthyInspection & { readonly currentToken: M3RepositoryStateTokenDocument }> {
+  const owned = admissionState(admission);
+  const location = { stateRoot: owned.stateRoot, runId: admission.binding.run_id };
+  const inspection = await inspectRunStorage(location);
+  if (!isHealthyR2EInspection(inspection)) return refused("RESUME_REFUSED_STATE_STORE");
+  const records = await readM5ManagedRecords(location);
+  const currentToken = tokenTip(records.stateTokens.filter((entry) => entry.run_id === inspection.workflowState.run_id &&
+    classificationsInclude(inspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")));
+  if (currentToken === null) return refused("RESUME_REFUSED_STATE_STORE");
+  return { ...inspection, currentToken };
+}
+
+/** R2E production entrypoint: reconcile one settled resumed leaf without invoking a worker. */
+export async function reconcileDeterministicResumedLeaf(input: ResumeInspectionInput): Promise<DeterministicResumeReconciliationResult> {
+  const admission = await acquireDeterministicResumeAdmission(input);
+  try {
+    const result = await reconcileDeterministicResumeAdmissionImpl(admission);
+    await releaseDeterministicResumeAdmission(admission);
+    return Object.freeze({ ...result, lock_released: true });
+  } catch (error: unknown) {
+    await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    throw error;
+  }
 }

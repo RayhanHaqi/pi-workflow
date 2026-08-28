@@ -2,6 +2,9 @@ import { realpath, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import { canonicalize } from "./canonical-json/index.js";
+import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
+import { resolveAuthoritativeBoundedExecution, type ResolvedBoundedExecution } from "./persistence/bounded-worker-authority.js";
+import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
 import { inspectRunStorage } from "./persistence/index.js";
 import { readM5ManagedRecords } from "./persistence/store.js";
 import { resolveApplicableResumeTiming, staticTimingVerdicts } from "./persistence/static-time-authority.js";
@@ -13,7 +16,29 @@ import { resolveRepositoryIdentity } from "./repository/index.js";
 import { probeWorktreeLockAvailability } from "./repository/lock.js";
 import { loadAuthoritativeToken } from "./repository/token-provenance.js";
 import type { ManagedRecordClassification } from "./persistence/types.js";
-import type { M3BaselineRuntimeDocument, M3RepositoryIdentityDocument, M3RepositoryStateTokenDocument, LogicalModelRole, M5ControlDecisionDocument, M5ControlPolicyDocument, ReducerPolicy, WorkflowState } from "./schemas/index.js";
+import type {
+  BoundedWorkerInvocationDocument,
+  BoundedWorkerResultDocument,
+  BudgetDocument,
+  ContractDocument,
+  M3BaselineApprovalRuntimeDocument,
+  M3BaselineRuntimeDocument,
+  M3RepositoryIdentityDocument,
+  M3RepositoryStateTokenDocument,
+  LogicalModelRole,
+  M4CommandCatalogDocument,
+  M4ScopedToolPolicyDocument,
+  M5ControlDecisionDocument,
+  M5ControlPolicyDocument,
+  PlanApprovalDocument,
+  ReducerPolicy,
+  RouteMapApprovalDocument,
+  RouteMapDocument,
+  TaskDocument,
+  TaskGraphDocument,
+  TransitionEvent,
+  WorkflowState,
+} from "./schemas/index.js";
 
 export type ResumeRefusalReason =
   | "RESUME_REFUSED_TERMINAL"
@@ -90,6 +115,21 @@ export function tokenTip(tokens: readonly M3RepositoryStateTokenDocument[]): M3R
   const tips = tokens.filter((token) => !predecessors.has(token.content_sha256));
   return tips.length === 1 ? tips[0]! : null;
 }
+function tokenDescendsFrom(
+  tokens: readonly M3RepositoryStateTokenDocument[],
+  ancestorContentSha256: string,
+  tip: M3RepositoryStateTokenDocument,
+): boolean {
+  const byDigest = new Map(tokens.map((entry) => [entry.content_sha256, entry]));
+  const seen = new Set<string>();
+  let cursor: M3RepositoryStateTokenDocument | undefined = tip;
+  while (cursor !== undefined && !seen.has(cursor.content_sha256)) {
+    seen.add(cursor.content_sha256);
+    if (cursor.content_sha256 === ancestorContentSha256) return true;
+    cursor = cursor.prior_token_content_sha256 === null ? undefined : byDigest.get(cursor.prior_token_content_sha256);
+  }
+  return false;
+}
 
 /** The only V1-R2B supported points are static READY selection and pre-worker selected-leaf start. */
 export function deriveStaticDagResumePoint(state: WorkflowState, policy: ReducerPolicy): string | null {
@@ -103,6 +143,15 @@ export function deriveStaticDagResumePoint(state: WorkflowState, policy: Reducer
 
 export function staticLeafOperationId(taskId: string): string { return `static-leaf-${taskId}-attempt-1`; }
 export function staticLeafTransitionId(operationId: string): string { return `pre-m8-authorize-${operationId}`; }
+export function staticLeafReconciliationTransitionId(taskId: string): string {
+  return `r2e-complete-${sha256Canonical({ task_id: taskId }).slice(7, 39)}`;
+}
+export function staticLeafPostflightTransitionId(taskId: string): string {
+  return `r2e-postflight-${sha256Canonical({ task_id: taskId }).slice(7, 39)}`;
+}
+export function staticLeafVerificationTransitionId(taskId: string, outcome: "PASSED" | "FAILED"): string {
+  return `r2e-verification-${outcome.toLowerCase()}-${sha256Canonical({ task_id: taskId }).slice(7, 39)}`;
+}
 
 /** Historical frozen product-role inventory; must stay canonically equal to workflow-controller's PRODUCT_ROLES (drift-guarded by resume-work-admission.test). */
 export const RESUMED_PRODUCT_LOGICAL_ROLES = Object.freeze(["SOL_OWNER", "SOL_PLANNER", "SOL_REPLAN", "SOL_CLOSEOUT", "LUNA_EXECUTOR", "TERRA_EXECUTOR", "BENCHMARK_VERIFIER", "BENCHMARK_SELECTOR"] as const);
@@ -174,6 +223,7 @@ function staticWorkDecisionCandidateList(
   policy: ReducerPolicy,
   records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
   classifications: readonly ManagedRecordClassification[],
+  allowCurrentWorkerEvidence = false,
 ): readonly M5ControlDecisionDocument[] {
   if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id === null) return [];
   const task = state.tasks.find((entry) => entry.task_id === state.active_task_id);
@@ -185,7 +235,7 @@ function staticWorkDecisionCandidateList(
   // Provider-safety boundary is CURRENT-operation scoped, never run-global history: any matching bounded
   // invocation or result proves the provider boundary may already be crossed for this exact operation.
   const current = currentOperationWorkerRecords(records, operationId);
-  if (current.invocations.length !== 0 || current.results.length !== 0) return [];
+  if (!allowCurrentWorkerEvidence && (current.invocations.length !== 0 || current.results.length !== 0)) return [];
   // FIRST_ATTEMPT_ONLY: any candidate is the attempt-1 operation for the selected task; historical
   // settled predecessor leaves are valid and must not block the next first-attempt leaf.
   const candidates = records.decisions.filter((decision) => decision.intent === "AUTHORIZE_WORK" && decision.outcome === "AUTHORIZE" &&
@@ -220,6 +270,197 @@ export function staticWorkDecisionCandidates(
   classifications: readonly ManagedRecordClassification[],
 ): readonly M5ControlDecisionDocument[] {
   return staticWorkDecisionCandidateList(state, policy, records, classifications);
+}
+
+export interface SettledStaticLeafAuthority {
+  readonly taskId: string;
+  readonly operationId: string;
+  readonly policy: M5ControlPolicyDocument;
+  readonly reducerPolicy: ReducerPolicy;
+  readonly repositoryIdentity: M3RepositoryIdentityDocument;
+  readonly baseline: M3BaselineRuntimeDocument;
+  readonly baselineApproval: M3BaselineApprovalRuntimeDocument | null;
+  readonly contract: ContractDocument;
+  readonly budget: BudgetDocument;
+  readonly routeMap: RouteMapDocument;
+  readonly routeMapApproval: RouteMapApprovalDocument;
+  readonly toolPolicy: M4ScopedToolPolicyDocument;
+  readonly commandCatalog: M4CommandCatalogDocument;
+  readonly plan: PlanApprovalDocument;
+  readonly taskGraph: TaskGraphDocument;
+  readonly task: TaskDocument;
+  readonly reservation: M5ControlDecisionDocument;
+  readonly reservationState: WorkflowState;
+  readonly invocation: BoundedWorkerInvocationDocument;
+  readonly result: BoundedWorkerResultDocument;
+  readonly inputStateToken: M3RepositoryStateTokenDocument;
+  readonly currentStateToken: M3RepositoryStateTokenDocument;
+  readonly resolved: ResolvedBoundedExecution;
+}
+
+function classifiedAs(
+  classifications: readonly ManagedRecordClassification[],
+  kind: string,
+  digest: string,
+  expected: ManagedRecordClassification["classification"],
+): boolean {
+  return classifications.some((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest && entry.classification === expected);
+}
+
+function exactStaticSettledDecisionCandidates(
+  state: WorkflowState,
+  policy: ReducerPolicy,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+): readonly M5ControlDecisionDocument[] {
+  return staticWorkDecisionCandidateList(state, policy, records, classifications, true)
+    .filter((decision) => classifiedAs(classifications, "M5_CONTROL_DECISION", decision.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+}
+
+/**
+ * Resolves the exact current settled bounded worker pair. This is deliberately
+ * stricter than mere record presence: the sole M5 resolver must accept the
+ * invocation/result against its original input token and authoritative
+ * reservation, while the current M3 tip may be a descendant of that token.
+ */
+export function resolveSettledStaticLeafAuthority(
+  state: WorkflowState,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+): SettledStaticLeafAuthority | null {
+  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id === null ||
+      !["LEAF_RUNNING", "LEAF_POSTFLIGHT", "LEAF_VERIFYING"].includes(state.phase)) return null;
+  const runtimeTask = state.tasks.find((entry) => entry.task_id === state.active_task_id);
+  if (runtimeTask === undefined || runtimeTask.status !== "RUNNING" || runtimeTask.attempts !== 1) return null;
+  const reducerPolicy = exactOne(records.reducerPolicies, state.frozen_policy_content_sha256);
+  const policy = resolveExactStaticM5Policy(state, records);
+  if (reducerPolicy === null || policy === null || policy.plan_approval_sha256 === null || policy.task_graph_sha256 === null) return null;
+  const decisions = exactStaticSettledDecisionCandidates(state, reducerPolicy, records, classifications);
+  if (decisions.length !== 1 || decisions[0]!.operation_id !== staticLeafOperationId(state.active_task_id)) return null;
+  const reservation = decisions[0]!;
+  const current = currentOperationWorkerRecords(records, reservation.operation_id!);
+  if (current.invocations.length !== 1 || current.results.length !== 1) return null;
+  const invocation = current.invocations[0]!;
+  const result = current.results[0]!;
+  if (result.invocation_content_sha256 !== invocation.content_sha256 || result.outcome !== "COMPLETED" || !result.cleanup_certain) return null;
+  const reservationState = exactOne(records.workflowStates, reservation.current_state_content_sha256);
+  const inputTokens = records.stateTokens.filter((entry) => entry.content_sha256 === invocation.input_m3_state_token_content_sha256 &&
+    classifiedAs(classifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  const baseline = baselineForState(state, records);
+  const baselineApproval = baseline?.baseline_mode === "APPROVED_BASELINE_DIRTY"
+    ? exactOne(records.approvals, state.identities.baseline_approval_sha256)
+    : null;
+  const contract = exactOneBy(records.contracts, (entry) => entry.contract_sha256 === policy.contract_sha256);
+  const budget = exactOneBy(records.budgets, (entry) => entry.budget_sha256 === policy.budget_sha256);
+  const routeMap = exactOneBy(records.routeMaps, (entry) => entry.route_map_sha256 === policy.route_map_sha256);
+  const routeMapApproval = exactOneBy(records.routeMapApprovals, (entry) => entry.route_map_approval_sha256 === policy.route_map_approval_sha256);
+  const toolPolicy = exactOne(records.toolPolicies, policy.tool_policy_content_sha256);
+  const commandCatalog = exactOne(records.commandCatalogs, policy.command_catalog_content_sha256);
+  const plan = exactOneBy(records.planApprovals, (entry) => entry.plan_approval_sha256 === policy.plan_approval_sha256);
+  const taskGraph = exactOneBy(records.taskGraphs, (entry) => entry.task_graph_sha256 === policy.task_graph_sha256);
+  const taskCandidates = records.tasks.filter((entry) => entry.task_id === state.active_task_id && entry.content_sha256 === invocation.task_content_sha256);
+  const scopedTokens = records.stateTokens.filter((entry) => entry.run_id === policy.run_id &&
+    entry.repository_identity_content_sha256 === policy.repository_identity_content_sha256 && entry.worktree_key === policy.worktree_key &&
+    entry.task_scope_identity === policy.scope_sha256 && classifiedAs(classifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  const currentStateToken = tokenTip(scopedTokens);
+  if (reservationState === null || inputTokens.length !== 1 || baseline === undefined || contract === null || budget === null || routeMap === null ||
+      routeMapApproval === null || toolPolicy === null || commandCatalog === null || plan === null || taskGraph === null || taskCandidates.length !== 1 ||
+      currentStateToken === null || !tokenDescendsFrom(scopedTokens, invocation.input_m3_state_token_content_sha256, currentStateToken) ||
+      invocation.task_content_sha256 === null || invocation.task_graph_sha256 !== taskGraph.content_sha256 ||
+      invocation.plan_approval_sha256 !== plan.content_sha256) return null;
+  const inputStateToken = inputTokens[0]!;
+  const resolved = resolveAuthoritativeBoundedExecution({
+    invocation, result, reservation, reservationState, policy, baseline, approval: baselineApproval,
+    stateToken: inputStateToken, task: taskCandidates[0]!, taskGraph, plan,
+    admissionRefusals: new Map(records.admissionRefusals.map((entry) => [entry.content_sha256, entry])), classifications,
+  });
+  if (!resolved.accepted || resolved.acceptedWorkerInvocations !== 1) return null;
+  const acceptedMutation = resolved.acceptedM4Evidence.some((digest) => {
+    const receipt = records.mutationReceipts.find((entry) => entry.content_sha256 === digest);
+    return receipt !== undefined && receipt.outcome === "APPLIED" && classifiedAs(classifications, "M4_MUTATION_RECEIPT", digest, "AUTHORITATIVE_MANAGED_RECORD");
+  });
+  if (!acceptedMutation) return null;
+  return Object.freeze({
+    taskId: state.active_task_id, operationId: reservation.operation_id!, policy, reducerPolicy,
+    repositoryIdentity: baseline.repository, baseline, baselineApproval, contract, budget, routeMap, routeMapApproval, toolPolicy, commandCatalog,
+    plan, taskGraph, task: taskCandidates[0]!, reservation, reservationState, invocation, result, inputStateToken, currentStateToken, resolved,
+  });
+}
+
+function transitionEventFor(
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  commit: NonNullable<Awaited<ReturnType<typeof inspectRunStorage>>["transitionCommit"]>,
+): TransitionEvent | undefined {
+  return records.transitionEvents.find((entry) => entry.content_sha256 === commit.transition_event_content_sha256);
+}
+
+/** Exact M5 usage/COMPLETE authority required after the settled point. */
+export function exactStaticLeafReconciliationDecision(
+  state: WorkflowState,
+  transitionCommit: NonNullable<Awaited<ReturnType<typeof inspectRunStorage>>["transitionCommit"]>,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+  authority: SettledStaticLeafAuthority,
+): M5ControlDecisionDocument | null {
+  if (state.phase !== "LEAF_POSTFLIGHT" && state.phase !== "LEAF_VERIFYING") return null;
+  const usage = buildBoundedWorkerUsageEvidence({
+    runId: state.run_id, policy: authority.policy, decision: authority.reservation,
+    executionMode: state.execution_mode, logicalRole: authority.reservation.reservation!.logical_role, result: authority.result,
+  });
+  const usages = records.usage.filter((entry) => entry.operation_id === authority.operationId);
+  if (usages.length !== 1 || canonicalize(usages[0]) !== canonicalize(usage) ||
+      !classifiedAs(classifications, "M5_USAGE_EVIDENCE", usage.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")) return null;
+  let completeCommit: typeof transitionCommit | undefined;
+  let completeStateContentSha256 = state.content_sha256;
+  if (state.phase === "LEAF_POSTFLIGHT") {
+    const event = transitionEventFor(records, transitionCommit);
+    if (event?.event_type !== "COMPLETE_LEAF_ATTEMPT") return null;
+    completeCommit = transitionCommit;
+  } else {
+    const passEvent = transitionEventFor(records, transitionCommit);
+    if (passEvent?.event_type !== "PASS_LEAF_POSTFLIGHT" || transitionCommit.transition_id !== staticLeafPostflightTransitionId(authority.taskId) ||
+        transitionCommit.previous_workflow_state_content_sha256 === null) return null;
+    const candidates = records.transitionCommits.filter((candidate) => candidate.new_workflow_state_content_sha256 === transitionCommit.previous_workflow_state_content_sha256 &&
+      transitionEventFor(records, candidate)?.event_type === "COMPLETE_LEAF_ATTEMPT");
+    if (candidates.length !== 1) return null;
+    completeCommit = candidates[0]!;
+    completeStateContentSha256 = transitionCommit.previous_workflow_state_content_sha256;
+  }
+  const completeEvent = transitionEventFor(records, completeCommit);
+  if (completeEvent?.event_type !== "COMPLETE_LEAF_ATTEMPT" || completeCommit.new_workflow_state_content_sha256 !== completeStateContentSha256 ||
+      completeCommit.previous_workflow_state_content_sha256 === null || completeCommit.transition_id !== staticLeafReconciliationTransitionId(authority.taskId)) return null;
+  const runningState = records.workflowStates.filter((entry) => entry.content_sha256 === completeCommit!.previous_workflow_state_content_sha256 &&
+    entry.phase === "LEAF_RUNNING" && entry.active_task_id === authority.taskId);
+  if (runningState.length !== 1) return null;
+  const candidates = records.decisions.filter((entry) => entry.intent === "AUTHORIZE_CONTINUATION" && entry.outcome === "AUTHORIZE" && entry.reservation === null &&
+    entry.operation_id === authority.operationId && entry.policy_content_sha256 === authority.policy.content_sha256 &&
+    entry.current_state_content_sha256 === runningState[0]!.content_sha256 && entry.transition_id === staticLeafReconciliationTransitionId(authority.taskId) &&
+    entry.selected_route === "CONTINUE_ADMITTED_OPERATION" && entry.transition_event?.event_type === "COMPLETE_LEAF_ATTEMPT" &&
+    entry.predicted_next_state_content_sha256 === completeStateContentSha256 && entry.usage_evidence_content_sha256.includes(usage.content_sha256) &&
+    classifiedAs(classifications, "M5_CONTROL_DECISION", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  if (candidates.length !== 1 || candidates[0]!.transition_event?.content_sha256 !== completeCommit.transition_event_content_sha256) return null;
+  return candidates[0]!;
+}
+
+/** R2E and its two post-M2 continuation points; all are exact durable states. */
+export function deriveStaticDagR2EResumePoint(
+  state: WorkflowState,
+  transitionCommit: NonNullable<Awaited<ReturnType<typeof inspectRunStorage>>["transitionCommit"]>,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+): string | null {
+  const authority = resolveSettledStaticLeafAuthority(state, records, classifications);
+  if (authority === null) return null;
+  if (state.phase === "LEAF_RUNNING") {
+    const startEvent = transitionEventFor(records, transitionCommit);
+    if (startEvent?.event_type !== "START_LEAF_ATTEMPT" || transitionCommit.new_workflow_state_content_sha256 !== state.content_sha256 ||
+        transitionCommit.transition_id !== authority.reservation.transition_id) return null;
+    return `STATIC_DAG_RECONCILE_SETTLED_LEAF:${authority.taskId}`;
+  }
+  if (exactStaticLeafReconciliationDecision(state, transitionCommit, records, classifications, authority) === null) return null;
+  if (state.phase === "LEAF_POSTFLIGHT") return `STATIC_DAG_RECONCILE_LEAF_POSTFLIGHT:${authority.taskId}`;
+  if (state.phase === "LEAF_VERIFYING") return `STATIC_DAG_RECONCILE_LEAF_VERIFYING:${authority.taskId}`;
+  return null;
 }
 
 export function deriveStaticDagPreProviderResumePoint(
@@ -379,8 +620,9 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
     });
     if (timing.outcome === "REFUSED") return refused(runId, state, "RESUME_REFUSED_TIMING_AUTHORITY");
   }
+  const r2ePoint = deriveStaticDagR2EResumePoint(state, inspection.transitionCommit, records, inspection.managedRecordClassifications);
   const preProviderPoint = deriveStaticDagPreProviderResumePoint(state, authority.policy, records, inspection.managedRecordClassifications, inspection.transitionCommit);
-  if (preProviderPoint === null && !settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  if (r2ePoint === null && preProviderPoint === null && !settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
 
   const authoritativeTokens = records.stateTokens.filter((token) => authoritative(inspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", token.content_sha256));
   const token = tokenTip(authoritativeTokens);
@@ -413,9 +655,9 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
   } catch {
     return refused(runId, state, "RESUME_REFUSED_REPOSITORY_IDENTITY");
   }
-  const resumePoint = preProviderPoint ?? deriveStaticDagResumePoint(state, authority.policy);
+  const resumePoint = r2ePoint ?? preProviderPoint ?? deriveStaticDagResumePoint(state, authority.policy);
   if (resumePoint === null) return refused(runId, state, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
-  if (preProviderPoint === null && hasSelectedLeafWorkerEvidence(resumePoint, state, authority.policy, records)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  if (r2ePoint === null && preProviderPoint === null && hasSelectedLeafWorkerEvidence(resumePoint, state, authority.policy, records)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
   return report("RESUMABLE", runId, state.phase, resumePoint, null);
 }
 

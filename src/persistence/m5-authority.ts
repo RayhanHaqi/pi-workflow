@@ -215,6 +215,9 @@ function deterministicRecalculationError(
       }),
     m3StateTokens: persistedSources.m3StateTokens ?? [],
     m3Postflights: persistedSources.m3Postflights ?? [],
+    ...(value.transition_event?.event_type === "COMPLETE_LEAF_ATTEMPT" ? {
+      workflowStates: persistedSources.workflowStates ?? [], transitionEvents: persistedSources.transitionEvents ?? [], transitionCommits: persistedSources.transitionCommits ?? [],
+    } : {}),
     planApprovals: persistedSources.planApprovals ?? [],
     taskGraphs: persistedSources.taskGraphs ?? [],
     tasks: persistedSources.tasks ?? [],

@@ -1086,6 +1086,7 @@ function transitionFor(
     const type = byPhase[state.phase]; return type === undefined ? null : createEvent(type, {}, seed);
   }
   if (input.intent === "AUTHORIZE_CONTINUATION") {
+    if (selected === "CONTINUE_ADMITTED_OPERATION" && state.phase === "LEAF_RUNNING") return createEvent("COMPLETE_LEAF_ATTEMPT", {}, seed);
     if (selected === "SECOND_LUNA_ATTEMPT" && state.phase === "DIRECT_RETRY_READY") return createEvent("ADMIT_DIRECT_RETRY", { progress_delta: { kind: progress.kind, evidence_sha256: progress.evidence_content_sha256[0], summary: "M5 evidence-backed progress" } }, seed);
     if (selected === "SECOND_LUNA_ATTEMPT" && state.phase === "LEAF_RETRY_READY") return createEvent("ADMIT_LEAF_RETRY", { progress_delta: { kind: progress.kind, evidence_sha256: progress.evidence_content_sha256[0], summary: "M5 evidence-backed progress" } }, seed);
     if (selected === "CONSTRAINED_REPLAN" && state.phase === "REPLAN_REQUIRED") return createEvent("START_CONSTRAINED_REPLAN", {}, seed);
@@ -1219,10 +1220,12 @@ export function evaluateAuthority(input: EvaluateAuthorityInput): M5ControlDecis
     return true;
   });
   const candidateSoftReached = budget.some((entry) => entry.status === "SOFT_LIMIT_REACHED");
-  if (request.intent === "AUTHORIZE_WORK" && (openingHardReached || candidateHardReached || openingSoftReached || candidateSoftReached)) {
-    selected = "BLOCK"; blockingReason = "BLOCKED_BUDGET_EXHAUSTED"; reservation = null; routes = continuationRoutes("BLOCK", true); budget = openingBudget;
-  }
-  if (request.intent === "AUTHORIZE_CONTINUATION" && (openingHardReached || openingSoftReached)) {
+  const settledLeafReconciliation = request.intent === "AUTHORIZE_CONTINUATION" && state.execution_mode === "STATIC_APPROVED_DAG" &&
+    state.phase === "LEAF_RUNNING" && selected === "CONTINUE_ADMITTED_OPERATION" && request.operationId !== undefined &&
+    usage.some((entry) => entry.operation_id === request.operationId && entry.operation_kind === "WORKER_INVOCATION" && entry.disposition === "COMPLETED" &&
+      entry.reservation_decision_content_sha256 !== null && priorDecisions.some((decision) => decision.content_sha256 === entry.reservation_decision_content_sha256 &&
+        decision.reservation?.future_operation_id === request.operationId));
+  if (request.intent === "AUTHORIZE_CONTINUATION" && (openingHardReached || openingSoftReached) && !settledLeafReconciliation) {
     selected = "BLOCK"; blockingReason = "BLOCKED_BUDGET_EXHAUSTED"; routes = continuationRoutes("BLOCK", true);
   }
   const unresolvedReservation = priorDecisions.some((decision) => decision.reservation !== null &&

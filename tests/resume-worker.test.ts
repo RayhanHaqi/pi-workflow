@@ -9,10 +9,11 @@ import test from "node:test";
 import { canonicalize } from "../src/canonical-json/index.js";
 import { sha256Bytes, type Sha256Digest } from "../src/identity/index.js";
 import { inspectRunStorage } from "../src/persistence/index.js";
+import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hooks.js";
 import { readM5ManagedRecords } from "../src/persistence/store.js";
 import { loadAuthoritativeToken } from "../src/repository/token-provenance.js";
 import { acquireWorktreeLock, probeWorktreeLockAvailability, releaseWorktreeLock, resolveRepositoryIdentity, runResumeLockHandover } from "../src/repository/index.js";
-import { acquireDeterministicResumeAdmission, DeterministicResumeAdmissionError } from "../src/resume-admission.js";
+import { acquireDeterministicResumeAdmission, DeterministicResumeAdmissionError, reconcileDeterministicResumedLeaf } from "../src/resume-admission.js";
 import {
   boundedWorkerSystemPrompt,
   BOUNDED_WORKER_MAX_TOOL_CALLS,
@@ -24,8 +25,10 @@ import {
   providerVisibleTaskContract as controllerTaskContract,
 } from "../src/workflow-controller.js";
 import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
+import { configureResumeReconciliationTestHooks } from "../src/resume-reconciliation-test-hooks.js";
+import { installTestWallClock } from "../src/wall-clock.js";
 
-type FixtureMode = "READY" | "READY_LIMIT_1" | "DELTA";
+type FixtureMode = "READY" | "READY_LIMIT_1" | "DELTA" | "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "DELTA_VERIFY";
 type ChildFixture = { readonly root: string; readonly repository: string; readonly cleanup: () => Promise<void> };
 
 async function interruptFixture(mode: FixtureMode): Promise<ChildFixture> {
@@ -149,6 +152,21 @@ async function eventuallyResumable(root: string) {
     await new Promise<void>((resolve) => setTimeout(resolve, 25)); report = await inspectDeterministicResumeEligibility({ retainedRunRoot: root });
   }
   return report;
+}
+
+async function settledWorkerFixture(mode: Extract<FixtureMode, "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "DELTA_VERIFY">): Promise<ChildFixture> {
+  const fixture = await interruptFixture(mode);
+  const worker = startWorkerChild(fixture.root, "EXECUTE");
+  try {
+    const executed = await worker.next("EXECUTED");
+    assert.equal(executed["type"], "EXECUTED");
+    await stopChild(worker.child);
+    return fixture;
+  } catch (error: unknown) {
+    await stopChild(worker.child).catch(() => undefined);
+    await fixture.cleanup().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function expectedWorkerRefusal(root: string, mode: "DEPTH_REFUSE" | "EXPIRE_BEFORE_HANDOVER" | "EXPIRE_AFTER_HANDOVER" | "EXPIRE_BEFORE_INVOCATION"): Promise<WorkerMessage> {
@@ -347,8 +365,8 @@ test("result-persisted crash leaves durable evidence with no worker replay", asy
     const state = (await inspectRunStorage(LOCATION(fixture.root))).workflowState!;
     assert.equal(state.phase, "LEAF_RUNNING");
     const report = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
-    assert.equal(report.classification, "RESUME_REFUSED");
-    await assert.rejects(acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root }));
+    assert.deepEqual(report, { classification: "RESUMABLE", run_id: "pre-m8-bounded", phase: "LEAF_RUNNING", resume_point: "STATIC_DAG_RECONCILE_SETTLED_LEAF:a", reason: null });
+    assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "LEAF_RUNNING");
     const reread = await readM5ManagedRecords(LOCATION(fixture.root));
     assert.equal(reread.boundedWorkerInvocations.length, 1); // WORKER_REPLAY_AFTER_RESULT = NO
     assert.equal(reread.boundedWorkerResults.length, 1);     // DUPLICATE_RESULT_CREATED = NO
@@ -526,5 +544,215 @@ test("R2D M3 depth gate N=32 overflow depth 32 refuses before handover", async (
     assert.equal(after.boundedWorkerResults.length, 0);
   } finally {
     await fixture.cleanup().catch(() => undefined);
+  }
+});
+
+
+async function r2eCounts(root: string): Promise<{ readonly usage: number; readonly decisions: number; readonly invocations: number; readonly results: number; readonly commandResults: number; readonly postflights: number }> {
+  const records = await readM5ManagedRecords(LOCATION(root));
+  return {
+    usage: records.usage.length, decisions: records.decisions.length, invocations: records.boundedWorkerInvocations.length,
+    results: records.boundedWorkerResults.length, commandResults: records.commandResults.length, postflights: records.postflights.length,
+  };
+}
+
+async function r2eWorkflowAuthority(root: string) {
+  const records = await readM5ManagedRecords(LOCATION(root));
+  const authority = records.staticTimeAuthorities.find((entry) => entry.authority_scope === "WORKFLOW");
+  assert.ok(authority, "R2E fixture has no workflow timing authority");
+  return authority;
+}
+
+test("R2E reconciles a settled leaf exactly once through verification to READY", async () => {
+  const fixture = await settledWorkerFixture("READY_VERIFY");
+  try {
+    const before = await r2eCounts(fixture.root);
+    const report = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
+    assert.equal(report.resume_point, "STATIC_DAG_RECONCILE_SETTLED_LEAF:a");
+    const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(result.worker_replay, false);
+    assert.equal(result.usage_reconciled, true);
+    assert.equal(result.lock_released, true);
+    assert.equal(result.verification_outcome, "PASSED");
+    assert.equal(result.final_phase, "READY");
+    assert.equal(result.command_result_content_sha256.length, 1);
+    assert.equal(result.postflight_content_sha256.length, 1);
+    const after = await r2eCounts(fixture.root);
+    assert.equal(after.invocations, before.invocations);
+    assert.equal(after.results, before.results);
+    assert.equal(after.usage, before.usage + 1);
+    assert.equal(after.decisions, before.decisions + 1);
+    assert.equal(after.commandResults, before.commandResults + 1);
+    assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.tasks.find((task) => task.task_id === "a")?.status, "PASS");
+    assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.active_task_id, null);
+    const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
+    assert.equal(await probeWorktreeLockAvailability({ stateRoot: join(fixture.root, "state"), repository }), "LOCK_AVAILABLE");
+    const usage = (await readM5ManagedRecords(LOCATION(fixture.root))).usage.find((entry) => entry.operation_id === "static-leaf-a-attempt-1");
+    assert.ok(usage);
+    assert.equal(usage.source_kind, "BOUNDED_WORKER_RESULT");
+    assert.equal(usage.source_record_content_sha256, result.result_content_sha256);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2E preserves prior settled history and reaches STATIC_DAG_VERIFYING on the final leaf", async () => {
+  const fixture = await settledWorkerFixture("DELTA_VERIFY");
+  try {
+    const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
+    const priorInvocation = recordsBefore.boundedWorkerInvocations.find((entry) => entry.operation_id === "static-leaf-a-attempt-1");
+    const priorResult = recordsBefore.boundedWorkerResults.find((entry) => entry.invocation_content_sha256 === priorInvocation?.content_sha256);
+    assert.ok(priorInvocation); assert.ok(priorResult);
+    const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(result.task_id, "b");
+    assert.equal(result.final_phase, "STATIC_DAG_VERIFYING");
+    assert.equal(result.verification_outcome, "PASSED");
+    const recordsAfter = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(canonicalize(recordsAfter.boundedWorkerInvocations.find((entry) => entry.content_sha256 === priorInvocation.content_sha256)), canonicalize(priorInvocation));
+    assert.equal(canonicalize(recordsAfter.boundedWorkerResults.find((entry) => entry.content_sha256 === priorResult.content_sha256)), canonicalize(priorResult));
+    assert.equal(recordsAfter.usage.filter((entry) => entry.operation_id === "static-leaf-b-attempt-1").length, 1);
+    assert.equal(recordsAfter.boundedWorkerInvocations.length, 2);
+    assert.equal(recordsAfter.boundedWorkerResults.length, 2);
+    assert.ok((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.tasks.every((task) => task.status === "PASS"));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2E maps verifier failure without starting a repair worker", async (t) => {
+  for (const [mode, expectedPhase] of [["READY_VERIFY_FAIL", "BLOCKED"], ["READY_VERIFY_RETRY", "LEAF_RETRY_READY"]] as const) {
+    await t.test(mode, async () => {
+      const fixture = await settledWorkerFixture(mode);
+      try {
+        const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+        assert.equal(result.verification_outcome, "FAILED");
+        assert.equal(result.failure_class, "LOCAL_IMPLEMENTATION_DEFECT");
+        assert.equal(result.final_phase, expectedPhase);
+        const records = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(records.boundedWorkerInvocations.length, 1);
+        assert.equal(records.boundedWorkerResults.length, 1);
+        assert.equal(records.usage.filter((entry) => entry.operation_id === "static-leaf-a-attempt-1").length, 1);
+        assert.equal(records.commandResults.length, 1);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+});
+
+test("R2E restart windows reuse exact durable worker, usage, and verifier evidence", async (t) => {
+  const cases = [
+    ["BEFORE_USAGE_RECONCILIATION", "LEAF_RUNNING", "settled"],
+    ["AFTER_COMPLETE_LEAF_ATTEMPT", "LEAF_POSTFLIGHT", "postflight"],
+    ["AFTER_VERIFICATION_COMMAND", "LEAF_POSTFLIGHT", "postflight"],
+    ["AFTER_PASS_LEAF_POSTFLIGHT", "LEAF_VERIFYING", "verifying"],
+  ] as const;
+  for (const [checkpoint, expectedPhase, expectedPoint] of cases) {
+    await t.test(checkpoint, async () => {
+      const fixture = await settledWorkerFixture("READY_VERIFY");
+      try {
+        configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+          if (value === checkpoint) throw new Error(`R2E crash at ${checkpoint}`);
+        } });
+        await assert.rejects(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), /R2E crash/);
+        configureResumeReconciliationTestHooks(undefined);
+        const crashed = await inspectRunStorage(LOCATION(fixture.root));
+        assert.equal(crashed.workflowState?.phase, expectedPhase);
+        const countsBeforeRetry = await r2eCounts(fixture.root);
+        const report = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
+        assert.equal(report.resume_point, expectedPhase === "LEAF_RUNNING" ? "STATIC_DAG_RECONCILE_SETTLED_LEAF:a" : expectedPhase === "LEAF_POSTFLIGHT" ? "STATIC_DAG_RECONCILE_LEAF_POSTFLIGHT:a" : "STATIC_DAG_RECONCILE_LEAF_VERIFYING:a");
+        const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "READY");
+        const after = await r2eCounts(fixture.root);
+        assert.equal(after.invocations, 1);
+        assert.equal(after.results, 1);
+        assert.equal(after.usage, 1);
+        if (checkpoint === "AFTER_VERIFICATION_COMMAND" || checkpoint === "AFTER_PASS_LEAF_POSTFLIGHT") {
+          assert.equal(after.commandResults, countsBeforeRetry.commandResults);
+        }
+      } finally {
+        configureResumeReconciliationTestHooks(undefined);
+        await fixture.cleanup();
+      }
+    });
+  }
+  await t.test("AFTER_USAGE_PUBLICATION", async () => {
+    const fixture = await settledWorkerFixture("READY_VERIFY");
+    try {
+      configureM5PersistenceTestHooks({ checkpoint: async (value) => {
+        if (value === "AFTER_USAGE_PUBLICATION") throw new Error("R2E crash after usage publication");
+      } });
+      await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), "M5_EVIDENCE_PUBLICATION_FAILED");
+      configureM5PersistenceTestHooks(undefined);
+      assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "LEAF_RUNNING");
+      assert.equal((await r2eCounts(fixture.root)).usage, 1);
+      const result = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+      assert.equal(result.final_phase, "READY");
+      assert.equal((await r2eCounts(fixture.root)).usage, 1);
+    } finally {
+      configureM5PersistenceTestHooks(undefined);
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("R2E timing expiry refuses before reconciliation, after completion, and before verification transition", async (t) => {
+  await t.test("before reconciliation", async () => {
+    const fixture = await settledWorkerFixture("READY_VERIFY");
+    try {
+      const workflow = await r2eWorkflowAuthority(fixture.root);
+      installTestWallClock(() => workflow.started_at_epoch_ms + workflow.wall_budget_ms);
+      await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+      assert.deepEqual(await r2eCounts(fixture.root), { usage: 0, decisions: 3, invocations: 1, results: 1, commandResults: 0, postflights: 1 });
+    } finally {
+      installTestWallClock(null); await fixture.cleanup();
+    }
+  });
+
+  await t.test("after COMPLETE_LEAF_ATTEMPT", async () => {
+    const fixture = await settledWorkerFixture("READY_VERIFY");
+    try {
+      const workflow = await r2eWorkflowAuthority(fixture.root);
+      configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+        if (value === "AFTER_COMPLETE_LEAF_ATTEMPT") installTestWallClock(() => workflow.started_at_epoch_ms + workflow.wall_budget_ms);
+      } });
+      await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+      assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "LEAF_POSTFLIGHT");
+      assert.equal((await r2eCounts(fixture.root)).commandResults, 0);
+    } finally {
+      configureResumeReconciliationTestHooks(undefined); installTestWallClock(null); await fixture.cleanup();
+    }
+  });
+
+  await t.test("before verification transition", async () => {
+    const fixture = await settledWorkerFixture("READY_VERIFY");
+    try {
+      const workflow = await r2eWorkflowAuthority(fixture.root);
+      configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+        if (value === "AFTER_VERIFICATION_COMMAND") installTestWallClock(() => workflow.started_at_epoch_ms + workflow.wall_budget_ms);
+      } });
+      await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+      assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "LEAF_POSTFLIGHT");
+      assert.equal((await r2eCounts(fixture.root)).commandResults, 1);
+    } finally {
+      configureResumeReconciliationTestHooks(undefined); installTestWallClock(null); await fixture.cleanup();
+    }
+  });
+});
+
+test("R2E does not repeat a committed final verification transition", async () => {
+  const fixture = await settledWorkerFixture("READY_VERIFY");
+  try {
+    configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+      if (value === "AFTER_LEAF_VERIFICATION_TRANSITION") throw new Error("R2E final transition response lost");
+    } });
+    await assert.rejects(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), /R2E final transition response lost/);
+    configureResumeReconciliationTestHooks(undefined);
+    const before = await r2eCounts(fixture.root);
+    assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "READY");
+    await rejectsCode(reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_EXECUTION_AUTHORITY");
+    assert.deepEqual(await r2eCounts(fixture.root), before);
+  } finally {
+    configureResumeReconciliationTestHooks(undefined); await fixture.cleanup();
   }
 });

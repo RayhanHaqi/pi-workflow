@@ -12,7 +12,7 @@ import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type
 
 const execFileAsync = promisify(execFile);
 const mode = process.argv[2];
-if (process.send === undefined || !["READY", "READY_LIMIT_1", "DELTA", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT", "WINDOW_A_B", "WINDOW_B_B", "WORKER_B", "RESULT_B"].includes(mode ?? "")) {
+if (process.send === undefined || !["READY", "READY_VERIFY", "READY_VERIFY_FAIL", "READY_VERIFY_RETRY", "READY_LIMIT_1", "DELTA", "DELTA_VERIFY", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT", "WINDOW_A_B", "WINDOW_B_B", "WORKER_B", "RESULT_B"].includes(mode ?? "")) {
   throw new Error("resume-inspection-child requires a fixture mode and IPC");
 }
 
@@ -22,7 +22,7 @@ async function repository(): Promise<string> {
   await execFileAsync("git", ["config", "user.email", "resume@example.invalid"], { cwd: root });
   await execFileAsync("git", ["config", "user.name", "resume"], { cwd: root });
   await mkdir(join(root, "verify"));
-  await writeFile(join(root, "verify", "check.mjs"), "process.exit(0);\n");
+  await writeFile(join(root, "verify", "check.mjs"), `process.exit(${mode === "READY_VERIFY_FAIL" || mode === "READY_VERIFY_RETRY" ? 1 : 0});\n`);
   await execFileAsync("git", ["add", "verify"], { cwd: root });
   await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: root });
   return root;
@@ -57,8 +57,8 @@ async function main(): Promise<void> {
     const stateRoot = join(parent, entries[0]!, "state"); const inspection = await inspectRunStorage({ stateRoot, runId: "pre-m8-bounded" }); const state = inspection.workflowState;
     let pause = false;
     if (checkpoint === "AFTER_STATE_POINTER_UPDATE") {
-      const ready = (mode === "READY" || mode === "READY_LIMIT_1") && state?.phase === "READY" && state.tasks.every((task) => task.status === "PENDING");
-      const delta = mode === "DELTA" && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
+      const ready = (mode === "READY" || mode === "READY_VERIFY" || mode === "READY_VERIFY_FAIL" || mode === "READY_VERIFY_RETRY" || mode === "READY_LIMIT_1") && state?.phase === "READY" && state.tasks.every((task) => task.status === "PENDING");
+      const delta = (mode === "DELTA" || mode === "DELTA_VERIFY") && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
       const reservation = mode === "M5" && state?.phase === "LEAF_RUNNING";
       const ambiguous = mode === "AMBIGUOUS" && state?.phase === "LEAF_FAST_PREFLIGHT";
       pause = ready || delta || reservation || ambiguous;
@@ -93,11 +93,11 @@ async function main(): Promise<void> {
     objective: "Write exactly two resume-fixture outputs.", stop_condition: "Stop after deterministic verification.", execution_mode: "STATIC_APPROVED_DAG",
     scope: { readable_paths: ["verify"], editable_paths: ["a.txt", "b.txt"], frozen_paths: ["verify"] }, required_outputs: ["a.txt", "b.txt"],
     tasks: [
-      { task_id: "a", objective: "Write a.", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: [] },
-      { task_id: "b", objective: "Write b.", editable_paths: ["b.txt"], required_outputs: ["b.txt"], dependencies: ["a"], verification_command_ids: [] },
+      { task_id: "a", objective: "Write a.", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: mode === "READY_VERIFY" || mode === "READY_VERIFY_FAIL" || mode === "READY_VERIFY_RETRY" || mode === "DELTA_VERIFY" ? ["verify"] : [] },
+      { task_id: "b", objective: "Write b.", editable_paths: ["b.txt"], required_outputs: ["b.txt"], dependencies: ["a"], verification_command_ids: mode === "READY_VERIFY" || mode === "READY_VERIFY_FAIL" || mode === "READY_VERIFY_RETRY" || mode === "DELTA_VERIFY" ? ["verify"] : [] },
     ],
   };
-  const authority: BoundedMutationAuthority = { verification_commands: [{ command_id: "verify", executable: process.execPath, args: ["check.mjs"], cwd: "verify", timeout_ms: 10_000, readable_paths: [{ path: "verify", kind: "PREFIX" }] }], static_max_attempts_per_leaf: 1, static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }, ...(mode === "READY_LIMIT_1" ? { hard_mutation_tool_limit: 1 as const } : {}) };
+  const authority: BoundedMutationAuthority = { verification_commands: [{ command_id: "verify", executable: process.execPath, args: ["check.mjs"], cwd: "verify", timeout_ms: 10_000, readable_paths: [{ path: "verify", kind: "PREFIX" }] }], static_max_attempts_per_leaf: mode === "READY_VERIFY_RETRY" ? 2 : 1, static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }, ...(mode === "READY_LIMIT_1" ? { hard_mutation_tool_limit: 1 as const } : {}) };
   await runBoundedMutationWorkflowForTests(goal, { cwd: root, authority, retainedArtifactRoot: parent, approveTasks: async ({ plan }) => plan!.content_sha256 as `sha256:${string}` });
   throw new Error("fixture reached terminal state before interruption");
 }
