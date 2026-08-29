@@ -259,6 +259,7 @@ export function createControlDecisionKernel(options: ControlDecisionKernelOption
         incomingUsage.push(usage);
       }
       const incomingUsageIds = incomingUsage.map((entry) => entry.content_sha256 as Sha256Digest).sort();
+      const requestUsageIds = [...new Set([...records.usage.map((entry) => entry.content_sha256 as Sha256Digest), ...incomingUsageIds])].sort();
       const strictSources = captured.production === true || captured.policy.production_authority === "OWNER_APPROVED";
       const capturedSources = strictSources ? withRunAuthoritySources(captured.runAuthority, captured.authoritativeSources) : captured.authoritativeSources;
       const requestedSources = strictSources ? withRunAuthoritySources(captured.runAuthority, request.authoritativeSources) : request.authoritativeSources;
@@ -282,8 +283,8 @@ export function createControlDecisionKernel(options: ControlDecisionKernelOption
       const lostResponse = decisionHistory.find((decision) => decision.policy_content_sha256 === captured.policy.content_sha256 &&
         decision.intent === request.intent && decision.current_state_content_sha256 === request.expectedWorkflowStateContentSha256 &&
         decision.transition_id === request.transitionId &&
-        lostResponseRequestKey(decision, decisionRequest, incomingUsageIds) === decision.request_key &&
-        canonicalize(incomingUsageIds) === canonicalize([...decision.usage_evidence_content_sha256].sort()));
+        lostResponseRequestKey(decision, decisionRequest, requestUsageIds) === decision.request_key &&
+        canonicalize(requestUsageIds) === canonicalize([...decision.usage_evidence_content_sha256].sort()));
       if (lostResponse !== undefined && inspection.workflowState.content_sha256 !== request.expectedWorkflowStateContentSha256 &&
           lostResponse.predicted_next_state_content_sha256 === inspection.workflowState.content_sha256 &&
           inspection.transitionCommit?.previous_revision === request.expectedRevision &&

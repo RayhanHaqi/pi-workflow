@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { canonicalize } from "./canonical-json/index.js";
 import { createControlDecisionKernel } from "./control/kernel.js";
 import { mapLowerLayerFailureCode } from "./control/evaluate.js";
@@ -8,7 +8,7 @@ import { boundedWorkerSystemPrompt, BOUNDED_WORKER_MAX_TOOL_CALLS, BOUNDED_WORKE
 import type { BoundedWorkerExecutionResult, RunBoundedWorkerInput } from "./pi-adapter/bounded-worker.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
 import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
-import type { M5AuthoritativeSources } from "./control/types.js";
+import type { M5AuthoritativeSources, M5ObligationEvidenceInput } from "./control/types.js";
 import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { commitTransition, inspectRunStorage } from "./persistence/index.js";
 import { establishNodeStaticTimeAuthority, readM5ManagedRecords } from "./persistence/store.js";
@@ -19,6 +19,7 @@ import { sampleWallClockMs } from "./wall-clock.js";
 import {
   acquireWorktreeLock,
   resolveRepositoryIdentity,
+  runPostflight,
   assertWorktreeLockHeld,
   releaseWorktreeLock,
   type WorktreeLockHandle,
@@ -31,6 +32,7 @@ import {
   currentOperationWorkerRecords,
   deriveStaticDagPreProviderResumePoint,
   deriveStaticDagR2EResumePoint,
+  inspectDeterministicResumeEligibility,
   deriveStaticDagResumePoint,
   exactStaticWorkDecision,
   loadDeterministicResumeLockTarget,
@@ -58,6 +60,7 @@ import {
   type ContractDocument,
   type M3BaselineApprovalRuntimeDocument,
   type M3BaselineRuntimeDocument,
+  type M3DeltaEntry,
   type M3PostflightDocument,
   type M3RepositoryIdentityDocument,
   type M3RepositoryStateTokenDocument,
@@ -65,6 +68,7 @@ import {
   type M4CommandResultDocument,
   type M4CommandSpecification,
   type M4ScopedToolPolicyDocument,
+  type M5ControlDecisionDocument,
   type M5ControlPolicyDocument,
   type PlanApprovalDocument,
   type ReducerPolicy,
@@ -1266,8 +1270,10 @@ interface DurableVerifierEvidence {
   readonly nextToken: M3RepositoryStateTokenDocument;
 }
 
-function durableVerifierEvidence(
-  authority: import("./resume-inspection.js").SettledStaticLeafAuthority,
+function durableCommandEvidence(
+  runId: string,
+  repository: M3RepositoryIdentityDocument,
+  commandCatalog: M4CommandCatalogDocument,
   records: R2ERecords,
   classifications: readonly ManagedRecordClassification[],
   spec: M4CommandSpecification,
@@ -1278,20 +1284,30 @@ function durableVerifierEvidence(
   if (candidates.length === 0) return null;
   if (candidates.length !== 1) return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
   const result = candidates[0]!;
-  if (result.run_id !== authority.policy.run_id || !classificationsInclude(classifications, "M4_COMMAND_RESULT", result.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
-      result.command_catalog_content_sha256 !== authority.commandCatalog.content_sha256 || result.executable_sha256 !== spec.executable_sha256 ||
-      result.argv_identity !== sha256Canonical(spec.argv) || result.cwd !== (spec.cwd === "REPOSITORY_ROOT" ? authority.repositoryIdentity.worktree_root : join(authority.repositoryIdentity.worktree_root, spec.cwd)) ||
+  if (result.run_id !== runId || !classificationsInclude(classifications, "M4_COMMAND_RESULT", result.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      result.command_catalog_content_sha256 !== commandCatalog.content_sha256 || result.executable_sha256 !== spec.executable_sha256 ||
+      result.argv_identity !== sha256Canonical(spec.argv) || result.cwd !== (spec.cwd === "REPOSITORY_ROOT" ? repository.worktree_root : join(repository.worktree_root, spec.cwd)) ||
       ((result.outcome === "PASS") !== (result.failure_code === null)) || result.postflight_content_sha256 === null || result.state_token_after === null) {
     return refused("RESUME_REFUSED_STATE_STORE");
   }
   const postflight = records.postflights.find((entry) => entry.content_sha256 === result.postflight_content_sha256);
   const nextToken = records.stateTokens.find((entry) => entry.content_sha256 === result.state_token_after);
-  if (postflight === undefined || nextToken === undefined || postflight.run_id !== authority.policy.run_id || nextToken.run_id !== authority.policy.run_id ||
+  if (postflight === undefined || nextToken === undefined || postflight.run_id !== runId || nextToken.run_id !== runId ||
       !classificationsInclude(classifications, "M3_POSTFLIGHT", postflight.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
       !classificationsInclude(classifications, "M3_REPOSITORY_STATE_TOKEN", nextToken.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
       postflight.prior_token_content_sha256 !== stateTokenBefore || nextToken.source !== "POSTFLIGHT" || nextToken.source_content_sha256 !== postflight.content_sha256 ||
       nextToken.prior_token_content_sha256 !== stateTokenBefore) return refused("RESUME_REFUSED_STATE_STORE");
   return { result, postflight, nextToken };
+}
+
+function durableVerifierEvidence(
+  authority: import("./resume-inspection.js").SettledStaticLeafAuthority,
+  records: R2ERecords,
+  classifications: readonly ManagedRecordClassification[],
+  spec: M4CommandSpecification,
+  stateTokenBefore: string,
+): DurableVerifierEvidence | null {
+  return durableCommandEvidence(authority.policy.run_id, authority.repositoryIdentity, authority.commandCatalog, records, classifications, spec, stateTokenBefore);
 }
 
 function advanceResumeHandoverTokens(context: R2EContext, workerTip: M3RepositoryStateTokenDocument, cursor: string): string | null {
@@ -1554,5 +1570,559 @@ export async function reconcileDeterministicResumedLeaf(input: ResumeInspectionI
   } catch (error: unknown) {
     await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
     throw error;
+  }
+}
+
+interface R2FLocation {
+  readonly stateRoot: string;
+  readonly runId: string;
+}
+
+type R2FRecords = R2ERecords;
+
+interface R2FAuthority {
+  readonly policy: M5ControlPolicyDocument;
+  readonly reducerPolicy: ReducerPolicy;
+  readonly repositoryIdentity: M3RepositoryIdentityDocument;
+  readonly baseline: M3BaselineRuntimeDocument;
+  readonly baselineApproval: M3BaselineApprovalRuntimeDocument | null;
+  readonly contract: ContractDocument;
+  readonly budget: BudgetDocument;
+  readonly routeMap: RouteMapDocument;
+  readonly routeMapApproval: RouteMapApprovalDocument;
+  readonly toolPolicy: M4ScopedToolPolicyDocument;
+  readonly commandCatalog: M4CommandCatalogDocument;
+  readonly planApproval: PlanApprovalDocument;
+  readonly taskGraph: TaskGraphDocument;
+  readonly tasks: readonly TaskDocument[];
+  readonly currentToken: M3RepositoryStateTokenDocument;
+}
+
+interface R2FContext {
+  readonly location: R2FLocation;
+  readonly inspection: R2EHealthyInspection;
+  readonly records: R2FRecords;
+  readonly authority: R2FAuthority;
+  readonly currentTokenAuthority: Awaited<ReturnType<typeof loadAuthoritativeToken>>;
+  readonly chain: readonly M3RepositoryStateTokenDocument[];
+}
+
+interface DurableFinalPostflight {
+  readonly postflight: M3PostflightDocument;
+  readonly nextToken: M3RepositoryStateTokenDocument;
+}
+
+type FinalPostflightResolution =
+  | { readonly status: "ABSENT" }
+  | { readonly status: "RESOLVED"; readonly evidence: DurableFinalPostflight };
+
+interface ChainedVerifierEvidence {
+  readonly tokenIndex: number;
+  readonly evidence: DurableVerifierEvidence;
+}
+
+interface R2FFinalProgress {
+  readonly completed: readonly DurableVerifierEvidence[];
+  readonly remaining: readonly M4CommandSpecification[];
+  readonly cursor: string;
+  readonly finalPostflight: DurableFinalPostflight | null;
+  readonly durableReuse: boolean;
+}
+
+export interface DeterministicResumeStaticDagCompletionResult {
+  readonly run_id: string;
+  readonly phase: string;
+  readonly final_phase: string;
+  readonly terminal_reason: string | null;
+  readonly final_state: WorkflowState;
+  readonly next_leaf_task_id: string | null;
+  readonly next_leaf_boundary: string | null;
+  readonly next_resume_point: string | null;
+  readonly command_result_content_sha256: readonly Sha256Digest[];
+  readonly postflight_content_sha256: readonly Sha256Digest[];
+  readonly final_postflight_content_sha256: Sha256Digest | null;
+  readonly m5_decision_content_sha256: Sha256Digest | null;
+  readonly output_delta: readonly M3DeltaEntry[];
+  readonly durable_reuse: boolean;
+  readonly static_dag_verification_passed: boolean;
+  readonly worker_started: false;
+  readonly worker_replay: false;
+  readonly provider_call: false;
+  readonly provider_replay: false;
+  readonly attempt_2_started: false;
+  readonly lock_released: true;
+}
+
+async function locateR2FRun(input: ResumeInspectionInput): Promise<R2FLocation> {
+  if (!isAbsolute(input.retainedRunRoot)) return refused("RESUME_REFUSED_STATE_STORE");
+  try {
+    const root = await realpath(input.retainedRunRoot);
+    const runs = (await readdir(join(root, "state", "runs"), { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    if (runs.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(runs[0]!)) return refused("RESUME_REFUSED_STATE_STORE");
+    return { stateRoot: join(root, "state"), runId: runs[0]! };
+  } catch {
+    return refused("RESUME_REFUSED_STATE_STORE");
+  }
+}
+
+async function readR2FSeed(location: R2FLocation): Promise<{ readonly inspection: R2EHealthyInspection; readonly records: R2FRecords; readonly authority: R2FAuthority }> {
+  const inspection = await inspectRunStorage(location);
+  if (!isHealthyR2EInspection(inspection)) return refused("RESUME_REFUSED_STATE_STORE");
+  const records = await readM5ManagedRecords(location);
+  const authority = rehydrateStaticDagAuthority(inspection.workflowState, records, inspection.managedRecordClassifications);
+  if (authority === null) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  return { inspection, records, authority };
+}
+
+function rehydrateStaticDagAuthority(
+  state: WorkflowState,
+  records: R2FRecords,
+  classifications: readonly ManagedRecordClassification[],
+): R2FAuthority | null {
+  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.active_task_id !== null || !state.tasks.every((task) => task.status === "PASS")) return null;
+  const reducerPolicies = records.reducerPolicies.filter((entry) => entry.content_sha256 === state.frozen_policy_content_sha256);
+  const reducerPolicy = reducerPolicies.length === 1 ? reducerPolicies[0]! : null;
+  const policy = resolveExactStaticM5Policy(state, records);
+  if (reducerPolicy === null || policy === null || !classificationsInclude(classifications, "M5_CONTROL_POLICY", policy.content_sha256, "AUTHORITATIVE_MANAGED_RECORD")) return null;
+  const contract = uniqueBy(records.contracts, (entry) => entry.contract_sha256, state.identities.contract_sha256);
+  const budget = uniqueBy(records.budgets, (entry) => entry.budget_sha256, state.identities.budget_sha256);
+  const routeMap = uniqueBy(records.routeMaps, (entry) => entry.route_map_sha256, policy.route_map_sha256);
+  const routeMapApproval = uniqueBy(records.routeMapApprovals, (entry) => entry.route_map_approval_sha256, policy.route_map_approval_sha256);
+  const toolPolicies = records.toolPolicies.filter((entry) => entry.content_sha256 === policy.tool_policy_content_sha256 && preProviderM4Classification(classifications, "M4_TOOL_POLICY", entry.content_sha256));
+  const catalogs = records.commandCatalogs.filter((entry) => entry.content_sha256 === policy.command_catalog_content_sha256 && preProviderM4Classification(classifications, "M4_COMMAND_CATALOG", entry.content_sha256));
+  if (contract === null || budget === null || routeMap === null || routeMapApproval === null || toolPolicies.length !== 1 || catalogs.length !== 1 ||
+      policy.plan_approval_sha256 === null || policy.task_graph_sha256 === null) return null;
+  const plan = uniqueBy(records.planApprovals, (entry) => entry.plan_approval_sha256, policy.plan_approval_sha256);
+  const taskGraph = uniqueBy(records.taskGraphs, (entry) => entry.task_graph_sha256, policy.task_graph_sha256);
+  if (plan === null || taskGraph === null || contract.route_map_approval_sha256 !== routeMapApproval.route_map_approval_sha256 ||
+      routeMapApproval.route_map_sha256 !== routeMap.route_map_sha256 || plan.bindings.contract_sha256 !== contract.contract_sha256 ||
+      plan.bindings.dag.task_graph_sha256 !== taskGraph.task_graph_sha256 || reducerPolicy.tasks.length !== state.tasks.length) return null;
+  const tasks: TaskDocument[] = [];
+  for (const frozen of reducerPolicy.tasks) {
+    const matches = records.tasks.filter((entry) => entry.task_id === frozen.task_id && entry.task_sha256 === frozen.task_sha256);
+    if (matches.length !== 1) return null;
+    tasks.push(matches[0]!);
+  }
+  if (records.tasks.length !== tasks.length || tasks.some((task, index) => task.task_sha256 !== plan.bindings.dag.ordered_task_packet_identities[index]) ||
+      taskGraph.tasks.length !== tasks.length || taskGraph.tasks.some((task) => !tasks.some((candidate) => candidate.task_id === task.task_id && candidate.task_sha256 === task.task_sha256))) return null;
+  const approvalCandidates = records.approvals.filter((entry) => entry.content_sha256 === policy.baseline_approval_sha256);
+  if (approvalCandidates.length > 1) return null;
+  const baselineApproval = approvalCandidates[0] ?? null;
+  const baselineDigest = baselineApproval?.baseline_runtime_content_sha256 ?? policy.baseline_approval_sha256;
+  const baseline = uniqueBy(records.baselines, (entry) => entry.content_sha256, baselineDigest);
+  if (baseline === null || baseline.repository.content_sha256 !== policy.repository_identity_content_sha256 || baseline.repository.worktree_key !== policy.worktree_key ||
+      !classificationsInclude(classifications, "M3_BASELINE", baseline.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      (baseline.baseline_mode === "APPROVED_BASELINE_DIRTY" && (baselineApproval === null || !classificationsInclude(classifications, "M3_BASELINE_APPROVAL", baselineApproval.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"))) ||
+      (baseline.baseline_mode === "CLEAN_REQUIRED" && baseline.content_sha256 !== policy.baseline_approval_sha256)) return null;
+  const scopeTokens = records.stateTokens.filter((entry) => entry.run_id === policy.run_id && entry.repository_identity_content_sha256 === policy.repository_identity_content_sha256 &&
+    entry.worktree_key === policy.worktree_key && entry.task_scope_identity === policy.scope_sha256 && entry.baseline_runtime_content_sha256 === baseline.content_sha256 &&
+    classificationsInclude(classifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  const currentToken = tokenTip(scopeTokens);
+  if (currentToken === null) return null;
+  return Object.freeze({
+    policy, reducerPolicy, repositoryIdentity: baseline.repository, baseline, baselineApproval,
+    contract, budget, routeMap, routeMapApproval, toolPolicy: toolPolicies[0]!, commandCatalog: catalogs[0]!, planApproval: plan, taskGraph, tasks,
+    currentToken,
+  });
+}
+
+async function readR2FContext(location: R2FLocation): Promise<R2FContext> {
+  const seed = await readR2FSeed(location);
+  const { inspection, records, authority } = seed;
+  let repository: M3RepositoryIdentityDocument;
+  let currentTokenAuthority: Awaited<ReturnType<typeof loadAuthoritativeToken>>;
+  try {
+    repository = await resolveRepositoryIdentity({ requestedPath: authority.repositoryIdentity.requested_path, requireHead: true });
+    assertRepositoryMatches(authority.repositoryIdentity, repository);
+    currentTokenAuthority = await loadAuthoritativeToken(location, authority.currentToken, authority.baseline);
+    const fingerprint = await captureGitState(repository);
+    assertNoGitBlockers(fingerprint);
+    if (canonicalize(fingerprint) !== canonicalize(authority.currentToken.git_fingerprint)) return refused("RESUME_REFUSED_STATE_DRIFT");
+  } catch (error: unknown) {
+    if (error instanceof DeterministicResumeAdmissionError) throw error;
+    return refused("RESUME_REFUSED_REPOSITORY_IDENTITY");
+  }
+  const timing = resolveApplicableResumeTiming({
+    runId: authority.policy.run_id, state: inspection.workflowState, tipCommit: inspection.transitionCommit,
+    records: { transitionCommits: records.transitionCommits, workflowStates: records.workflowStates, transitionEvents: records.transitionEvents, authorities: records.staticTimeAuthorities },
+    verdicts: staticTimingVerdicts(inspection.managedRecordClassifications), nowMs: inspection.workflowState.phase === "PASS" ? Number.MIN_SAFE_INTEGER : sampleWallClockMs(),
+  });
+  if (timing.outcome === "REFUSED" || timing.workflow === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+  const roots = records.stateTokens.filter((entry) => entry.run_id === authority.policy.run_id && entry.repository_identity_content_sha256 === authority.policy.repository_identity_content_sha256 &&
+    entry.worktree_key === authority.policy.worktree_key && entry.task_scope_identity === authority.policy.scope_sha256 && entry.baseline_runtime_content_sha256 === authority.baseline.content_sha256 &&
+    entry.prior_token_content_sha256 === null && classificationsInclude(inspection.managedRecordClassifications, "M3_REPOSITORY_STATE_TOKEN", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  if (roots.length !== 1) return refused("RESUME_REFUSED_STATE_STORE");
+  const chain = authoritativeTokenChain(records, inspection.managedRecordClassifications, roots[0]!.content_sha256, authority.currentToken);
+  if (chain === null) return refused("RESUME_REFUSED_STATE_STORE");
+  return { location, inspection, records, authority, currentTokenAuthority, chain };
+}
+
+function assertR2FTiming(context: R2FContext): void {
+  const timing = resolveApplicableResumeTiming({
+    runId: context.authority.policy.run_id, state: context.inspection.workflowState, tipCommit: context.inspection.transitionCommit,
+    records: { transitionCommits: context.records.transitionCommits, workflowStates: context.records.workflowStates, transitionEvents: context.records.transitionEvents, authorities: context.records.staticTimeAuthorities },
+    verdicts: staticTimingVerdicts(context.inspection.managedRecordClassifications), nowMs: sampleWallClockMs(),
+  });
+  if (timing.outcome === "REFUSED" || timing.workflow === null) return refused("RESUME_REFUSED_TIMING_AUTHORITY");
+}
+
+function finalVerifierSpecs(authority: R2FAuthority): readonly M4CommandSpecification[] {
+  const references = authority.contract.verification_commands;
+  const available = authority.commandCatalog.commands.filter((entry) => entry.command_class === "VERIFICATION");
+  if (available.length !== references.length || new Set(references.map((entry) => entry.command_id)).size !== references.length || references.length === 0) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  return references.map((reference) => {
+    const cwd = reference.cwd === "repository" ? "REPOSITORY_ROOT" : reference.cwd;
+    const matches = available.filter((spec) => spec.command_id === reference.command_id && spec.cwd === cwd && spec.timeout_ms === reference.timeout_ms &&
+      spec.network_policy === reference.network && canonicalize(spec.argv) === canonicalize(reference.argv) && canonicalize(spec.read_paths ?? null) === canonicalize(reference.readable_paths ?? null));
+    if (matches.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    return matches[0]!;
+  });
+}
+
+function taskVerifierSpecs(authority: R2FAuthority, task: TaskDocument): readonly M4CommandSpecification[] {
+  return task.verification_commands.map((reference) => {
+    const cwd = reference.cwd === "repository" ? "REPOSITORY_ROOT" : reference.cwd;
+    const matches = authority.commandCatalog.commands.filter((spec) => spec.command_class === "VERIFICATION" && spec.command_id === reference.command_id && spec.cwd === cwd &&
+      spec.timeout_ms === reference.timeout_ms && spec.network_policy === reference.network && canonicalize(spec.argv) === canonicalize(reference.argv) && canonicalize(spec.read_paths ?? null) === canonicalize(reference.readable_paths ?? null));
+    if (matches.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    return matches[0]!;
+  });
+}
+
+function orderedLeafVerifierSpecs(context: R2FContext): readonly M4CommandSpecification[] {
+  const commits = new Map(context.records.transitionCommits.map((entry) => [entry.content_sha256, entry]));
+  const states = new Map(context.records.workflowStates.map((entry) => [entry.content_sha256, entry]));
+  const events = new Map(context.records.transitionEvents.map((entry) => [entry.content_sha256, entry]));
+  const history: Array<{ readonly event: TransitionEvent; readonly state: WorkflowState }> = [];
+  const seen = new Set<string>();
+  let cursor: string | null = context.inspection.transitionCommit.content_sha256;
+  while (cursor !== null) {
+    if (seen.has(cursor)) return refused("RESUME_REFUSED_STATE_STORE");
+    seen.add(cursor);
+    const commit = commits.get(cursor);
+    if (commit === undefined || commit.new_workflow_state_content_sha256 === null) return refused("RESUME_REFUSED_STATE_STORE");
+    const state = states.get(commit.new_workflow_state_content_sha256);
+    const event = commit.transition_event_content_sha256 === null ? undefined : events.get(commit.transition_event_content_sha256);
+    if (state === undefined || (event === undefined && commit.commit_kind !== "GENESIS")) return refused("RESUME_REFUSED_STATE_STORE");
+    if (event !== undefined) history.push({ event, state });
+    cursor = commit.previous_transition_commit_content_sha256;
+  }
+  history.reverse();
+  const selected: string[] = [];
+  for (const entry of history) if (entry.event.event_type === "SELECT_READY_LEAF" && entry.state.active_task_id !== null) selected.push(entry.state.active_task_id);
+  if (selected.length !== context.authority.tasks.length || new Set(selected).size !== selected.length || selected.some((taskId) => !context.authority.tasks.some((task) => task.task_id === taskId))) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  return selected.flatMap((taskId) => taskVerifierSpecs(context.authority, context.authority.tasks.find((task) => task.task_id === taskId)!));
+}
+
+function verifierEvidenceForChainToken(context: R2FContext, token: M3RepositoryStateTokenDocument, tokenIndex: number): ChainedVerifierEvidence | null {
+  if (token.source !== "POSTFLIGHT" || token.source_content_sha256 === null) return null;
+  const candidates = context.records.commandResults.filter((entry) => entry.command_class === "VERIFICATION" && entry.postflight_content_sha256 === token.source_content_sha256 && entry.state_token_after === token.content_sha256);
+  if (candidates.length === 0) return null;
+  if (candidates.length !== 1) return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+  const result = candidates[0]!;
+  const specs = context.authority.commandCatalog.commands.filter((entry) => entry.command_class === "VERIFICATION" && entry.command_id === result.command_id && entry.command_spec_sha256 === result.command_spec_sha256);
+  if (specs.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  const evidence = durableCommandEvidence(context.authority.policy.run_id, context.authority.repositoryIdentity, context.authority.commandCatalog, context.records,
+    context.inspection.managedRecordClassifications, specs[0]!, result.state_token_before);
+  if (evidence === null || context.chain[tokenIndex - 1]?.content_sha256 !== evidence.result.state_token_before) return refused("RESUME_REFUSED_STATE_STORE");
+  return { tokenIndex, evidence };
+}
+
+function resolveFinalPostflight(context: R2FContext, requiredOutputs: readonly string[]): FinalPostflightResolution {
+  const token = context.authority.currentToken;
+  if (token.source !== "POSTFLIGHT" || token.source_content_sha256 === null) return { status: "ABSENT" };
+  const matches = context.records.postflights.filter((entry) => entry.content_sha256 === token.source_content_sha256);
+  if (matches.length !== 1) return refused("RESUME_REFUSED_STATE_STORE");
+  const postflight = matches[0]!;
+  const commandReferences = context.records.commandResults.filter((entry) => entry.postflight_content_sha256 === postflight.content_sha256);
+  if (commandReferences.length > 0) return { status: "ABSENT" };
+  const paths = postflight.workflow_owned_delta.map((entry) => entry.path).sort();
+  if (postflight.run_id !== context.authority.policy.run_id || !classificationsInclude(context.inspection.managedRecordClassifications, "M3_POSTFLIGHT", postflight.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
+      postflight.prior_token_content_sha256 !== token.prior_token_content_sha256 || postflight.baseline_runtime_content_sha256 !== context.authority.baseline.content_sha256 ||
+      postflight.result !== "PASS" || postflight.blockers.length !== 0 || postflight.claimed_workflow_paths.length !== 0 ||
+      canonicalize(paths) !== canonicalize([...requiredOutputs].sort()) || postflight.scope.scope_identity !== context.authority.policy.scope_sha256 ||
+      canonicalize(postflight.scope.editable_paths) !== canonicalize([...context.authority.contract.scope.editable_paths].sort()) ||
+      canonicalize(postflight.scope.frozen_paths) !== canonicalize([...context.authority.contract.scope.frozen_paths].sort()) ||
+      token.source_content_sha256 !== postflight.content_sha256 || token.source !== "POSTFLIGHT" || token.workflow_owned_delta_sha256 !== sha256Canonical(postflight.workflow_owned_delta) ||
+      canonicalize(token.changed_paths) !== canonicalize(paths)) return refused("RESUME_REFUSED_STATE_STORE");
+  return { status: "RESOLVED", evidence: { postflight, nextToken: token } };
+}
+
+function advanceR2FHandoverTokens(chain: readonly M3RepositoryStateTokenDocument[], cursor: string): string | null {
+  let index = chain.findIndex((entry) => entry.content_sha256 === cursor);
+  if (index < 0) return null;
+  while (index + 1 < chain.length && chain[index + 1]!.source === "RESUME_LOCK_HANDOVER") index += 1;
+  return chain[index]!.content_sha256;
+}
+
+function deriveR2FFinalProgress(context: R2FContext, specs: readonly M4CommandSpecification[]): R2FFinalProgress {
+  const leafSpecs = orderedLeafVerifierSpecs(context);
+  const commandTokens: ChainedVerifierEvidence[] = [];
+  for (let index = 0; index < context.chain.length; index += 1) {
+    const evidence = verifierEvidenceForChainToken(context, context.chain[index]!, index);
+    if (evidence !== null) commandTokens.push(evidence);
+  }
+  if (commandTokens.length < leafSpecs.length) return refused("RESUME_REFUSED_STATE_STORE");
+  for (let index = 0; index < leafSpecs.length; index += 1) {
+    const actual = commandTokens[index]!.evidence.result;
+    const expected = leafSpecs[index]!;
+    if (actual.command_id !== expected.command_id || actual.command_spec_sha256 !== expected.command_spec_sha256 || actual.outcome !== "PASS") return refused("RESUME_REFUSED_STATE_STORE");
+  }
+  let boundary: M3RepositoryStateTokenDocument;
+  if (leafSpecs.length > 0) {
+    const next = context.chain[commandTokens[leafSpecs.length - 1]!.tokenIndex];
+    if (next === undefined) return refused("RESUME_REFUSED_STATE_STORE");
+    boundary = next;
+  } else if (commandTokens[0] !== undefined) {
+    let boundaryIndex = context.chain.findIndex((entry) => entry.content_sha256 === commandTokens[0]!.evidence.result.state_token_before);
+    if (boundaryIndex < 0) return refused("RESUME_REFUSED_STATE_STORE");
+    while (boundaryIndex > 0 && context.chain[boundaryIndex]!.source === "RESUME_LOCK_HANDOVER") boundaryIndex -= 1;
+    boundary = context.chain[boundaryIndex]!;
+  } else boundary = context.authority.currentToken;
+  const finalPostflight = resolveFinalPostflight(context, context.authority.contract.required_outputs);
+  const completed: DurableVerifierEvidence[] = [];
+  let cursor = boundary.content_sha256;
+  for (let index = 0; index < specs.length; index += 1) {
+    const spec = specs[index]!;
+    let evidence = durableCommandEvidence(context.authority.policy.run_id, context.authority.repositoryIdentity, context.authority.commandCatalog, context.records,
+      context.inspection.managedRecordClassifications, spec, cursor);
+    if (evidence === null) {
+      const advanced = advanceR2FHandoverTokens(context.chain, cursor);
+      if (advanced === null) return refused("RESUME_REFUSED_STATE_STORE");
+      if (advanced !== cursor) {
+        cursor = advanced;
+        evidence = durableCommandEvidence(context.authority.policy.run_id, context.authority.repositoryIdentity, context.authority.commandCatalog, context.records,
+          context.inspection.managedRecordClassifications, spec, cursor);
+      }
+    }
+    if (evidence === null) {
+      if (finalPostflight.status === "RESOLVED" || cursor !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+      return { completed, remaining: specs.slice(index), cursor, finalPostflight: null, durableReuse: completed.length > 0 };
+    }
+    const tokenIndex = context.chain.findIndex((entry) => entry.content_sha256 === cursor);
+    if (tokenIndex < 0 || context.chain[tokenIndex + 1]?.content_sha256 !== evidence.nextToken.content_sha256 || evidence.result.outcome !== "PASS") return refused("RESUME_REFUSED_STATE_STORE");
+    completed.push(evidence);
+    cursor = evidence.nextToken.content_sha256;
+  }
+  if (finalPostflight.status === "RESOLVED") {
+    if (cursor !== finalPostflight.evidence.postflight.prior_token_content_sha256 || finalPostflight.evidence.nextToken.prior_token_content_sha256 !== cursor) return refused("RESUME_REFUSED_STATE_STORE");
+  } else if (cursor !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+  return { completed, remaining: [], cursor, finalPostflight: finalPostflight.status === "RESOLVED" ? finalPostflight.evidence : null, durableReuse: completed.length > 0 || finalPostflight.status === "RESOLVED" };
+}
+
+function assertR2FCapacity(context: R2FContext, remainingVerifierCount: number, finalPostflightRequired: boolean): void {
+  const handoverRequired = remainingVerifierCount > 0 || finalPostflightRequired;
+  const demand = (handoverRequired ? 1 : 0) + remainingVerifierCount + (finalPostflightRequired ? 1 : 0);
+  if (context.currentTokenAuthority.chainDepth + demand > 64) return refused("STATE_TOKEN_CHAIN_TOO_DEEP");
+}
+
+function finalObligationEvidence(authority: R2FAuthority, results: readonly M4CommandResultDocument[], postflight: M3PostflightDocument): readonly M5ObligationEvidenceInput[] {
+  const obligation = (value: string): M5ControlPolicyDocument["obligations"][number] => {
+    const matches = authority.policy.obligations.filter((entry) => entry.direction === "OUTPUT" && entry.literal === value);
+    if (matches.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    return matches[0]!;
+  };
+  return [
+    ...authority.contract.required_outputs.map((value) => ({ descriptorSha256: obligation(value).descriptor_sha256 as Sha256Digest, value, evidenceContentSha256: postflight.content_sha256 as Sha256Digest })),
+    ...results.map((entry) => ({ descriptorSha256: obligation(entry.command_id).descriptor_sha256 as Sha256Digest, value: entry.command_id, evidenceContentSha256: entry.content_sha256 as Sha256Digest })),
+  ];
+}
+
+function r2FSources(context: R2FContext, results: readonly M4CommandResultDocument[], postflight: DurableFinalPostflight): M5AuthoritativeSources {
+  const authority = context.authority;
+  return {
+    boundedStaticPreM8: true, contract: authority.contract, budget: authority.budget, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval,
+    m4ToolPolicy: authority.toolPolicy, m4CommandCatalog: authority.commandCatalog, planApprovals: [authority.planApproval], taskGraphs: [authority.taskGraph], tasks: authority.tasks,
+    m3StateTokens: [postflight.nextToken], m3Postflights: [postflight.postflight], m4CommandResults: results,
+  };
+}
+
+function terminalDecisionForPass(context: R2FContext): M5ControlDecisionDocument {
+  const state = context.inspection.workflowState;
+  const candidates = context.records.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL" && entry.outcome === "PASS" && entry.pass_authority === true &&
+    entry.current_state_content_sha256 !== state.content_sha256 && entry.transition_event?.event_type === "STATIC_DAG_VERIFICATION_PASSED" && entry.predicted_next_state_content_sha256 === state.content_sha256 &&
+    classificationsInclude(context.inspection.managedRecordClassifications, "M5_CONTROL_DECISION", entry.content_sha256, "AUTHORITATIVE_MANAGED_RECORD"));
+  if (candidates.length !== 1) return refused("RESUME_REFUSED_STATE_STORE");
+  return candidates[0]!;
+}
+
+function assertStaticDagPassAuthority(context: R2FContext, decision: M5ControlDecisionDocument): void {
+  if (context.inspection.workflowState.phase !== "PASS" || context.inspection.workflowState.terminal_reason !== "PASS" || decision.transition_event === null ||
+      decision.transition_event.event_type !== "STATIC_DAG_VERIFICATION_PASSED" || decision.predicted_next_state_content_sha256 !== context.inspection.workflowState.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+  const event = decision.transition_event;
+  const events = context.records.transitionEvents.filter((entry) => entry.content_sha256 === event.content_sha256 && entry.event_type === "STATIC_DAG_VERIFICATION_PASSED");
+  const commits = context.records.transitionCommits.filter((entry) => entry.new_workflow_state_content_sha256 === context.inspection.workflowState.content_sha256 &&
+    entry.transition_event_content_sha256 === event.content_sha256 && entry.reducer_policy_content_sha256 === context.authority.reducerPolicy.content_sha256 &&
+    entry.content_sha256 === context.inspection.transitionCommit.content_sha256);
+  if (events.length !== 1 || commits.length !== 1) return refused("RESUME_REFUSED_STATE_STORE");
+}
+
+function completionResult(
+  context: R2FContext,
+  progress: R2FFinalProgress,
+  finalPostflight: DurableFinalPostflight,
+  decision: M5ControlDecisionDocument,
+  durableReuse: boolean,
+): DeterministicResumeStaticDagCompletionResult {
+  const commandResults = Object.freeze(progress.completed.map((entry) => entry.result.content_sha256 as Sha256Digest));
+  const postflights = Object.freeze([...progress.completed.map((entry) => entry.postflight.content_sha256 as Sha256Digest), finalPostflight.postflight.content_sha256 as Sha256Digest]);
+  return Object.freeze({
+    run_id: context.authority.policy.run_id, phase: context.inspection.workflowState.phase, final_phase: context.inspection.workflowState.phase,
+    terminal_reason: context.inspection.workflowState.terminal_reason, final_state: context.inspection.workflowState, next_leaf_task_id: null, next_leaf_boundary: null, next_resume_point: null,
+    command_result_content_sha256: commandResults, postflight_content_sha256: postflights, final_postflight_content_sha256: finalPostflight.postflight.content_sha256 as Sha256Digest,
+    m5_decision_content_sha256: decision.content_sha256 as Sha256Digest, output_delta: Object.freeze([...finalPostflight.postflight.workflow_owned_delta]), durable_reuse: durableReuse,
+    static_dag_verification_passed: true, worker_started: false, worker_replay: false, provider_call: false, provider_replay: false, attempt_2_started: false, lock_released: true,
+  });
+}
+
+async function readyCompletionResult(location: R2FLocation, input: ResumeInspectionInput): Promise<DeterministicResumeStaticDagCompletionResult> {
+  const report = await inspectDeterministicResumeEligibility(input);
+  if (report.classification !== "RESUMABLE" || report.phase !== "READY" || report.resume_point === null) return refused(report.reason ?? "RESUME_REFUSED_STATE_STORE");
+  const inspection = await inspectRunStorage(location);
+  if (!isHealthyR2EInspection(inspection) || inspection.workflowState.phase !== "READY" || inspection.workflowState.active_task_id !== null) return refused("RESUME_REFUSED_STATE_STORE");
+  const taskId = report.resume_point.startsWith("STATIC_DAG_SELECT_READY_LEAF:") ? report.resume_point.slice("STATIC_DAG_SELECT_READY_LEAF:".length) : null;
+  if (taskId === null || taskId.length === 0) return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+  return Object.freeze({
+    run_id: inspection.workflowState.run_id, phase: "READY", final_phase: "READY", terminal_reason: inspection.workflowState.terminal_reason, final_state: inspection.workflowState,
+    next_leaf_task_id: taskId, next_leaf_boundary: report.resume_point, next_resume_point: report.resume_point,
+    command_result_content_sha256: Object.freeze([]), postflight_content_sha256: Object.freeze([]), final_postflight_content_sha256: null, m5_decision_content_sha256: null,
+    output_delta: Object.freeze([]), durable_reuse: false, static_dag_verification_passed: false, worker_started: false, worker_replay: false, provider_call: false, provider_replay: false,
+    attempt_2_started: false, lock_released: true,
+  });
+}
+
+/** R2F production entrypoint: continue only the final static-DAG controller path; never starts a worker or provider. */
+export async function completeDeterministicResumedStaticDag(input: ResumeInspectionInput): Promise<DeterministicResumeStaticDagCompletionResult> {
+  const location = await locateR2FRun(input);
+  const initialInspection = await inspectRunStorage(location);
+  if (!isHealthyR2EInspection(initialInspection)) return refused("RESUME_REFUSED_STATE_STORE");
+  if (initialInspection.workflowState.phase === "READY") return readyCompletionResult(location, input);
+  if (initialInspection.workflowState.phase === "BLOCKED") return refused("RESUME_REFUSED_TERMINAL");
+  if (initialInspection.workflowState.phase === "LEAF_RETRY_READY") return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  if (initialInspection.workflowState.phase !== "STATIC_DAG_VERIFYING" && initialInspection.workflowState.phase !== "PASS") return refused("RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
+  const seed = await readR2FSeed(location);
+  let lock: WorktreeLockHandle | undefined;
+  let temporaryRoot: string | undefined;
+  try {
+    try { lock = await acquireWorktreeLock({ stateRoot: location.stateRoot, repository: seed.authority.repositoryIdentity }); }
+    catch (error: unknown) {
+      if (error !== null && typeof error === "object" && (error as { readonly code?: unknown }).code === "LOCK_BUSY") return refused("LOCK_BUSY");
+      return refused("RESUME_REFUSED_IN_FLIGHT_OPERATION");
+    }
+    await assertWorktreeLockHeld(lock);
+    let context = await readR2FContext(location);
+    if (context.inspection.workflowState.phase === "BLOCKED") return refused("RESUME_REFUSED_TERMINAL");
+    if (context.inspection.workflowState.phase === "LEAF_RETRY_READY") return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    if (context.inspection.workflowState.phase !== "STATIC_DAG_VERIFYING" && context.inspection.workflowState.phase !== "PASS") return refused("RESUME_REFUSED_STATE_STORE");
+    const specs = finalVerifierSpecs(context.authority);
+    const progress = deriveR2FFinalProgress(context, specs);
+    if (context.inspection.workflowState.phase === "PASS") {
+      if (progress.remaining.length !== 0 || progress.finalPostflight === null) return refused("RESUME_REFUSED_STATE_STORE");
+      const decision = terminalDecisionForPass(context);
+      assertStaticDagPassAuthority(context, decision);
+      return completionResult(context, progress, progress.finalPostflight, decision, true);
+    }
+    assertR2FTiming(context);
+    const finalPostflightRequired = progress.finalPostflight === null;
+    assertR2FCapacity(context, progress.remaining.length, finalPostflightRequired);
+    const handoverRequired = progress.remaining.length > 0 || finalPostflightRequired;
+    if (handoverRequired) {
+      const handover = await runResumeLockHandover({
+        stateRoot: location.stateRoot, runId: context.authority.policy.run_id, acceptedState: context.authority.currentToken, baseline: context.authority.baseline,
+        instructionFiles: [], authorityFiles: [], taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, lock,
+      });
+      if (handover.acceptedState.content_sha256 === context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+      context = await readR2FContext(location);
+      assertR2FTiming(context);
+    }
+    let cursor = progress.cursor;
+    const completed = [...progress.completed];
+    let gateway: Awaited<ReturnType<typeof createScopedToolGateway>> | undefined;
+    if (progress.remaining.length > 0) {
+      temporaryRoot = await mkdtemp(join(tmpdir(), "pi-resumed-static-dag-"));
+      gateway = await createScopedToolGateway({
+        stateRoot: location.stateRoot, runId: context.authority.policy.run_id, repository: context.authority.repositoryIdentity, baseline: context.authority.baseline,
+        acceptedState: context.authority.currentToken, lock, instructionFiles: [], authorityFiles: [], editablePaths: [...context.authority.contract.scope.editable_paths],
+        frozenPaths: [...context.authority.contract.scope.frozen_paths], taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, toolPolicy: context.authority.toolPolicy,
+        commandCatalog: context.authority.commandCatalog, temporaryRoot,
+      });
+      for (let index = completed.length; index < specs.length; index += 1) {
+        const spec = specs[index]!;
+        let evidence = durableCommandEvidence(context.authority.policy.run_id, context.authority.repositoryIdentity, context.authority.commandCatalog, context.records,
+          context.inspection.managedRecordClassifications, spec, cursor);
+        if (evidence === null) {
+          const advanced = advanceR2FHandoverTokens(context.chain, cursor);
+          if (advanced === null) return refused("RESUME_REFUSED_STATE_STORE");
+          if (advanced !== cursor) {
+            cursor = advanced;
+            evidence = durableCommandEvidence(context.authority.policy.run_id, context.authority.repositoryIdentity, context.authority.commandCatalog, context.records,
+              context.inspection.managedRecordClassifications, spec, cursor);
+          }
+        }
+        if (evidence === null) {
+          if (cursor !== context.authority.currentToken.content_sha256 || gateway.acceptedState.content_sha256 !== cursor) return refused("RESUME_REFUSED_STATE_STORE");
+          assertR2FTiming(context);
+          await resumeReconciliationCheckpoint("BEFORE_FINAL_VERIFIER");
+          try { await gateway.run_verification_command({ commandId: spec.command_id, stateTokenContentSha256: cursor as Sha256Digest }); } catch { /* Re-read exact durable failure evidence below. */ }
+          context = await readR2FContext(location);
+          assertR2FTiming(context);
+          evidence = durableCommandEvidence(context.authority.policy.run_id, context.authority.repositoryIdentity, context.authority.commandCatalog, context.records,
+            context.inspection.managedRecordClassifications, spec, cursor);
+          if (evidence === null || evidence.nextToken.content_sha256 !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+        }
+        if (evidence.result.outcome !== "PASS") return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+        completed.push(evidence);
+        cursor = evidence.nextToken.content_sha256;
+        assertR2FTiming(context);
+        await resumeReconciliationCheckpoint("AFTER_FINAL_VERIFIER");
+        if (index + 1 < specs.length) await resumeReconciliationCheckpoint("BETWEEN_FINAL_VERIFIERS");
+      }
+    }
+    let finalPostflight = progress.finalPostflight;
+    if (finalPostflight !== null) cursor = finalPostflight.nextToken.content_sha256;
+    else {
+      const atCurrent = advanceR2FHandoverTokens(context.chain, cursor);
+      if (atCurrent === null || atCurrent !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+      cursor = atCurrent;
+    }
+    if (finalPostflight === null) {
+      assertR2FTiming(context);
+      const postflight = await runPostflight({
+        stateRoot: location.stateRoot, runId: context.authority.policy.run_id, acceptedState: context.authority.currentToken, baseline: context.authority.baseline,
+        instructionFiles: [], authorityFiles: [], editablePaths: [...context.authority.contract.scope.editable_paths], frozenPaths: [...context.authority.contract.scope.frozen_paths],
+        taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, claimedWorkflowPaths: [], lock,
+      });
+      if (canonicalize(postflight.postflight.workflow_owned_delta.map((entry) => entry.path).sort()) !== canonicalize([...context.authority.contract.required_outputs].sort())) return refused("RESUME_REFUSED_STATE_STORE");
+      context = await readR2FContext(location);
+      if (context.authority.currentToken.content_sha256 !== postflight.acceptedState.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+      const resolved = resolveFinalPostflight(context, context.authority.contract.required_outputs);
+      finalPostflight = resolved.status === "RESOLVED" ? resolved.evidence : null;
+      if (finalPostflight === null) return refused("RESUME_REFUSED_STATE_STORE");
+      await resumeReconciliationCheckpoint("AFTER_FINAL_POSTFLIGHT");
+      assertR2FTiming(context);
+    }
+    if (finalPostflight === null || completed.length !== specs.length) return refused("RESUME_REFUSED_STATE_STORE");
+    assertR2FTiming(context);
+    const sources = r2FSources(context, completed.map((entry) => entry.result), finalPostflight);
+    const kernel = createControlDecisionKernel({
+      stateRoot: location.stateRoot, runId: context.authority.policy.run_id, policy: context.authority.policy, reducerPolicy: context.authority.reducerPolicy,
+      runAuthority: { repositoryIdentity: context.authority.repositoryIdentity, contract: context.authority.contract, routeMap: context.authority.routeMap, routeMapApproval: context.authority.routeMapApproval },
+      authoritativeSources: sources, production: true,
+    });
+    const terminal = await kernel.evaluateControlDecision({
+      intent: "EVALUATE_TERMINAL", expectedRevision: context.inspection.revision, expectedStatePointerContentSha256: context.inspection.statePointer.content_sha256 as Sha256Digest,
+      expectedWorkflowStateContentSha256: context.inspection.workflowState.content_sha256 as Sha256Digest, transitionId: "pre-m8-terminal", processMetadata: resumeProcessMetadata(),
+      authoritativeSources: sources, availableLogicalRoles: resumedAvailableLogicalRoles(context.authority.policy), obligationEvidence: finalObligationEvidence(context.authority, completed.map((entry) => entry.result), finalPostflight.postflight),
+    });
+    if (terminal.decision.outcome !== "PASS" || terminal.workflowState.phase !== "PASS") return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    context = await readR2FContext(location);
+    assertStaticDagPassAuthority(context, terminal.decision);
+    await resumeReconciliationCheckpoint("AFTER_TERMINAL_DECISION");
+    await resumeReconciliationCheckpoint("AFTER_PASS_TRANSITION");
+    const refreshedProgress: R2FFinalProgress = { completed, remaining: [], cursor: finalPostflight.nextToken.content_sha256, finalPostflight, durableReuse: progress.durableReuse };
+    return completionResult(context, refreshedProgress, finalPostflight, terminal.decision, refreshedProgress.durableReuse);
+  } finally {
+    if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
+    if (lock !== undefined) await releaseWorktreeLock(lock);
   }
 }

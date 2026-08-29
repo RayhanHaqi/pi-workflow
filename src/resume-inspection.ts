@@ -463,6 +463,16 @@ export function deriveStaticDagR2EResumePoint(
   return null;
 }
 
+/** Final R2F continuation point: all static leaves passed, but terminalization is not durable yet. */
+export function deriveStaticDagR2FResumePoint(
+  state: WorkflowState,
+  records: Awaited<ReturnType<typeof readM5ManagedRecords>>,
+  classifications: readonly ManagedRecordClassification[],
+): string | null {
+  if (state.execution_mode !== "STATIC_APPROVED_DAG" || state.phase !== "STATIC_DAG_VERIFYING" || state.active_task_id !== null || !state.tasks.every((task) => task.status === "PASS")) return null;
+  return executionAuthorityComplete(state, records, classifications) === null ? null : "STATIC_DAG_COMPLETE";
+}
+
 export function deriveStaticDagPreProviderResumePoint(
   state: WorkflowState,
   policy: ReducerPolicy,
@@ -621,6 +631,7 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
     if (timing.outcome === "REFUSED") return refused(runId, state, "RESUME_REFUSED_TIMING_AUTHORITY");
   }
   const r2ePoint = deriveStaticDagR2EResumePoint(state, inspection.transitionCommit, records, inspection.managedRecordClassifications);
+  const r2fPoint = deriveStaticDagR2FResumePoint(state, records, inspection.managedRecordClassifications);
   const preProviderPoint = deriveStaticDagPreProviderResumePoint(state, authority.policy, records, inspection.managedRecordClassifications, inspection.transitionCommit);
   if (r2ePoint === null && preProviderPoint === null && !settledOperations(records, inspection.managedRecordClassifications)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
 
@@ -655,7 +666,7 @@ async function inspectDeterministicResumeEligibilityInternal(input: ResumeInspec
   } catch {
     return refused(runId, state, "RESUME_REFUSED_REPOSITORY_IDENTITY");
   }
-  const resumePoint = r2ePoint ?? preProviderPoint ?? deriveStaticDagResumePoint(state, authority.policy);
+  const resumePoint = r2ePoint ?? preProviderPoint ?? r2fPoint ?? deriveStaticDagResumePoint(state, authority.policy);
   if (resumePoint === null) return refused(runId, state, "RESUME_REFUSED_AMBIGUOUS_RESUME_POINT");
   if (r2ePoint === null && preProviderPoint === null && hasSelectedLeafWorkerEvidence(resumePoint, state, authority.policy, records)) return refused(runId, state, "RESUME_REFUSED_IN_FLIGHT_OPERATION");
   return report("RESUMABLE", runId, state.phase, resumePoint, null);

@@ -12,7 +12,7 @@ import { configureM5PersistenceTestHooks } from "../src/persistence/m5-test-hook
 import { readM5ManagedRecords } from "../src/persistence/store.js";
 import { loadAuthoritativeToken } from "../src/repository/token-provenance.js";
 import { acquireWorktreeLock, probeWorktreeLockAvailability, releaseWorktreeLock, resolveRepositoryIdentity, runResumeLockHandover } from "../src/repository/index.js";
-import { acquireDeterministicResumeAdmission, DeterministicResumeAdmissionError, reconcileDeterministicResumedLeaf } from "../src/resume-admission.js";
+import { acquireDeterministicResumeAdmission, completeDeterministicResumedStaticDag, DeterministicResumeAdmissionError, reconcileDeterministicResumedLeaf } from "../src/resume-admission.js";
 import {
   boundedWorkerSystemPrompt,
   BOUNDED_WORKER_MAX_TOOL_CALLS,
@@ -582,6 +582,17 @@ async function crashR2EAt(fixture: ChildFixture, checkpoint: "AFTER_VERIFICATION
   }
 }
 
+async function crashR2FAt(fixture: ChildFixture, checkpoint: "BEFORE_FINAL_VERIFIER" | "AFTER_FINAL_VERIFIER" | "BETWEEN_FINAL_VERIFIERS" | "AFTER_FINAL_POSTFLIGHT" | "AFTER_TERMINAL_DECISION" | "AFTER_PASS_TRANSITION"): Promise<void> {
+  configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+    if (value === checkpoint) throw new Error(`R2F crash at ${checkpoint}`);
+  } });
+  try {
+    await assert.rejects(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), /R2F crash/);
+  } finally {
+    configureResumeReconciliationTestHooks(undefined);
+  }
+}
+
 test("R2E reconciles a settled leaf exactly once through verification to READY", async () => {
   const fixture = await settledWorkerFixture("READY_VERIFY");
   try {
@@ -638,6 +649,288 @@ test("R2E preserves prior settled history and reaches STATIC_DAG_VERIFYING on th
   }
 });
 
+test("R2F completes a final static DAG without replaying workers", async () => {
+  const fixture = await settledWorkerFixture("DELTA_VERIFY");
+  try {
+    const r2e = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
+    assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).resume_point, "STATIC_DAG_COMPLETE");
+    const before = await readM5ManagedRecords(LOCATION(fixture.root));
+    const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+    assert.equal(result.final_phase, "PASS");
+    assert.equal(result.terminal_reason, "PASS");
+    assert.equal(result.static_dag_verification_passed, true);
+    assert.equal(result.worker_started, false);
+    assert.equal(result.provider_call, false);
+    assert.equal(result.attempt_2_started, false);
+    assert.equal(result.command_result_content_sha256.length, 1);
+    assert.equal(result.postflight_content_sha256.length, 2);
+    assert.equal(result.output_delta.map((entry) => entry.path).sort().join(","), "a.txt,b.txt");
+    const after = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+    assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
+    assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "PASS");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2F confirms READY next-leaf boundary without worker execution", async () => {
+  const fixture = await interruptFixture("READY");
+  try {
+    const before = await readM5ManagedRecords(LOCATION(fixture.root));
+    const inspected = await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root });
+    const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+    assert.equal(result.final_phase, "READY");
+    assert.equal(result.next_leaf_task_id, "a");
+    assert.equal(result.next_leaf_boundary, inspected.resume_point);
+    assert.equal(result.worker_started, false);
+    const after = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+    assert.equal(after.commandResults.length, before.commandResults.length);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2F crash replay reuses final evidence and terminal authority", async (t) => {
+  const fixture = await settledWorkerFixture("DELTA_VERIFY");
+  try {
+    const r2e = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
+    const snapshot = await snapshotStateRoot(fixture.root);
+    try {
+      await t.test("before any final verifier", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        await crashR2FAt(fixture, "BEFORE_FINAL_VERIFIER");
+        const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(crashed.commandResults.length, before.commandResults.length);
+        assert.equal(crashed.postflights.length, before.postflights.length);
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "PASS");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.commandResults.length, before.commandResults.length + 1);
+      });
+
+      await t.test("after final verifier", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        await crashR2FAt(fixture, "AFTER_FINAL_VERIFIER");
+        const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "STATIC_DAG_VERIFYING");
+        assert.equal(crashed.commandResults.length, before.commandResults.length + 1);
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "PASS");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.commandResults.length, crashed.commandResults.length);
+        assert.equal(after.postflights.length, crashed.postflights.length + 1);
+        assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+      });
+
+      await t.test("after final postflight", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        await crashR2FAt(fixture, "AFTER_FINAL_POSTFLIGHT");
+        const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "STATIC_DAG_VERIFYING");
+        assert.equal(crashed.commandResults.length, before.commandResults.length + 1);
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "PASS");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.commandResults.length, crashed.commandResults.length);
+        assert.equal(after.postflights.length, crashed.postflights.length);
+      });
+
+      await t.test("after terminal decision publication", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        configureM5PersistenceTestHooks({ checkpoint: async (checkpoint) => {
+          if (checkpoint === "AFTER_DECISION_PUBLICATION") throw new Error("R2F crash after terminal decision publication");
+        } });
+        try {
+          await assert.rejects(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), /M5_EVIDENCE_PUBLICATION_FAILED/);
+        } finally {
+          configureM5PersistenceTestHooks(undefined);
+        }
+        const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "STATIC_DAG_VERIFYING");
+        assert.equal(crashed.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL").length, 1);
+        assert.equal(crashed.commandResults.length, before.commandResults.length + 1);
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "PASS");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL").length, 1);
+      });
+
+      await t.test("after PASS transition", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        await crashR2FAt(fixture, "AFTER_PASS_TRANSITION");
+        const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "PASS");
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "PASS");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.commandResults.length, crashed.commandResults.length);
+        assert.equal(after.postflights.length, crashed.postflights.length);
+        assert.equal(after.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL").length, 1);
+        assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+      });
+    } finally {
+      await snapshot.cleanup();
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2F runs two frozen final verifiers in order", async () => {
+  const fixture = await settledWorkerFixture("READY_VERIFY_TWO");
+  try {
+    const first = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(first.final_phase, "READY");
+    const worker = startWorkerChild(fixture.root, "EXECUTE");
+    try {
+      assert.equal((await worker.next("EXECUTED"))["taskId"], "b");
+    } finally {
+      await stopChild(worker.child);
+    }
+    const second = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(second.final_phase, "STATIC_DAG_VERIFYING");
+    const snapshot = await snapshotStateRoot(fixture.root);
+    try {
+      const before = await readM5ManagedRecords(LOCATION(fixture.root));
+      await crashR2FAt(fixture, "BETWEEN_FINAL_VERIFIERS");
+      const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+      assert.equal(crashed.commandResults.filter((entry) => entry.command_id === "verify").length, before.commandResults.filter((entry) => entry.command_id === "verify").length + 1);
+      assert.equal(crashed.commandResults.filter((entry) => entry.command_id === "verify2").length, before.commandResults.filter((entry) => entry.command_id === "verify2").length);
+      const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+      assert.equal(result.final_phase, "PASS");
+      assert.equal(result.command_result_content_sha256.length, 2);
+      assert.equal(result.postflight_content_sha256.length, 3);
+    } finally {
+      await snapshot.cleanup();
+    }
+    const records = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(records.boundedWorkerInvocations.length, 2);
+    assert.equal(records.boundedWorkerResults.length, 2);
+    assert.equal(records.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL").length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2F reserves exact final verifier, postflight, and handover capacity", async (t) => {
+  const fixture = await settledWorkerFixture("DELTA_VERIFY");
+  try {
+    const r2e = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
+    await advanceTokenChain(fixture, 61);
+    const boundary = await snapshotStateRoot(fixture.root);
+    try {
+      await t.test("depth 61 fits one handover, verifier, and final postflight", async () => {
+        await boundary.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "PASS");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.stateTokens.filter((entry) => entry.source === "RESUME_LOCK_HANDOVER").length, before.stateTokens.filter((entry) => entry.source === "RESUME_LOCK_HANDOVER").length + 1);
+        assert.equal(after.commandResults.length, before.commandResults.length + 1);
+        assert.equal((await loadAuthoritativeToken(LOCATION(fixture.root), durableTokenTip(after), after.baselines[0]!)).chainDepth, 64);
+        const stableCounts = { tokens: after.stateTokens.length, commands: after.commandResults.length, postflights: after.postflights.length, decisions: after.decisions.length };
+        const repeated = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(repeated.final_phase, "PASS");
+        const stable = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.deepEqual({ tokens: stable.stateTokens.length, commands: stable.commandResults.length, postflights: stable.postflights.length, decisions: stable.decisions.length }, stableCounts);
+      });
+
+      await t.test("depth 62 refuses before any fresh handover", async () => {
+        await boundary.restore();
+        await advanceTokenChain(fixture, 62);
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "STATE_TOKEN_CHAIN_TOO_DEEP");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "STATIC_DAG_VERIFYING");
+        assert.equal(after.stateTokens.length, before.stateTokens.length);
+        assert.equal(after.commandResults.length, before.commandResults.length);
+        assert.equal(after.postflights.length, before.postflights.length);
+      });
+    } finally {
+      await boundary.cleanup();
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2F enforces the durable workflow timing gates", async (t) => {
+  const fixture = await settledWorkerFixture("DELTA_VERIFY");
+  try {
+    const r2e = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
+    const workflow = await r2eWorkflowAuthority(fixture.root);
+    const snapshot = await snapshotStateRoot(fixture.root);
+    try {
+      await t.test("workflow expiry before final verification", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        installTestWallClock(() => workflow.started_at_epoch_ms + workflow.wall_budget_ms);
+        try {
+          await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+        } finally {
+          installTestWallClock(null);
+        }
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.commandResults.length, before.commandResults.length);
+        assert.equal(after.postflights.length, before.postflights.length);
+      });
+
+      await t.test("expiry after durable final verifier evidence", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+          if (value === "AFTER_FINAL_VERIFIER") installTestWallClock(() => workflow.started_at_epoch_ms + workflow.wall_budget_ms);
+        } });
+        try {
+          await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+        } finally {
+          configureResumeReconciliationTestHooks(undefined);
+        }
+        const afterEvidence = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(afterEvidence.commandResults.length, before.commandResults.length + 1);
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "STATIC_DAG_VERIFYING");
+        await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+        installTestWallClock(null);
+      });
+
+      await t.test("expiry before terminal evaluation", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+          if (value === "AFTER_FINAL_POSTFLIGHT") installTestWallClock(() => workflow.started_at_epoch_ms + workflow.wall_budget_ms);
+        } });
+        try {
+          await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+        } finally {
+          configureResumeReconciliationTestHooks(undefined);
+        }
+        const afterPostflight = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(afterPostflight.commandResults.length, before.commandResults.length + 1);
+        assert.equal(afterPostflight.postflights.length, before.postflights.length + 2);
+        assert.equal(afterPostflight.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL").length, 0);
+        await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TIMING_AUTHORITY");
+        installTestWallClock(null);
+      });
+    } finally {
+      installTestWallClock(null);
+      await snapshot.cleanup();
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("R2E maps verifier failure without starting a repair worker", async (t) => {
   for (const [mode, expectedPhase] of [["READY_VERIFY_FAIL", "BLOCKED"], ["READY_VERIFY_RETRY", "LEAF_RETRY_READY"]] as const) {
     await t.test(mode, async () => {
@@ -647,6 +940,8 @@ test("R2E maps verifier failure without starting a repair worker", async (t) => 
         assert.equal(result.verification_outcome, "FAILED");
         assert.equal(result.failure_class, "LOCAL_IMPLEMENTATION_DEFECT");
         assert.equal(result.final_phase, expectedPhase);
+        if (expectedPhase === "LEAF_RETRY_READY") await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_EXECUTION_AUTHORITY");
+        else await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TERMINAL");
         const records = await readM5ManagedRecords(LOCATION(fixture.root));
         assert.equal(records.boundedWorkerInvocations.length, 1);
         assert.equal(records.boundedWorkerResults.length, 1);
