@@ -58,8 +58,13 @@ test("postflight accepts exact in-scope modification, deletion, untracked, and m
   await t.test("one modification", async () => {
     const fixture = await createRepositoryFixture(); const admission = await createCleanAdmission(fixture);
     try {
+      assert.equal(admission.full.preflight.result, "PASS");
+      assert.equal(admission.full.acceptedState.source, "FULL_PREFLIGHT");
       await writeFile(fixture.trackedPath, "one\n");
       const result = await runPostflight(postOptions(fixture, admission, ["tracked.txt"]));
+      assert.equal(result.postflight.workflow_owned_delta.length, 1);
+      assert.equal(result.postflight.repository_git_delta.length, 1);
+      assert.equal(result.acceptedState.source, "POSTFLIGHT");
       assert.deepEqual(result.postflight.workflow_owned_delta.map((entry) => entry.path), ["tracked.txt"]);
       assert.equal(result.acceptedState.git_fingerprint.content_sha256, result.postflight.git_fingerprint.content_sha256);
       assert.equal(result.acceptedState.source_content_sha256, result.postflight.content_sha256);
