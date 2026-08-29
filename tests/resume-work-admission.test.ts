@@ -361,19 +361,33 @@ async function inspectAndAcquireWithoutLock(root: string): Promise<unknown> {
   return acquireDeterministicResumeAdmission({ retainedRunRoot: root });
 }
 
-test("existing worker result refuses resume and preserves the evidence unchanged", async () => {
+test("existing settled worker result is resumable for R2E and preserves the evidence unchanged", async () => {
   const fixture = await interruptFixture("RESULT");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
   try {
-    const report = await eventuallyRefused(fixture.root);
-    assert.equal(report.classification, "RESUME_REFUSED");
+    const report = await eventuallyResumable(fixture.root);
+    assert.equal(report.classification, "RESUMABLE");
+    assert.equal(report.phase, "LEAF_RUNNING");
+    assert.equal(report.resume_point, "STATIC_DAG_RECONCILE_SETTLED_LEAF:a");
+    assert.equal(report.reason, null);
     const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
     assert.equal(recordsBefore.boundedWorkerInvocations.length, 1);
     assert.equal(recordsBefore.boundedWorkerResults.length, 1);
-    await assert.rejects(inspectAndAcquireWithoutLock(fixture.root));
+    const invocationsBefore = canonicalize(recordsBefore.boundedWorkerInvocations);
+    const resultsBefore = canonicalize(recordsBefore.boundedWorkerResults);
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    assert.equal(admission.binding.resume_point, "STATIC_DAG_RECONCILE_SETTLED_LEAF:a");
+    await releaseDeterministicResumeAdmission(admission);
+    admission = undefined;
     const recordsAfter = await readM5ManagedRecords(LOCATION(fixture.root));
-    assert.equal(canonicalize(recordsAfter.boundedWorkerInvocations), canonicalize(recordsBefore.boundedWorkerInvocations));
-    assert.equal(canonicalize(recordsAfter.boundedWorkerResults), canonicalize(recordsBefore.boundedWorkerResults));
-  } finally { await fixture.cleanup(); }
+    assert.equal(recordsAfter.boundedWorkerInvocations.length, 1);
+    assert.equal(recordsAfter.boundedWorkerResults.length, 1);
+    assert.equal(canonicalize(recordsAfter.boundedWorkerInvocations), invocationsBefore);
+    assert.equal(canonicalize(recordsAfter.boundedWorkerResults), resultsBefore);
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
 });
 
 test("contradictory authority refuses fail-closed", async () => {
@@ -539,18 +553,37 @@ test("current b invocation refuses while historical a invocation remains allowed
   } finally { await fixture.cleanup(); }
 });
 
-test("current b result refuses and preserves its exact bytes", async () => {
+test("current b settled result is resumable for R2E and preserves its exact bytes", async () => {
   const fixture = await interruptFixture("RESULT_B");
+  let admission: Awaited<ReturnType<typeof acquireDeterministicResumeAdmission>> | undefined;
   try {
-    const report = await eventuallyRefused(fixture.root);
-    assert.equal(report.classification, "RESUME_REFUSED");
+    const report = await eventuallyResumable(fixture.root);
+    assert.equal(report.classification, "RESUMABLE");
+    assert.equal(report.phase, "LEAF_RUNNING");
+    assert.equal(report.resume_point, "STATIC_DAG_RECONCILE_SETTLED_LEAF:b");
+    assert.equal(report.reason, null);
     const recordsBefore = await readM5ManagedRecords(LOCATION(fixture.root));
     assert.equal(recordsBefore.boundedWorkerInvocations.length, 2);
     assert.equal(recordsBefore.boundedWorkerResults.length, 2);
-    await assert.rejects(inspectAndAcquireWithoutLock(fixture.root));
+    const aBefore = currentOperationWorkerRecords(recordsBefore, "static-leaf-a-attempt-1");
+    const bBefore = currentOperationWorkerRecords(recordsBefore, "static-leaf-b-attempt-1");
+    admission = await acquireDeterministicResumeAdmission({ retainedRunRoot: fixture.root });
+    assert.equal(admission.binding.resume_point, "STATIC_DAG_RECONCILE_SETTLED_LEAF:b");
+    await releaseDeterministicResumeAdmission(admission);
+    admission = undefined;
     const recordsAfter = await readM5ManagedRecords(LOCATION(fixture.root));
-    assert.equal(canonicalize(recordsAfter.boundedWorkerResults), canonicalize(recordsBefore.boundedWorkerResults));
-  } finally { await fixture.cleanup(); }
+    assert.equal(recordsAfter.boundedWorkerInvocations.length, 2);
+    assert.equal(recordsAfter.boundedWorkerResults.length, 2);
+    const aAfter = currentOperationWorkerRecords(recordsAfter, "static-leaf-a-attempt-1");
+    const bAfter = currentOperationWorkerRecords(recordsAfter, "static-leaf-b-attempt-1");
+    assert.equal(canonicalize(aAfter.invocations), canonicalize(aBefore.invocations));
+    assert.equal(canonicalize(aAfter.results), canonicalize(aBefore.results));
+    assert.equal(canonicalize(bAfter.invocations), canonicalize(bBefore.invocations));
+    assert.equal(canonicalize(bAfter.results), canonicalize(bBefore.results));
+  } finally {
+    if (admission !== undefined) await releaseDeterministicResumeAdmission(admission).catch(() => undefined);
+    await fixture.cleanup();
+  }
 });
 
 test("unsettled historical operation refuses the later leaf fail-closed", async () => {

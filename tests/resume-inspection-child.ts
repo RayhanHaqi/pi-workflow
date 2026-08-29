@@ -74,7 +74,7 @@ async function main(): Promise<void> {
       // Exact WINDOW B seam: START_LEAF_ATTEMPT committed and classified, response not yet returned to the caller.
       pause = true;
     } else if (mode === "RESULT" && checkpoint === "BEFORE_TRANSITION_EVIDENCE_PUBLICATION" && state?.phase === "LEAF_RUNNING") {
-      // Result exists while the reducer remains LEAF_RUNNING: the exact refusal seam for existing worker evidence.
+      // Result exists while the reducer remains LEAF_RUNNING: durable settled-result R2E reconciliation seam.
       const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
       pause = records.boundedWorkerInvocations.length === 1 && records.boundedWorkerResults.length === 1;
     } else if (mode === "WINDOW_A_B" && checkpoint === "AFTER_DECISION_PUBLICATION" && state?.phase === "LEAF_FAST_PREFLIGHT") {
@@ -86,7 +86,7 @@ async function main(): Promise<void> {
       const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
       pause = records.decisions.some((decision) => decision.content_sha256 === detail && decision.operation_id === "static-leaf-b-attempt-1");
     } else if (mode === "RESULT_B" && checkpoint === "BEFORE_TRANSITION_EVIDENCE_PUBLICATION" && state?.phase === "LEAF_RUNNING") {
-      // Leaf b's result exists while the reducer remains LEAF_RUNNING: current-operation refusal seam.
+      // Leaf b's result exists while the reducer remains LEAF_RUNNING: durable settled-result R2E reconciliation seam.
       const records = await readM5ManagedRecords({ stateRoot, runId: "pre-m8-bounded" });
       pause = records.boundedWorkerInvocations.length === 2 && records.boundedWorkerResults.length === 2;
     }
