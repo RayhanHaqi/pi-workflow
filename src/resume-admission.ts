@@ -8,7 +8,7 @@ import { boundedWorkerSystemPrompt, BOUNDED_WORKER_MAX_TOOL_CALLS, BOUNDED_WORKE
 import type { BoundedWorkerExecutionResult, RunBoundedWorkerInput } from "./pi-adapter/bounded-worker.js";
 import { createScopedToolGateway } from "./scoped-tools/index.js";
 import { buildBoundedWorkerUsageEvidence } from "./control/usage-evidence.js";
-import type { M5AuthoritativeSources, M5ObligationEvidenceInput } from "./control/types.js";
+import type { M5AuthoritativeSources, M5FailureInput, M5ObligationEvidenceInput } from "./control/types.js";
 import { sha256Canonical, type Sha256Digest } from "./identity/index.js";
 import { commitTransition, inspectRunStorage } from "./persistence/index.js";
 import { establishNodeStaticTimeAuthority, readM5ManagedRecords } from "./persistence/store.js";
@@ -212,6 +212,19 @@ async function cleanupResumedWorkerOwnership(state: OwnedLockState, temporaryRoo
   try { await releaseOwnedLock(state); }
   catch (error: unknown) { if (!cleanupFailed) cleanupError = error; cleanupFailed = true; }
   if (cleanupFailed) throw cleanupError;
+}
+
+async function cleanupR2FOwnership(lock: WorktreeLockHandle | undefined, temporaryRoot: string | undefined): Promise<void> {
+  let cleanupError: unknown;
+  if (temporaryRoot !== undefined) {
+    try { await rm(temporaryRoot, { recursive: true, force: true }); }
+    catch (error: unknown) { cleanupError = error; }
+  }
+  if (lock !== undefined) {
+    try { await releaseWorktreeLock(lock); }
+    catch (error: unknown) { cleanupError ??= error; }
+  }
+  if (cleanupError !== undefined) throw cleanupError;
 }
 
 /** Acquires M3's existing flock and derives admission only from authority freshly revalidated under it. */
@@ -1614,7 +1627,8 @@ interface DurableFinalPostflight {
 
 type FinalPostflightResolution =
   | { readonly status: "ABSENT" }
-  | { readonly status: "RESOLVED"; readonly evidence: DurableFinalPostflight };
+  | { readonly status: "RESOLVED"; readonly evidence: DurableFinalPostflight }
+  | { readonly status: "OUTPUT_DELTA_MISMATCH"; readonly evidence: DurableFinalPostflight };
 
 interface ChainedVerifierEvidence {
   readonly tokenIndex: number;
@@ -1626,6 +1640,8 @@ interface R2FFinalProgress {
   readonly remaining: readonly M4CommandSpecification[];
   readonly cursor: string;
   readonly finalPostflight: DurableFinalPostflight | null;
+  readonly failed: DurableVerifierEvidence | null;
+  readonly outputDeltaMismatch: boolean;
   readonly durableReuse: boolean;
 }
 
@@ -1837,15 +1853,17 @@ function resolveFinalPostflight(context: R2FContext, requiredOutputs: readonly s
   const commandReferences = context.records.commandResults.filter((entry) => entry.postflight_content_sha256 === postflight.content_sha256);
   if (commandReferences.length > 0) return { status: "ABSENT" };
   const paths = postflight.workflow_owned_delta.map((entry) => entry.path).sort();
+  const outputDeltaMismatch = canonicalize(paths) !== canonicalize([...requiredOutputs].sort());
   if (postflight.run_id !== context.authority.policy.run_id || !classificationsInclude(context.inspection.managedRecordClassifications, "M3_POSTFLIGHT", postflight.content_sha256, "AUTHORITATIVE_MANAGED_RECORD") ||
       postflight.prior_token_content_sha256 !== token.prior_token_content_sha256 || postflight.baseline_runtime_content_sha256 !== context.authority.baseline.content_sha256 ||
       postflight.result !== "PASS" || postflight.blockers.length !== 0 || postflight.claimed_workflow_paths.length !== 0 ||
-      canonicalize(paths) !== canonicalize([...requiredOutputs].sort()) || postflight.scope.scope_identity !== context.authority.policy.scope_sha256 ||
+      postflight.scope.scope_identity !== context.authority.policy.scope_sha256 ||
       canonicalize(postflight.scope.editable_paths) !== canonicalize([...context.authority.contract.scope.editable_paths].sort()) ||
       canonicalize(postflight.scope.frozen_paths) !== canonicalize([...context.authority.contract.scope.frozen_paths].sort()) ||
       token.source_content_sha256 !== postflight.content_sha256 || token.source !== "POSTFLIGHT" || token.workflow_owned_delta_sha256 !== sha256Canonical(postflight.workflow_owned_delta) ||
       canonicalize(token.changed_paths) !== canonicalize(paths)) return refused("RESUME_REFUSED_STATE_STORE");
-  return { status: "RESOLVED", evidence: { postflight, nextToken: token } };
+  const evidence = { postflight, nextToken: token };
+  return outputDeltaMismatch ? { status: "OUTPUT_DELTA_MISMATCH", evidence } : { status: "RESOLVED", evidence };
 }
 
 function advanceR2FHandoverTokens(chain: readonly M3RepositoryStateTokenDocument[], cursor: string): string | null {
@@ -1896,18 +1914,24 @@ function deriveR2FFinalProgress(context: R2FContext, specs: readonly M4CommandSp
       }
     }
     if (evidence === null) {
-      if (finalPostflight.status === "RESOLVED" || cursor !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
-      return { completed, remaining: specs.slice(index), cursor, finalPostflight: null, durableReuse: completed.length > 0 };
+      if (finalPostflight.status !== "ABSENT" || cursor !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+      return { completed, remaining: specs.slice(index), cursor, finalPostflight: null, failed: null, outputDeltaMismatch: false, durableReuse: completed.length > 0 };
     }
     const tokenIndex = context.chain.findIndex((entry) => entry.content_sha256 === cursor);
-    if (tokenIndex < 0 || context.chain[tokenIndex + 1]?.content_sha256 !== evidence.nextToken.content_sha256 || evidence.result.outcome !== "PASS") return refused("RESUME_REFUSED_STATE_STORE");
+    if (tokenIndex < 0 || context.chain[tokenIndex + 1]?.content_sha256 !== evidence.nextToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
+    if (evidence.result.outcome === "BLOCKED") {
+      if (evidence.result.failure_code === null) return refused("RESUME_REFUSED_STATE_STORE");
+      return { completed, remaining: [], cursor: evidence.nextToken.content_sha256, finalPostflight: null, failed: evidence, outputDeltaMismatch: false, durableReuse: true };
+    }
+    if (evidence.result.outcome !== "PASS") return refused("RESUME_REFUSED_STATE_STORE");
     completed.push(evidence);
     cursor = evidence.nextToken.content_sha256;
   }
-  if (finalPostflight.status === "RESOLVED") {
+  if (finalPostflight.status !== "ABSENT") {
     if (cursor !== finalPostflight.evidence.postflight.prior_token_content_sha256 || finalPostflight.evidence.nextToken.prior_token_content_sha256 !== cursor) return refused("RESUME_REFUSED_STATE_STORE");
   } else if (cursor !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
-  return { completed, remaining: [], cursor, finalPostflight: finalPostflight.status === "RESOLVED" ? finalPostflight.evidence : null, durableReuse: completed.length > 0 || finalPostflight.status === "RESOLVED" };
+  return { completed, remaining: [], cursor, finalPostflight: finalPostflight.status === "ABSENT" ? null : finalPostflight.evidence, failed: null,
+    outputDeltaMismatch: finalPostflight.status === "OUTPUT_DELTA_MISMATCH", durableReuse: completed.length > 0 || finalPostflight.status !== "ABSENT" };
 }
 
 function assertR2FCapacity(context: R2FContext, remainingVerifierCount: number, finalPostflightRequired: boolean): void {
@@ -1916,16 +1940,21 @@ function assertR2FCapacity(context: R2FContext, remainingVerifierCount: number, 
   if (context.currentTokenAuthority.chainDepth + demand > 64) return refused("STATE_TOKEN_CHAIN_TOO_DEEP");
 }
 
+function finalCommandObligationEvidence(authority: R2FAuthority, results: readonly M4CommandResultDocument[]): readonly M5ObligationEvidenceInput[] {
+  return results.map((entry) => {
+    const matches = authority.policy.obligations.filter((candidate) => candidate.direction === "OUTPUT" && candidate.literal === entry.command_id);
+    if (matches.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+    return { descriptorSha256: matches[0]!.descriptor_sha256 as Sha256Digest, value: entry.command_id, evidenceContentSha256: entry.content_sha256 as Sha256Digest };
+  });
+}
+
 function finalObligationEvidence(authority: R2FAuthority, results: readonly M4CommandResultDocument[], postflight: M3PostflightDocument): readonly M5ObligationEvidenceInput[] {
-  const obligation = (value: string): M5ControlPolicyDocument["obligations"][number] => {
+  const outputs = authority.contract.required_outputs.map((value) => {
     const matches = authority.policy.obligations.filter((entry) => entry.direction === "OUTPUT" && entry.literal === value);
     if (matches.length !== 1) return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
-    return matches[0]!;
-  };
-  return [
-    ...authority.contract.required_outputs.map((value) => ({ descriptorSha256: obligation(value).descriptor_sha256 as Sha256Digest, value, evidenceContentSha256: postflight.content_sha256 as Sha256Digest })),
-    ...results.map((entry) => ({ descriptorSha256: obligation(entry.command_id).descriptor_sha256 as Sha256Digest, value: entry.command_id, evidenceContentSha256: entry.content_sha256 as Sha256Digest })),
-  ];
+    return { descriptorSha256: matches[0]!.descriptor_sha256 as Sha256Digest, value, evidenceContentSha256: postflight.content_sha256 as Sha256Digest };
+  });
+  return [...outputs, ...finalCommandObligationEvidence(authority, results)];
 }
 
 function r2FSources(context: R2FContext, results: readonly M4CommandResultDocument[], postflight: DurableFinalPostflight): M5AuthoritativeSources {
@@ -1934,6 +1963,56 @@ function r2FSources(context: R2FContext, results: readonly M4CommandResultDocume
     boundedStaticPreM8: true, contract: authority.contract, budget: authority.budget, routeMap: authority.routeMap, routeMapApproval: authority.routeMapApproval,
     m4ToolPolicy: authority.toolPolicy, m4CommandCatalog: authority.commandCatalog, planApprovals: [authority.planApproval], taskGraphs: [authority.taskGraph], tasks: authority.tasks,
     m3StateTokens: [postflight.nextToken], m3Postflights: [postflight.postflight], m4CommandResults: results,
+  };
+}
+interface R2FTerminalBlock {
+  readonly decision: M5ControlDecisionDocument;
+  readonly workflowState: WorkflowState;
+}
+
+async function commitR2FBlock(
+  context: R2FContext,
+  results: readonly M4CommandResultDocument[],
+  postflight: DurableFinalPostflight,
+  reason: string,
+  failure?: M5FailureInput,
+): Promise<R2FTerminalBlock> {
+  const sources = r2FSources(context, results, postflight);
+  const kernel = createControlDecisionKernel({
+    stateRoot: context.location.stateRoot, runId: context.authority.policy.run_id, policy: context.authority.policy, reducerPolicy: context.authority.reducerPolicy,
+    runAuthority: { repositoryIdentity: context.authority.repositoryIdentity, contract: context.authority.contract, routeMap: context.authority.routeMap, routeMapApproval: context.authority.routeMapApproval },
+    authoritativeSources: sources, production: true,
+  });
+  const terminal = await kernel.evaluateControlDecision({
+    intent: "BLOCK", expectedRevision: context.inspection.revision, expectedStatePointerContentSha256: context.inspection.statePointer.content_sha256 as Sha256Digest,
+    expectedWorkflowStateContentSha256: context.inspection.workflowState.content_sha256 as Sha256Digest,
+    transitionId: `pre-m8-block-${sha256Canonical({ detail: reason, state: context.inspection.workflowState.content_sha256 }).slice(7, 23)}`,
+    blockReason: reason, processMetadata: resumeProcessMetadata(), authoritativeSources: sources,
+    availableLogicalRoles: resumedAvailableLogicalRoles(context.authority.policy),
+    ...(failure === undefined ? {} : { failures: [failure] }),
+    obligationEvidence: failure === undefined ? finalObligationEvidence(context.authority, results, postflight.postflight) : finalCommandObligationEvidence(context.authority, results),
+  });
+  if (!terminal.committed || terminal.decision.outcome !== "BLOCK" || terminal.decision.blocking_reason !== reason || terminal.workflowState.phase !== "BLOCKED") {
+    return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+  }
+  const persisted = await inspectRunStorage(context.location);
+  if (!isHealthyR2EInspection(persisted) || persisted.workflowState.phase !== "BLOCKED" || persisted.workflowState.content_sha256 !== terminal.workflowState.content_sha256) {
+    return refused("RESUME_REFUSED_STATE_STORE");
+  }
+  return { decision: terminal.decision, workflowState: terminal.workflowState };
+}
+function finalVerifierFailureAuthority(context: R2FContext, evidence: DurableVerifierEvidence): { readonly reason: string; readonly failure: M5FailureInput } {
+  const failureCode = evidence.result.failure_code;
+  if (failureCode === null) return refused("RESUME_REFUSED_STATE_STORE");
+  const failureClass = mapLowerLayerFailureCode(failureCode, "M4");
+  return {
+    reason: `BLOCKED_${failureClass}:${failureCode}`,
+    failure: {
+      sourceLayer: "M4", sourceErrorCode: failureCode, sourceRecordContentSha256: evidence.result.content_sha256 as Sha256Digest,
+      normalizedSignature: sha256Canonical({ protocol: "static-final-verifier-v1", command_id: evidence.result.command_id, command_spec_sha256: evidence.result.command_spec_sha256, failure_code: failureCode }),
+      scopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, repositoryIdentity: context.authority.policy.repository_identity_content_sha256 as Sha256Digest,
+      worktreeKey: context.authority.policy.worktree_key as Sha256Digest,
+    },
   };
 }
 
@@ -1972,6 +2051,24 @@ function completionResult(
     command_result_content_sha256: commandResults, postflight_content_sha256: postflights, final_postflight_content_sha256: finalPostflight.postflight.content_sha256 as Sha256Digest,
     m5_decision_content_sha256: decision.content_sha256 as Sha256Digest, output_delta: Object.freeze([...finalPostflight.postflight.workflow_owned_delta]), durable_reuse: durableReuse,
     static_dag_verification_passed: true, worker_started: false, worker_replay: false, provider_call: false, provider_replay: false, attempt_2_started: false, lock_released: true,
+  });
+}
+function blockedCompletionResult(
+  context: R2FContext,
+  progress: R2FFinalProgress,
+  terminal: R2FTerminalBlock,
+): DeterministicResumeStaticDagCompletionResult {
+  const evidence = [...progress.completed, ...(progress.failed === null ? [] : [progress.failed])];
+  const commandResults = Object.freeze(evidence.map((entry) => entry.result.content_sha256 as Sha256Digest));
+  const postflights = Object.freeze([...evidence.map((entry) => entry.postflight.content_sha256 as Sha256Digest), ...(progress.finalPostflight === null ? [] : [progress.finalPostflight.postflight.content_sha256 as Sha256Digest])]);
+  return Object.freeze({
+    run_id: context.authority.policy.run_id, phase: context.inspection.workflowState.phase, final_phase: terminal.workflowState.phase,
+    terminal_reason: terminal.workflowState.terminal_reason, final_state: terminal.workflowState, next_leaf_task_id: null, next_leaf_boundary: null, next_resume_point: null,
+    command_result_content_sha256: commandResults, postflight_content_sha256: postflights,
+    final_postflight_content_sha256: progress.finalPostflight?.postflight.content_sha256 as Sha256Digest | null,
+    m5_decision_content_sha256: terminal.decision.content_sha256 as Sha256Digest, output_delta: Object.freeze(progress.finalPostflight === null ? [] : [...progress.finalPostflight.postflight.workflow_owned_delta]),
+    durable_reuse: true, static_dag_verification_passed: false, worker_started: false, worker_replay: false, provider_call: false, provider_replay: false,
+    attempt_2_started: false, lock_released: true,
   });
 }
 
@@ -2017,10 +2114,22 @@ export async function completeDeterministicResumedStaticDag(input: ResumeInspect
     const specs = finalVerifierSpecs(context.authority);
     const progress = deriveR2FFinalProgress(context, specs);
     if (context.inspection.workflowState.phase === "PASS") {
-      if (progress.remaining.length !== 0 || progress.finalPostflight === null) return refused("RESUME_REFUSED_STATE_STORE");
+      if (progress.remaining.length !== 0 || progress.finalPostflight === null || progress.failed !== null || progress.outputDeltaMismatch) return refused("RESUME_REFUSED_STATE_STORE");
       const decision = terminalDecisionForPass(context);
       assertStaticDagPassAuthority(context, decision);
       return completionResult(context, progress, progress.finalPostflight, decision, true);
+    }
+    if (progress.failed !== null) {
+      assertR2FTiming(context);
+      const failure = finalVerifierFailureAuthority(context, progress.failed);
+      const terminal = await commitR2FBlock(context, [...progress.completed, progress.failed].map((entry) => entry.result), progress.failed, failure.reason, failure.failure);
+      return blockedCompletionResult(context, progress, terminal);
+    }
+    if (progress.outputDeltaMismatch) {
+      assertR2FTiming(context);
+      if (progress.finalPostflight === null) return refused("RESUME_REFUSED_STATE_STORE");
+      const terminal = await commitR2FBlock(context, progress.completed.map((entry) => entry.result), progress.finalPostflight, "BLOCKED_OUTPUT_DELTA_MISMATCH");
+      return blockedCompletionResult(context, progress, terminal);
     }
     assertR2FTiming(context);
     const finalPostflightRequired = progress.finalPostflight === null;
@@ -2070,7 +2179,15 @@ export async function completeDeterministicResumedStaticDag(input: ResumeInspect
             context.inspection.managedRecordClassifications, spec, cursor);
           if (evidence === null || evidence.nextToken.content_sha256 !== context.authority.currentToken.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
         }
-        if (evidence.result.outcome !== "PASS") return refused("RESUME_REFUSED_EXECUTION_AUTHORITY");
+        if (evidence.result.outcome === "BLOCKED") {
+          const failedProgress: R2FFinalProgress = { completed, remaining: [], cursor: evidence.nextToken.content_sha256, finalPostflight: null, failed: evidence, outputDeltaMismatch: false, durableReuse: true };
+          await resumeReconciliationCheckpoint("AFTER_FINAL_VERIFIER");
+          assertR2FTiming(context);
+          const failure = finalVerifierFailureAuthority(context, evidence);
+          const terminal = await commitR2FBlock(context, [...completed, evidence].map((entry) => entry.result), evidence, failure.reason, failure.failure);
+          return blockedCompletionResult(context, failedProgress, terminal);
+        }
+        if (evidence.result.outcome !== "PASS") return refused("RESUME_REFUSED_STATE_STORE");
         completed.push(evidence);
         cursor = evidence.nextToken.content_sha256;
         assertR2FTiming(context);
@@ -2079,6 +2196,7 @@ export async function completeDeterministicResumedStaticDag(input: ResumeInspect
       }
     }
     let finalPostflight = progress.finalPostflight;
+    let outputDeltaMismatch: boolean = progress.outputDeltaMismatch;
     if (finalPostflight !== null) cursor = finalPostflight.nextToken.content_sha256;
     else {
       const atCurrent = advanceR2FHandoverTokens(context.chain, cursor);
@@ -2092,17 +2210,23 @@ export async function completeDeterministicResumedStaticDag(input: ResumeInspect
         instructionFiles: [], authorityFiles: [], editablePaths: [...context.authority.contract.scope.editable_paths], frozenPaths: [...context.authority.contract.scope.frozen_paths],
         taskScopeIdentity: context.authority.policy.scope_sha256 as Sha256Digest, claimedWorkflowPaths: [], lock,
       });
-      if (canonicalize(postflight.postflight.workflow_owned_delta.map((entry) => entry.path).sort()) !== canonicalize([...context.authority.contract.required_outputs].sort())) return refused("RESUME_REFUSED_STATE_STORE");
       context = await readR2FContext(location);
       if (context.authority.currentToken.content_sha256 !== postflight.acceptedState.content_sha256) return refused("RESUME_REFUSED_STATE_STORE");
       const resolved = resolveFinalPostflight(context, context.authority.contract.required_outputs);
-      finalPostflight = resolved.status === "RESOLVED" ? resolved.evidence : null;
+      finalPostflight = resolved.status === "ABSENT" ? null : resolved.evidence;
+      outputDeltaMismatch = resolved.status === "OUTPUT_DELTA_MISMATCH";
       if (finalPostflight === null) return refused("RESUME_REFUSED_STATE_STORE");
       await resumeReconciliationCheckpoint("AFTER_FINAL_POSTFLIGHT");
       assertR2FTiming(context);
     }
+    if (outputDeltaMismatch) {
+      assertR2FTiming(context);
+      if (finalPostflight === null) return refused("RESUME_REFUSED_STATE_STORE");
+      const mismatchProgress: R2FFinalProgress = { completed, remaining: [], cursor: finalPostflight.nextToken.content_sha256, finalPostflight, failed: null, outputDeltaMismatch: true, durableReuse: true };
+      const terminal = await commitR2FBlock(context, completed.map((entry) => entry.result), finalPostflight, "BLOCKED_OUTPUT_DELTA_MISMATCH");
+      return blockedCompletionResult(context, mismatchProgress, terminal);
+    }
     if (finalPostflight === null || completed.length !== specs.length) return refused("RESUME_REFUSED_STATE_STORE");
-    assertR2FTiming(context);
     const sources = r2FSources(context, completed.map((entry) => entry.result), finalPostflight);
     const kernel = createControlDecisionKernel({
       stateRoot: location.stateRoot, runId: context.authority.policy.run_id, policy: context.authority.policy, reducerPolicy: context.authority.reducerPolicy,
@@ -2119,10 +2243,9 @@ export async function completeDeterministicResumedStaticDag(input: ResumeInspect
     assertStaticDagPassAuthority(context, terminal.decision);
     await resumeReconciliationCheckpoint("AFTER_TERMINAL_DECISION");
     await resumeReconciliationCheckpoint("AFTER_PASS_TRANSITION");
-    const refreshedProgress: R2FFinalProgress = { completed, remaining: [], cursor: finalPostflight.nextToken.content_sha256, finalPostflight, durableReuse: progress.durableReuse };
+    const refreshedProgress: R2FFinalProgress = { completed, remaining: [], cursor: finalPostflight.nextToken.content_sha256, finalPostflight, failed: null, outputDeltaMismatch: false, durableReuse: progress.durableReuse };
     return completionResult(context, refreshedProgress, finalPostflight, terminal.decision, refreshedProgress.durableReuse);
   } finally {
-    if (temporaryRoot !== undefined) await rm(temporaryRoot, { recursive: true, force: true });
-    if (lock !== undefined) await releaseWorktreeLock(lock);
+    await cleanupR2FOwnership(lock, temporaryRoot);
   }
 }

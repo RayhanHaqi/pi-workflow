@@ -12,7 +12,7 @@ import { runBoundedMutationWorkflowForTests, type BoundedMutationAuthority, type
 
 const execFileAsync = promisify(execFile);
 const mode = process.argv[2];
-if (process.send === undefined || !["READY", "READY_VERIFY", "READY_VERIFY_FAIL", "READY_VERIFY_RETRY", "READY_VERIFY_TWO", "READY_VERIFY_TIMEOUT", "READY_LIMIT_1", "DELTA", "DELTA_VERIFY", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT", "WINDOW_A_B", "WINDOW_B_B", "WORKER_B", "RESULT_B"].includes(mode ?? "")) {
+if (process.send === undefined || !["READY", "READY_VERIFY", "READY_VERIFY_FAIL", "READY_VERIFY_RETRY", "READY_VERIFY_TWO", "READY_VERIFY_TIMEOUT", "READY_VERIFY_FINAL_FAIL", "DELTA_VERIFY_EXTRA_OUTPUT", "READY_LIMIT_1", "DELTA", "DELTA_VERIFY", "M5", "WORKER", "AMBIGUOUS", "WINDOW_A", "WINDOW_B", "RESULT", "WINDOW_A_B", "WINDOW_B_B", "WORKER_B", "RESULT_B"].includes(mode ?? "")) {
   throw new Error("resume-inspection-child requires a fixture mode and IPC");
 }
 
@@ -25,6 +25,7 @@ async function repository(): Promise<string> {
   const verificationScript = mode === "READY_VERIFY_TIMEOUT" ? "setTimeout(() => process.exit(0), 5_000);\n" : `process.exit(${mode === "READY_VERIFY_FAIL" || mode === "READY_VERIFY_RETRY" ? 1 : 0});\n`;
   await writeFile(join(root, "verify", "check.mjs"), verificationScript);
   if (mode === "READY_VERIFY_TWO") await writeFile(join(root, "verify", "check2.mjs"), "process.exit(0);\n");
+  if (mode === "READY_VERIFY_FINAL_FAIL") await writeFile(join(root, "verify", "final.mjs"), "process.exit(1);\n");
   await execFileAsync("git", ["add", "verify"], { cwd: root });
   await execFileAsync("git", ["commit", "-qm", "initial"], { cwd: root });
   return root;
@@ -48,6 +49,7 @@ async function main(): Promise<void> {
       // WORKER_B: leaf a completes normally (settled history); leaf b's invocation persists without a result.
       if (mode === "WORKER_B" && call === 2) { await announce(); await new Promise<void>(() => {}); }
       await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      if (mode === "DELTA_VERIFY_EXTRA_OUTPUT" && call === 1) await tools.writePath({ path: "extra.txt", operation: "CREATE", replacementBytes: Buffer.from("extra\n"), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
       tools.submitReport(`wrote ${path}`);
       // Non-null cost keeps usage-evidence identity exercised on its historically drift-prone dimension.
       return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0, inputTokens: 10, outputTokens: 20, costMicrousd: 1234 };
@@ -60,7 +62,7 @@ async function main(): Promise<void> {
     let pause = false;
     if (checkpoint === "AFTER_STATE_POINTER_UPDATE") {
       const ready = (mode === "READY" || mode === "READY_VERIFY" || mode === "READY_VERIFY_FAIL" || mode === "READY_VERIFY_RETRY" || mode === "READY_VERIFY_TWO" || mode === "READY_VERIFY_TIMEOUT" || mode === "READY_LIMIT_1") && state?.phase === "READY" && state.tasks.every((task) => task.status === "PENDING");
-      const delta = (mode === "DELTA" || mode === "DELTA_VERIFY") && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
+      const delta = (mode === "DELTA" || mode === "DELTA_VERIFY" || mode === "READY_VERIFY_FINAL_FAIL" || mode === "DELTA_VERIFY_EXTRA_OUTPUT") && state?.phase === "READY" && state.tasks.find((task) => task.task_id === "a")?.status === "PASS";
       const reservation = mode === "M5" && state?.phase === "LEAF_RUNNING";
       const ambiguous = mode === "AMBIGUOUS" && state?.phase === "LEAF_FAST_PREFLIGHT";
       pause = ready || delta || reservation || ambiguous;
@@ -91,19 +93,20 @@ async function main(): Promise<void> {
     if (!pause) return;
     await announce(); await new Promise<void>(() => {});
   } });
-  const verificationEnabled = ["READY_VERIFY", "READY_VERIFY_FAIL", "READY_VERIFY_RETRY", "READY_VERIFY_TWO", "READY_VERIFY_TIMEOUT", "DELTA_VERIFY"].includes(mode ?? "");
+  const verificationEnabled = ["READY_VERIFY", "READY_VERIFY_FAIL", "READY_VERIFY_RETRY", "READY_VERIFY_TWO", "READY_VERIFY_TIMEOUT", "READY_VERIFY_FINAL_FAIL", "DELTA_VERIFY", "DELTA_VERIFY_EXTRA_OUTPUT"].includes(mode ?? "");
   const verificationCommandIds = mode === "READY_VERIFY_TWO" ? ["verify", "verify2"] : verificationEnabled ? ["verify"] : [];
   const goal: BoundedMutationGoal = {
     objective: "Write exactly two resume-fixture outputs.", stop_condition: "Stop after deterministic verification.", execution_mode: "STATIC_APPROVED_DAG",
-    scope: { readable_paths: ["verify"], editable_paths: ["a.txt", "b.txt"], frozen_paths: ["verify"] }, required_outputs: ["a.txt", "b.txt"],
+    scope: { readable_paths: ["verify"], editable_paths: mode === "DELTA_VERIFY_EXTRA_OUTPUT" ? ["a.txt", "b.txt", "extra.txt"] : ["a.txt", "b.txt"], frozen_paths: ["verify"] }, required_outputs: ["a.txt", "b.txt"],
     tasks: [
-      { task_id: "a", objective: "Write a.", editable_paths: ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: verificationCommandIds },
+      { task_id: "a", objective: "Write a.", editable_paths: mode === "DELTA_VERIFY_EXTRA_OUTPUT" ? ["a.txt", "extra.txt"] : ["a.txt"], required_outputs: ["a.txt"], dependencies: [], verification_command_ids: verificationCommandIds },
       { task_id: "b", objective: "Write b.", editable_paths: ["b.txt"], required_outputs: ["b.txt"], dependencies: ["a"], verification_command_ids: verificationCommandIds },
     ],
   };
   const verificationCommands: BoundedMutationAuthority["verification_commands"] = [
     { command_id: "verify", executable: process.execPath, args: ["check.mjs"], cwd: "verify", timeout_ms: mode === "READY_VERIFY_TIMEOUT" ? 1_000 : 10_000, readable_paths: [{ path: "verify", kind: "PREFIX" as const }] },
     ...(mode === "READY_VERIFY_TWO" ? [{ command_id: "verify2", executable: process.execPath, args: ["check2.mjs"], cwd: "verify", timeout_ms: 10_000, readable_paths: [{ path: "verify", kind: "PREFIX" as const }] }] : []),
+    ...(mode === "READY_VERIFY_FINAL_FAIL" ? [{ command_id: "final-verify", executable: process.execPath, args: ["final.mjs"], cwd: "verify", timeout_ms: 10_000, readable_paths: [{ path: "verify", kind: "PREFIX" as const }] }] : []),
   ];
   const authority: BoundedMutationAuthority = { verification_commands: verificationCommands, static_max_attempts_per_leaf: mode === "READY_VERIFY_RETRY" ? 2 : 1, static_time_budgets: { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 }, ...(mode === "READY_LIMIT_1" ? { hard_mutation_tool_limit: 1 as const } : {}) };
   await runBoundedMutationWorkflowForTests(goal, { cwd: root, authority, retainedArtifactRoot: parent, approveTasks: async ({ plan }) => plan!.content_sha256 as `sha256:${string}` });

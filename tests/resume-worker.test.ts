@@ -27,7 +27,7 @@ import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.
 import { configureResumeReconciliationTestHooks } from "../src/resume-reconciliation-test-hooks.js";
 import { installTestWallClock } from "../src/wall-clock.js";
 
-type FixtureMode = "READY" | "READY_LIMIT_1" | "DELTA" | "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "READY_VERIFY_TWO" | "READY_VERIFY_TIMEOUT" | "DELTA_VERIFY";
+type FixtureMode = "READY" | "READY_LIMIT_1" | "DELTA" | "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "READY_VERIFY_TWO" | "READY_VERIFY_TIMEOUT" | "READY_VERIFY_FINAL_FAIL" | "DELTA_VERIFY_EXTRA_OUTPUT" | "DELTA_VERIFY";
 type ChildFixture = { readonly root: string; readonly repository: string; readonly cleanup: () => Promise<void> };
 
 async function interruptFixture(mode: FixtureMode): Promise<ChildFixture> {
@@ -153,7 +153,7 @@ async function eventuallyResumable(root: string) {
   return report;
 }
 
-async function settledWorkerFixture(mode: Extract<FixtureMode, "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "READY_VERIFY_TWO" | "READY_VERIFY_TIMEOUT" | "DELTA_VERIFY">): Promise<ChildFixture> {
+async function settledWorkerFixture(mode: Extract<FixtureMode, "READY_VERIFY" | "READY_VERIFY_FAIL" | "READY_VERIFY_RETRY" | "READY_VERIFY_TWO" | "READY_VERIFY_TIMEOUT" | "READY_VERIFY_FINAL_FAIL" | "DELTA_VERIFY_EXTRA_OUTPUT" | "DELTA_VERIFY">): Promise<ChildFixture> {
   const fixture = await interruptFixture(mode);
   const worker = startWorkerChild(fixture.root, "EXECUTE");
   try {
@@ -571,6 +571,16 @@ async function snapshotStateRoot(root: string): Promise<{ readonly restore: () =
   };
 }
 
+async function resumedStaticDagTempRoots(): Promise<readonly string[]> {
+  return (await readdir(tmpdir())).filter((entry) => entry.startsWith("pi-resumed-static-dag-")).sort();
+}
+
+async function assertR2FCleanup(fixture: ChildFixture, beforeTempRoots: readonly string[]): Promise<void> {
+  const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
+  assert.equal(await probeWorktreeLockAvailability({ stateRoot: join(fixture.root, "state"), repository }), "LOCK_AVAILABLE");
+  assert.deepEqual(await resumedStaticDagTempRoots(), beforeTempRoots);
+}
+
 async function crashR2EAt(fixture: ChildFixture, checkpoint: "AFTER_VERIFICATION_COMMAND" | "AFTER_PASS_LEAF_POSTFLIGHT"): Promise<void> {
   configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
     if (value === checkpoint) throw new Error(`R2E crash at ${checkpoint}`);
@@ -656,6 +666,7 @@ test("R2F completes a final static DAG without replaying workers", async () => {
     assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
     assert.equal((await inspectDeterministicResumeEligibility({ retainedRunRoot: fixture.root })).resume_point, "STATIC_DAG_COMPLETE");
     const before = await readM5ManagedRecords(LOCATION(fixture.root));
+    const tempRootsBefore = await resumedStaticDagTempRoots();
     const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
     assert.equal(result.final_phase, "PASS");
     assert.equal(result.terminal_reason, "PASS");
@@ -670,6 +681,7 @@ test("R2F completes a final static DAG without replaying workers", async () => {
     assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
     assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
     assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "PASS");
+    await assertR2FCleanup(fixture, tempRootsBefore);
   } finally {
     await fixture.cleanup();
   }
@@ -780,6 +792,114 @@ test("R2F crash replay reuses final evidence and terminal authority", async (t) 
     } finally {
       await snapshot.cleanup();
     }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+test("R2F terminalizes a durable failed final verifier without replay", async (t) => {
+  const fixture = await settledWorkerFixture("READY_VERIFY_FINAL_FAIL");
+  try {
+    const r2e = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
+    const snapshot = await snapshotStateRoot(fixture.root);
+    try {
+      await t.test("durable final failure reaches BLOCKED", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        const tempRootsBefore = await resumedStaticDagTempRoots();
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "BLOCKED");
+        assert.equal(result.terminal_reason, "BLOCKED_COMMAND_CONTRACT_ERROR:COMMAND_EXIT_CODE_UNEXPECTED");
+        assert.equal(result.static_dag_verification_passed, false);
+        assert.equal(result.worker_started, false);
+        assert.equal(result.worker_replay, false);
+        assert.equal(result.provider_call, false);
+        assert.equal(result.provider_replay, false);
+        assert.equal(result.attempt_2_started, false);
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        const failed = after.commandResults.find((entry) => entry.command_id === "final-verify");
+        assert.ok(failed);
+        assert.equal(failed.outcome, "BLOCKED");
+        assert.equal(failed.failure_code, "COMMAND_EXIT_CODE_UNEXPECTED");
+        assert.notEqual(failed.postflight_content_sha256, null);
+        assert.ok(after.postflights.some((entry) => entry.content_sha256 === failed.postflight_content_sha256));
+        assert.ok(after.stateTokens.some((entry) => entry.content_sha256 === failed.state_token_after));
+        assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+        assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
+        assert.equal(after.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL" && entry.outcome === "PASS").length, 0);
+        const blockedCounts = await r2eCounts(fixture.root);
+        await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TERMINAL");
+        assert.deepEqual(await r2eCounts(fixture.root), blockedCounts);
+        await assertR2FCleanup(fixture, tempRootsBefore);
+      });
+
+      await t.test("failed final evidence is reused after crash", async () => {
+        await snapshot.restore();
+        const before = await readM5ManagedRecords(LOCATION(fixture.root));
+        const tempRootsBefore = await resumedStaticDagTempRoots();
+        let finalVerifierCheckpoints = 0;
+        configureResumeReconciliationTestHooks({ checkpoint: async (value) => {
+          if (value === "AFTER_FINAL_VERIFIER" && ++finalVerifierCheckpoints === 2) throw new Error("R2F crash after failed final verifier evidence");
+        } });
+        try {
+          await assert.rejects(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), /R2F crash after failed final verifier evidence/);
+        } finally {
+          configureResumeReconciliationTestHooks(undefined);
+        }
+        const crashed = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "STATIC_DAG_VERIFYING");
+        const failed = crashed.commandResults.find((entry) => entry.command_id === "final-verify");
+        assert.ok(failed);
+        assert.equal(failed.outcome, "BLOCKED");
+        assert.equal(crashed.commandResults.length, before.commandResults.length + 2);
+        assert.equal(crashed.postflights.length, before.postflights.length + 2);
+        const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+        assert.equal(result.final_phase, "BLOCKED");
+        assert.equal(result.terminal_reason, "BLOCKED_COMMAND_CONTRACT_ERROR:COMMAND_EXIT_CODE_UNEXPECTED");
+        const after = await readM5ManagedRecords(LOCATION(fixture.root));
+        assert.equal(after.commandResults.length, crashed.commandResults.length);
+        assert.equal(after.postflights.length, crashed.postflights.length);
+        assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+        assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
+        await assertR2FCleanup(fixture, tempRootsBefore);
+      });
+    } finally {
+      await snapshot.cleanup();
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2F terminalizes a durable final output delta mismatch", async () => {
+  const fixture = await settledWorkerFixture("DELTA_VERIFY_EXTRA_OUTPUT");
+  try {
+    const r2e = await reconcileDeterministicResumedLeaf({ retainedRunRoot: fixture.root });
+    assert.equal(r2e.final_phase, "STATIC_DAG_VERIFYING");
+    const before = await readM5ManagedRecords(LOCATION(fixture.root));
+    const tempRootsBefore = await resumedStaticDagTempRoots();
+    const result = await completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root });
+    assert.equal(result.final_phase, "BLOCKED");
+    assert.equal(result.terminal_reason, "BLOCKED_OUTPUT_DELTA_MISMATCH");
+    assert.equal(result.static_dag_verification_passed, false);
+    assert.equal(result.provider_call, false);
+    assert.equal(result.worker_replay, false);
+    assert.notEqual(result.final_postflight_content_sha256, null);
+    assert.equal(result.output_delta.map((entry) => entry.path).sort().join(","), "a.txt,b.txt,extra.txt");
+    const after = await readM5ManagedRecords(LOCATION(fixture.root));
+    assert.equal(after.commandResults.length, before.commandResults.length + 1);
+    assert.equal(after.postflights.length, before.postflights.length + 2);
+    const finalPostflight = after.postflights.find((entry) => entry.content_sha256 === result.final_postflight_content_sha256);
+    assert.ok(finalPostflight);
+    assert.equal(finalPostflight.workflow_owned_delta.map((entry) => entry.path).sort().join(","), "a.txt,b.txt,extra.txt");
+    assert.ok(after.stateTokens.some((entry) => entry.source_content_sha256 === finalPostflight.content_sha256));
+    assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
+    assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
+    assert.equal(after.decisions.filter((entry) => entry.intent === "EVALUATE_TERMINAL" && entry.outcome === "PASS").length, 0);
+    const blockedCounts = await r2eCounts(fixture.root);
+    await rejectsCode(completeDeterministicResumedStaticDag({ retainedRunRoot: fixture.root }), "RESUME_REFUSED_TERMINAL");
+    assert.deepEqual(await r2eCounts(fixture.root), blockedCounts);
+    await assertR2FCleanup(fixture, tempRootsBefore);
   } finally {
     await fixture.cleanup();
   }
