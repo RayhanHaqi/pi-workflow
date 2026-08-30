@@ -115,18 +115,6 @@ test("M5-R1 gate ignores forged caller detections and validates all six grammars
   assert.deepEqual(gate.contract_gate.detections, []);
 });
 
-test("M5-R1 progress claims require kind-specific predecessor relationships", () => {
-  const reducer = makePolicy("DIRECT_LUNA_HIGH"); const state = createInitialState(reducer, stateIdentities(reducer)); const policy = policyFor(reducer, state.content_sha256 as Sha256Digest);
-  assert.throws(() => evaluate(policy, state, reducer, { progressEvidence: { claimedKind: "EVIDENCE_BACKED_DIAGNOSIS", evidenceContentSha256: [digest(930)] } }),
-    (error: unknown) => (error as { code?: string }).code === "PROGRESS_EVIDENCE_INVALID");
-  const source = policy.content_sha256 as Sha256Digest;
-  const valid = evaluate(policy, state, reducer, {
-    progressEvidence: { claimedKind: "EVIDENCE_BACKED_DIAGNOSIS", evidenceContentSha256: [source] },
-    failures: [{ sourceLayer: "M5", sourceErrorCode: "COMMAND_TIMEOUT", sourceRecordContentSha256: source, normalizedSignature: digest(932) }],
-  });
-  assert.equal(valid.progress.classification, "PROGRESS");
-});
-
 test("M5-R1 lower-layer mapping preserves security and authority distinctions", () => {
   const cases = [
     ["COMMAND_SPEC_MISMATCH", "COMMAND_CONTRACT_ERROR"], ["PATH_OUTSIDE_ROOT", "SCOPE_EXPANSION_REQUIRED"], ["LOCK_LOST", "CONCURRENT_WRITER"],

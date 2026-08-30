@@ -162,6 +162,14 @@ test("M5-R2 progress and no-progress reasons are derived, not caller-selected", 
   const prose = evaluate(policy, state, reducer, { progressEvidence: { evidenceContentSha256: [] } });
   assert.equal(prose.progress.no_progress_reason, "PROSE_WITHOUT_EVIDENCE");
   assert.throws(() => evaluate(policy, state, reducer, { progressEvidence: { evidenceContentSha256: [], noProgressReason: "IDENTICAL_REPORT" } }), /PROGRESS_CLASSIFICATION_INVALID/);
+  assert.throws(() => evaluate(policy, state, reducer, { progressEvidence: { claimedKind: "EVIDENCE_BACKED_DIAGNOSIS", evidenceContentSha256: [digest(930)] } }),
+    (error: unknown) => (error as { code?: string }).code === "PROGRESS_EVIDENCE_INVALID");
+  const source = policy.content_sha256 as Sha256Digest;
+  const evidenceBacked = evaluate(policy, state, reducer, {
+    progressEvidence: { claimedKind: "EVIDENCE_BACKED_DIAGNOSIS", evidenceContentSha256: [source] },
+    failures: [{ sourceLayer: "M5", sourceErrorCode: "COMMAND_TIMEOUT", sourceRecordContentSha256: source, normalizedSignature: digest(932) }],
+  });
+  assert.equal(evidenceBacked.progress.classification, "PROGRESS");
   const previous = evaluate(policy, state, reducer, { failures: [{ sourceLayer: "M4", sourceErrorCode: "COMMAND_TIMEOUT", sourceRecordContentSha256: digest(970), normalizedSignature: digest(971) }] });
   const repeated = evaluate(policy, state, reducer, { failures: [{ sourceLayer: "M4", sourceErrorCode: "COMMAND_TIMEOUT", sourceRecordContentSha256: digest(970), normalizedSignature: digest(971) }] }, [previous]);
   assert.equal(repeated.progress.no_progress_reason, "SAME_NORMALIZED_FAILURE_WITH_NO_DELTA");
