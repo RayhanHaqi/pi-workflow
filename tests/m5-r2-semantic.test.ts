@@ -120,6 +120,20 @@ test("M5-R2 traversal is root-relative for shared nodes, wrong kinds, cycles, an
   assert.equal(result.find((entry) => entry.object.contentSha256 === decisions[3]!.content_sha256)?.classification, "INVALID_MANAGED_RECORD");
   const wrongKind = classify([decisions[1]!], [object("WORKFLOW_STATE", state.content_sha256 as Sha256Digest), object("M5_CONTROL_POLICY", policy.content_sha256 as Sha256Digest), object("M5_USAGE_EVIDENCE", decisions[0]!.content_sha256 as Sha256Digest), object("M5_CONTROL_DECISION", decisions[1]!.content_sha256 as Sha256Digest)]);
   assert.equal(wrongKind.find((entry) => entry.object.kind === "M5_CONTROL_DECISION")?.classification, "INVALID_MANAGED_RECORD");
+  const missingObjects = base.filter((entry) => entry.contentSha256 !== decisions[0]!.content_sha256);
+  const missing = classify(decisions.slice(1), missingObjects);
+  assert.equal(missing.find((entry) => entry.object.contentSha256 === decisions[1]!.content_sha256)?.classification, "INCOMPLETE_MANAGED_RECORD_CHAIN");
+  const first = structuredClone(decisions[0]!); const second = structuredClone(decisions[1]!);
+  const rekey = (value: M5ControlDecisionDocument): void => {
+    (value as MutableJson).decision_key = sha256Canonical({ run_id: value.run_id, state: value.current_state_content_sha256, intent: value.intent,
+      usage: [...value.usage_evidence_content_sha256].sort(), failures: value.failures.map((entry) => entry.failure_identity), gate: value.contract_gate,
+      prior: value.prior_relevant_decision_content_sha256 });
+  };
+  (first as MutableJson).prior_relevant_decision_content_sha256 = second.content_sha256; rekey(first);
+  (second as MutableJson).prior_relevant_decision_content_sha256 = first.content_sha256; rekey(second);
+  const cycle = classify([first, second], [object("WORKFLOW_STATE", state.content_sha256 as Sha256Digest), object("M5_CONTROL_POLICY", policy.content_sha256 as Sha256Digest),
+    object("M5_CONTROL_DECISION", first.content_sha256 as Sha256Digest), object("M5_CONTROL_DECISION", second.content_sha256 as Sha256Digest)]);
+  assert.equal(cycle.filter((entry) => entry.object.kind === "M5_CONTROL_DECISION").every((entry) => entry.classification === "INVALID_MANAGED_RECORD"), true);
 });
 
 test("M5-R2 composes contract, budget, M1, M4, and M5 limits for every dimension", () => {

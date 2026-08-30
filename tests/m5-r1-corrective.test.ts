@@ -3,8 +3,6 @@ import test from "node:test";
 
 import { evaluateAuthority } from "../src/control/evaluate.js";
 import { sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
-import { classifyM5Authority } from "../src/persistence/m5-authority.js";
-import type { InspectedObject } from "../src/persistence/types.js";
 import {
   identifyContractDocument,
   type M5ControlDecisionDocument,
@@ -146,37 +144,4 @@ test("M5-R1 direct PASS is reducer-predicted and wrong-phase terminal evaluation
   const wrong = evaluate(policy, initial, reducer, { intent: "EVALUATE_TERMINAL", obligationEvidence: [{ descriptorSha256: descriptor.descriptor_sha256,
     value: "src/result.ts", evidenceContentSha256: digest(941) }] });
   assert.equal(wrong.outcome, "BLOCK"); assert.equal(wrong.transition_event?.event_type, "BLOCK");
-});
-
-function object(kind: InspectedObject["kind"], contentSha256: Sha256Digest): InspectedObject {
-  return { kind, contentSha256, relativePath: `${kind.toLowerCase()}/${contentSha256.slice(7)}.json` };
-}
-function rekey(value: M5ControlDecisionDocument): void {
-  (value as MutableJson).decision_key = sha256Canonical({ run_id: value.run_id, state: value.current_state_content_sha256, intent: value.intent,
-    usage: [...value.usage_evidence_content_sha256].sort(), failures: value.failures.map((entry) => entry.failure_identity), gate: value.contract_gate,
-    prior: value.prior_relevant_decision_content_sha256 });
-}
-
-test("M5-R1 authority walker rejects cycles and depth-plus-one and classifies missing predecessors", () => {
-  const reducer = makePolicy("DIRECT_LUNA_HIGH"); const state = createInitialState(reducer, stateIdentities(reducer));
-  const policy = policyFor(reducer, state.content_sha256 as Sha256Digest, { maximum_authority_depth: 2 });
-  const decisions: M5ControlDecisionDocument[] = [];
-  for (let index = 0; index < 4; index += 1) decisions.push(evaluate(policy, state, reducer, { blockReason: `BLOCKED_TEST_${index}` }, decisions));
-  const baseObjects = [object("WORKFLOW_STATE", state.content_sha256 as Sha256Digest), object("M5_CONTROL_POLICY", policy.content_sha256 as Sha256Digest),
-    ...decisions.map((entry) => object("M5_CONTROL_DECISION", entry.content_sha256 as Sha256Digest))];
-  const classify = (items: readonly M5ControlDecisionDocument[], objects = baseObjects) => classifyM5Authority({
-    runId: reducer.run_id, workflowState: state, workflowStates: new Map([[state.content_sha256, state]]), objects, priorClassifications: [],
-    policies: new Map([[policy.content_sha256, policy]]), usage: new Map(), decisions: new Map(items.map((entry) => [entry.content_sha256, entry])), reachableRawEvidence: new Set(),
-  });
-  const depth = classify(decisions);
-  assert.equal(depth.find((entry) => entry.object.contentSha256 === decisions[3]!.content_sha256)?.classification, "INVALID_MANAGED_RECORD");
-  const missingObjects = baseObjects.filter((entry) => entry.contentSha256 !== decisions[0]!.content_sha256);
-  const missing = classify(decisions.slice(1), missingObjects);
-  assert.equal(missing.find((entry) => entry.object.contentSha256 === decisions[1]!.content_sha256)?.classification, "INCOMPLETE_MANAGED_RECORD_CHAIN");
-  const first = structuredClone(decisions[0]!); const second = structuredClone(decisions[1]!);
-  (first as MutableJson).prior_relevant_decision_content_sha256 = second.content_sha256; rekey(first);
-  (second as MutableJson).prior_relevant_decision_content_sha256 = first.content_sha256; rekey(second);
-  const cycle = classify([first, second], [object("WORKFLOW_STATE", state.content_sha256 as Sha256Digest), object("M5_CONTROL_POLICY", policy.content_sha256 as Sha256Digest),
-    object("M5_CONTROL_DECISION", first.content_sha256 as Sha256Digest), object("M5_CONTROL_DECISION", second.content_sha256 as Sha256Digest)]);
-  assert.equal(cycle.filter((entry) => entry.object.kind === "M5_CONTROL_DECISION").every((entry) => entry.classification === "INVALID_MANAGED_RECORD"), true);
 });
