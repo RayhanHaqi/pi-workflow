@@ -22,6 +22,7 @@ import {
 import {
   partitionProviderVisibleReadScope as controllerPartition,
   providerVisibleTaskContract as controllerTaskContract,
+  readPersistedStaticProviderTelemetry,
 } from "../src/workflow-controller.js";
 import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
 import { configureResumeReconciliationTestHooks } from "../src/resume-reconciliation-test-hooks.js";
@@ -681,6 +682,12 @@ test("R2F completes a final static DAG without replaying workers", async () => {
     assert.equal(after.boundedWorkerInvocations.length, before.boundedWorkerInvocations.length);
     assert.equal(after.boundedWorkerResults.length, before.boundedWorkerResults.length);
     assert.equal((await inspectRunStorage(LOCATION(fixture.root))).workflowState?.phase, "PASS");
+    const replayedTelemetry = await readPersistedStaticProviderTelemetry({ stateRoot: join(fixture.root, "state"), finalState: (await inspectRunStorage(LOCATION(fixture.root))).workflowState, outcome: "PASS" });
+    assert.notEqual(replayedTelemetry, null);
+    assert.equal(replayedTelemetry!.worker_invocation_count.value, before.boundedWorkerResults.length);
+    assert.equal(replayedTelemetry!.provider_request_count.value, 0);
+    assert.equal(replayedTelemetry!.provider_request_count.enforcement_class, "OBSERVABLE_ONLY");
+    assert.equal(replayedTelemetry!.estimated_cost_microusd.value, null);
     await assertR2FCleanup(fixture, tempRootsBefore);
   } finally {
     await fixture.cleanup();

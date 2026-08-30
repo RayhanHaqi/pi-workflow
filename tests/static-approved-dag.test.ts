@@ -237,6 +237,12 @@ test("STATIC_APPROVED_DAG binds optional selected verifiers fail-closed and pres
       assert.equal(result.finalState?.counters.worker_invocations.sol_closeout, 0);
       assert.equal(result.finalState?.counters.worker_invocations.luna_executor, 0);
       const records = await readM5ManagedRecords({ stateRoot: join(result.evidenceRoot!, "state"), runId: "pre-m8-bounded" });
+      assert.notEqual(result.telemetry, undefined);
+      assert.equal(result.telemetry!.worker_invocation_count.value, 2);
+      assert.equal(result.telemetry!.model_turn_count.value, 0);
+      assert.equal(result.telemetry!.provider_request_count.value, 0);
+      assert.equal(result.telemetry!.provider_request_count.enforcement_class, "OBSERVABLE_ONLY");
+      assert.equal(result.telemetry!.accepted_m4_tool_call_count.value, 2);
       assert.deepEqual(records.commandResults.map((record) => record.command_id).sort(), [...expectedRecords].sort());
     } finally {
       configureBoundedWorkerFauxRuntimeForTests(undefined);

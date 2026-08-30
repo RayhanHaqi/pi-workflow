@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { main as staticApprovedDagCliMain } from "../src/cli/static-approved-dag.js";
-import { readM5ManagedRecords } from "../src/persistence/store.js";
+import { inspectRunStorage, readM5ManagedRecords } from "../src/persistence/store.js";
 import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 import {
@@ -20,6 +20,7 @@ import {
   runBoundedMutationWorkflowForTests,
   type BoundedMutationAuthority,
   type BoundedMutationGoal,
+  readPersistedStaticProviderTelemetry,
 } from "../src/workflow-controller.js";
 
 const execFileAsync = promisify(execFile);
@@ -157,7 +158,7 @@ test("launcher propagates retainedArtifactRoot: PASS returns a unique surviving 
         const path = ["a.txt", "b.txt"][invocations - 1]!;
         await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
         tools.submitReport("retained mutation");
-        return { completed: true, cleanupCertain: true, modelTurns: 0, providerRequests: 0 };
+        return { completed: true, cleanupCertain: true, modelTurns: 3, providerRequests: 2, inputTokens: 11, outputTokens: 22, costMicrousd: 1234 };
       },
     }));
     const report = await (async () => {
@@ -190,13 +191,74 @@ test("launcher propagates retainedArtifactRoot: PASS returns a unique surviving 
       assert.equal(result.outcome, "COMPLETED");
       assert.equal(invocationDigests.has(result.invocation_content_sha256), true, "every result binds a persisted invocation");
       assert.equal(result.actual_usage.worker_invocations, 1);
-      assert.equal(result.actual_usage.model_turns, 0);
-      assert.equal(result.actual_usage.provider_requests, 0);
+      assert.equal(result.actual_usage.model_turns, 3);
+      assert.equal(result.actual_usage.provider_requests, 2);
+      assert.equal(result.actual_usage.input_tokens, 11);
+      assert.equal(result.actual_usage.output_tokens, 22);
+      assert.equal(result.actual_usage.cost_microusd, 1234);
       assert.equal(result.cleanup_certain, true);
     }
+    assert.notEqual(report.telemetry, null);
+    assert.equal(report.telemetry!.source, "PERSISTED_AUTHORITATIVE_M5_USAGE_EVIDENCE");
+    assert.equal(report.telemetry!.provider_request_scope, "LOGICAL_PI_PROVIDER_STREAM_DISPATCH_ONLY");
+    assert.deepEqual(report.telemetry!.usage_evidence_content_sha256, records.usage.map((entry) => entry.content_sha256).sort());
+    assert.equal(report.telemetry!.worker_invocation_count.value, 2);
+    assert.equal(report.telemetry!.worker_invocation_count.basis, "VALIDATED");
+    assert.equal(report.telemetry!.worker_invocation_count.enforcement_class, "HARD_ENFORCEABLE");
+    assert.equal(report.telemetry!.model_turn_count.value, 6);
+    assert.equal(report.telemetry!.model_turn_count.basis, "OBSERVED");
+    assert.equal(report.telemetry!.model_turn_count.enforcement_class, "SOFT_ENFORCEABLE");
+    assert.equal(report.telemetry!.provider_request_count.value, 4);
+    assert.equal(report.telemetry!.provider_request_count.basis, "OBSERVED");
+    assert.equal(report.telemetry!.provider_request_count.enforcement_class, "OBSERVABLE_ONLY");
+    assert.equal(report.telemetry!.accepted_m4_tool_call_count.value, 2);
+    assert.equal(report.telemetry!.accepted_m4_tool_call_count.enforcement_class, "HARD_ENFORCEABLE");
+    for (const field of ["input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "estimated_cost_microusd", "provider_reported_cost_microusd", "transport_attempt_count"] as const) {
+      assert.equal(report.telemetry![field].value, null, `${field} stays unavailable`);
+      assert.equal(report.telemetry![field].basis, "UNAVAILABLE", `${field} stays unavailable`);
+      assert.equal(report.telemetry![field].enforcement_class, "UNAVAILABLE", `${field} stays unavailable`);
+    }
+    const finalInspection = await inspectRunStorage({ stateRoot: join(evidence, "state"), runId: "pre-m8-bounded" });
+    const replayedTelemetry = await readPersistedStaticProviderTelemetry({ stateRoot: join(evidence, "state"), finalState: finalInspection.workflowState, outcome: "PASS" });
+    assert.deepEqual(replayedTelemetry, report.telemetry, "replay reuses the persisted telemetry projection without a provider call");
     assert.equal(invocations, 2);
     assert.equal(report.workflow?.coding_worker_invocations, 2);
     await assertOnlyApprovedOutputs(root, ["a.txt", "b.txt"]);
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(parent, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
+  }
+});
+test("VALID_BLOCKED report projects trusted persisted telemetry without transport claims", async () => {
+  const root = await repository();
+  const parent = await mkdtemp(join(tmpdir(), "static-dag-blocked-telemetry-parent-"));
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute({ tools }) {
+      try {
+        await tools.writePath({ path: "outside.txt", operation: "CREATE", replacementBytes: Buffer.from("outside\n"), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      } catch (error: unknown) {
+        assert.match(error instanceof Error ? error.message : String(error), /outside task edit scope/u);
+      }
+      return { completed: false, cleanupCertain: true, modelTurns: null, providerRequests: null };
+    },
+  }));
+  try {
+    const report = await launchV2(root, { retainedArtifactRoot: parent });
+    assert.equal(report.classification, "VALID_BLOCKED", report.reason);
+    assert.notEqual(report.telemetry, null);
+    assert.equal(report.telemetry!.worker_invocation_count.value, 1);
+    assert.equal(report.telemetry!.model_turn_count.value, null);
+    assert.equal(report.telemetry!.model_turn_count.basis, "UNAVAILABLE");
+    assert.equal(report.telemetry!.provider_request_count.value, null);
+    assert.equal(report.telemetry!.provider_request_count.basis, "UNAVAILABLE");
+    assert.equal(report.telemetry!.provider_request_count.enforcement_class, "UNAVAILABLE");
+    assert.equal(report.telemetry!.accepted_m4_tool_call_count.value, 0);
+    assert.equal(report.telemetry!.transport_attempt_count.value, null);
+    const evidence = report.evidence_root!;
+    const records = await readM5ManagedRecords({ stateRoot: join(evidence, "state"), runId: "pre-m8-bounded" });
+    assert.equal(records.usage.length, 1);
+    assert.deepEqual(report.telemetry!.usage_evidence_content_sha256, records.usage.map((entry) => entry.content_sha256));
+    assert.deepEqual(report.telemetry!.accepted_m4_tool_call_count.source_record_content_sha256, [records.boundedWorkerResults[0]!.content_sha256]);
   } finally {
     configureBoundedWorkerFauxRuntimeForTests(undefined);
     await rm(parent, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
@@ -265,6 +327,11 @@ test("default execution without --retain-artifacts keeps evidence_root null and 
     });
     assert.equal(report.classification, "PASS", report.reason);
     assert.equal(report.evidence_root, null);
+    assert.notEqual(report.telemetry, null);
+    assert.equal(report.telemetry!.worker_invocation_count.value, 2);
+    assert.equal(report.telemetry!.model_turn_count.value, 0);
+    assert.equal(report.telemetry!.provider_request_count.value, 0);
+    assert.equal(report.telemetry!.provider_request_count.enforcement_class, "OBSERVABLE_ONLY");
     const after = await snapshot();
     assert.deepEqual([...after].filter((entry) => !before.has(entry)), [], "temporary invocation evidence is removed after settled execution");
     await assertOnlyApprovedOutputs(root, ["a.txt", "b.txt"]);

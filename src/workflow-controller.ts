@@ -232,6 +232,38 @@ export interface ExternalLifecycleDiagnosticEvidence {
   readonly stderrTail: string | null;
   readonly stderrTailTruncated: boolean;
 }
+/** One terminal-report metric projected from authoritative persisted M5 usage evidence. */
+export interface BoundedProviderTelemetryMetric {
+  readonly value: number | null;
+  readonly basis: "VALIDATED" | "OBSERVED" | "UNAVAILABLE";
+  readonly source_layer: M5UsageEvidenceDocument["source_layer"];
+  readonly source_kind: "BOUNDED_WORKER_RESULT";
+  readonly source_record_content_sha256: readonly Sha256Digest[];
+  readonly enforcement_class: M5UsageEvidenceDocument["measurements"][number]["enforcement_class"];
+}
+
+/**
+ * Terminal provider telemetry for the bounded static-DAG path. The source
+ * digest list is the exact persisted M5 usage set consumed by the terminal
+ * decision; the per-metric source list is the corresponding bounded-worker
+ * result set. Unsupported provider details stay explicitly unavailable.
+ */
+export interface BoundedProviderTelemetrySummary {
+  readonly source: "PERSISTED_AUTHORITATIVE_M5_USAGE_EVIDENCE";
+  readonly usage_evidence_content_sha256: readonly Sha256Digest[];
+  readonly provider_request_scope: "LOGICAL_PI_PROVIDER_STREAM_DISPATCH_ONLY";
+  readonly worker_invocation_count: BoundedProviderTelemetryMetric;
+  readonly model_turn_count: BoundedProviderTelemetryMetric;
+  readonly provider_request_count: BoundedProviderTelemetryMetric;
+  readonly accepted_m4_tool_call_count: BoundedProviderTelemetryMetric;
+  readonly input_tokens: BoundedProviderTelemetryMetric;
+  readonly output_tokens: BoundedProviderTelemetryMetric;
+  readonly cached_tokens: BoundedProviderTelemetryMetric;
+  readonly reasoning_tokens: BoundedProviderTelemetryMetric;
+  readonly estimated_cost_microusd: BoundedProviderTelemetryMetric;
+  readonly provider_reported_cost_microusd: BoundedProviderTelemetryMetric;
+  readonly transport_attempt_count: BoundedProviderTelemetryMetric;
+}
 
 export interface BoundedMutationRunResult {
   readonly outcome: "PASS" | "BLOCKED";
@@ -239,6 +271,8 @@ export interface BoundedMutationRunResult {
   readonly finalState: WorkflowState | null;
   readonly evidenceRoot?: string;
   readonly hygieneWarning?: string;
+  /** Present only after terminal M5 usage has been reconstructed from persisted authority. */
+  readonly telemetry?: BoundedProviderTelemetrySummary;
   /** Never grants completion authority; absent after a recognized child RESULT. */
   readonly lifecycleDiagnostic?: ExternalLifecycleDiagnosticEvidence;
 }
@@ -1052,6 +1086,165 @@ function usage(policy: M5ControlPolicyDocument, decision: M5ControlDecisionDocum
   // Delegates to the extracted shared builder; identity must stay byte-identical for resumed-admission replay.
   return buildBoundedWorkerUsageEvidence({ runId: RUN_ID, policy, decision, executionMode: mode, logicalRole: role, result });
 }
+/**
+ * Reconstructs the static terminal telemetry from the exact durable M5
+ * terminal-decision usage set. A missing, ambiguous, or contradictory source
+ * returns undefined so the outward report remains telemetry:null rather than
+ * inventing a zero or trusting a runtime-only value.
+ */
+async function persistedStaticProviderTelemetry(
+  stateRoot: string,
+  finalState: WorkflowState | null,
+  outcome: "PASS" | "BLOCKED",
+): Promise<BoundedProviderTelemetrySummary | undefined> {
+  if (finalState === null || (outcome === "PASS") !== (finalState.phase === "PASS") ||
+      (outcome === "BLOCKED") !== (finalState.phase === "BLOCKED")) return undefined;
+  let inspection: Awaited<ReturnType<typeof inspectRunStorage>>;
+  let records: Awaited<ReturnType<typeof readM5ManagedRecords>>;
+  try {
+    inspection = await inspectRunStorage({ stateRoot, runId: RUN_ID });
+    records = await readM5ManagedRecords({ stateRoot, runId: RUN_ID });
+  } catch {
+    return undefined;
+  }
+  const durableState = inspection.workflowState;
+  if (inspection.status !== "HEALTHY" || durableState === null || durableState.content_sha256 !== finalState.content_sha256) return undefined;
+  const classifiedAs = (kind: string, digest: string): boolean => {
+    const matches = inspection.managedRecordClassifications.filter((entry) => entry.object.kind === kind && entry.object.contentSha256 === digest);
+    return matches.length === 1 && matches[0]!.classification === "AUTHORITATIVE_MANAGED_RECORD";
+  };
+  const terminalDecisions = records.decisions.filter((decision) =>
+    decision.run_id === RUN_ID && decision.predicted_next_state_content_sha256 === durableState.content_sha256 &&
+    decision.outcome === (outcome === "PASS" ? "PASS" : "BLOCK") && classifiedAs("M5_CONTROL_DECISION", decision.content_sha256));
+  if (terminalDecisions.length !== 1) return undefined;
+  const terminalDecision = terminalDecisions[0]!;
+  const usageEvidenceIds = terminalDecision.usage_evidence_content_sha256 as readonly Sha256Digest[];
+  if (usageEvidenceIds.length === 0 || new Set(usageEvidenceIds).size !== usageEvidenceIds.length) return undefined;
+  const usageByDigest = new Map(records.usage.map((entry) => [entry.content_sha256, entry]));
+  const usage = usageEvidenceIds.map((digest) => usageByDigest.get(digest));
+  if (usage.some((entry): entry is undefined => entry === undefined)) return undefined;
+  const boundedUsage = usage as M5UsageEvidenceDocument[];
+  if (boundedUsage.some((entry) => entry.run_id !== RUN_ID || entry.policy_content_sha256 !== terminalDecision.policy_content_sha256 ||
+      entry.execution_mode !== "STATIC_APPROVED_DAG" || entry.logical_role === null || entry.source_layer !== "CONTROLLER" ||
+      entry.source_kind !== "BOUNDED_WORKER_RESULT" || !classifiedAs("M5_USAGE_EVIDENCE", entry.content_sha256))) return undefined;
+  const authoritativeStaticUsage = records.usage.filter((entry) => entry.run_id === RUN_ID && entry.execution_mode === "STATIC_APPROVED_DAG" &&
+    entry.source_layer === "CONTROLLER" && entry.source_kind === "BOUNDED_WORKER_RESULT" && classifiedAs("M5_USAGE_EVIDENCE", entry.content_sha256));
+  const usageSet = new Set(usageEvidenceIds);
+  if (authoritativeStaticUsage.length !== boundedUsage.length || authoritativeStaticUsage.some((entry) => !usageSet.has(entry.content_sha256 as Sha256Digest))) return undefined;
+  const sourceRecordIds = boundedUsage.map((entry) => entry.source_record_content_sha256 as Sha256Digest);
+  if (new Set(sourceRecordIds).size !== sourceRecordIds.length) return undefined;
+  const boundedResults = new Map(records.boundedWorkerResults.map((entry) => [entry.content_sha256, entry]));
+  const authoritativeResultIds = records.boundedWorkerResults.filter((entry) => classifiedAs("BOUNDED_WORKER_RESULT", entry.content_sha256)).map((entry) => entry.content_sha256 as Sha256Digest);
+  if (authoritativeResultIds.length !== sourceRecordIds.length || authoritativeResultIds.some((digest) => !sourceRecordIds.includes(digest))) return undefined;
+  for (const entry of boundedUsage) {
+    const result = boundedResults.get(entry.source_record_content_sha256);
+    if (result === undefined || !classifiedAs("BOUNDED_WORKER_RESULT", result.content_sha256)) return undefined;
+    const expected = new Map([
+      ["WORKER_INVOCATION", result.actual_usage.worker_invocations], ["TOOL_CALL", result.actual_usage.m4_tool_calls],
+      ["MODEL_TURN", result.actual_usage.model_turns], ["PROVIDER_REQUEST", result.actual_usage.provider_requests],
+      ["INPUT_TOKEN", result.actual_usage.input_tokens], ["OUTPUT_TOKEN", result.actual_usage.output_tokens],
+      ["COST_MICROUSD", result.actual_usage.cost_microusd], ["WALL_TIME_MS", result.actual_usage.wall_time_ms],
+    ]);
+    if (entry.measurements.length !== expected.size || new Set(entry.measurements.map((measurement) => measurement.dimension)).size !== expected.size ||
+        entry.measurements.some((measurement) => measurement.amount !== expected.get(measurement.dimension))) return undefined;
+  }
+  const orderedUsageIds = Object.freeze([...usageEvidenceIds].sort());
+  const orderedSourceRecordIds = Object.freeze([...sourceRecordIds].sort());
+  const source = {
+    source_layer: "CONTROLLER" as const,
+    source_kind: "BOUNDED_WORKER_RESULT" as const,
+    source_record_content_sha256: orderedSourceRecordIds,
+  };
+  const unavailable = (): BoundedProviderTelemetryMetric => ({ value: null, basis: "UNAVAILABLE", ...source, enforcement_class: "UNAVAILABLE" });
+  const aggregate = (
+    dimension: M5UsageEvidenceDocument["measurements"][number]["dimension"],
+    numericBasis: "VALIDATED" | "OBSERVED",
+    numericEnforcement: BoundedProviderTelemetryMetric["enforcement_class"],
+  ): BoundedProviderTelemetryMetric | undefined => {
+    const measurements = boundedUsage.map((entry) => entry.measurements.find((candidate) => candidate.dimension === dimension));
+    if (measurements.some((measurement): measurement is undefined => measurement === undefined)) return undefined;
+    if (measurements.some((measurement) => measurement!.amount === null)) return unavailable();
+    if (measurements.some((measurement) => measurement!.basis !== numericBasis || measurement!.enforcement_class !== numericEnforcement)) return undefined;
+    let value = 0;
+    for (const measurement of measurements) {
+      value += measurement!.amount as number;
+      if (!Number.isSafeInteger(value)) return undefined;
+    }
+    return { value, basis: numericBasis, ...source, enforcement_class: numericEnforcement };
+  };
+  const workerInvocations = aggregate("WORKER_INVOCATION", "VALIDATED", "HARD_ENFORCEABLE");
+  const modelTurns = aggregate("MODEL_TURN", "OBSERVED", "SOFT_ENFORCEABLE");
+  const providerRequests = aggregate("PROVIDER_REQUEST", "OBSERVED", "OBSERVABLE_ONLY");
+  const acceptedM4ToolCalls = aggregate("TOOL_CALL", "VALIDATED", "HARD_ENFORCEABLE");
+  if (workerInvocations === undefined || modelTurns === undefined || providerRequests === undefined || acceptedM4ToolCalls === undefined) return undefined;
+  return Object.freeze({
+    source: "PERSISTED_AUTHORITATIVE_M5_USAGE_EVIDENCE" as const,
+    usage_evidence_content_sha256: orderedUsageIds,
+    provider_request_scope: "LOGICAL_PI_PROVIDER_STREAM_DISPATCH_ONLY" as const,
+    worker_invocation_count: workerInvocations,
+    model_turn_count: modelTurns,
+    provider_request_count: providerRequests,
+    accepted_m4_tool_call_count: acceptedM4ToolCalls,
+    input_tokens: unavailable(),
+    output_tokens: unavailable(),
+    cached_tokens: unavailable(),
+    reasoning_tokens: unavailable(),
+    estimated_cost_microusd: unavailable(),
+    provider_reported_cost_microusd: unavailable(),
+    transport_attempt_count: unavailable(),
+  });
+}
+
+const TELEMETRY_METRIC_KEYS = [
+  "worker_invocation_count", "model_turn_count", "provider_request_count", "accepted_m4_tool_call_count", "input_tokens", "output_tokens",
+  "cached_tokens", "reasoning_tokens", "estimated_cost_microusd", "provider_reported_cost_microusd", "transport_attempt_count",
+] as const;
+
+function isSha256DigestValue(value: unknown): value is Sha256Digest {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/u.test(value);
+}
+
+function isBoundedProviderTelemetryMetric(value: unknown): value is BoundedProviderTelemetryMetric {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(",") !== "basis,enforcement_class,source_kind,source_layer,source_record_content_sha256,value") return false;
+  if (record["value"] !== null && (typeof record["value"] !== "number" || !Number.isSafeInteger(record["value"]) || (record["value"] as number) < 0)) return false;
+  if (record["basis"] !== "VALIDATED" && record["basis"] !== "OBSERVED" && record["basis"] !== "UNAVAILABLE") return false;
+  if (record["source_layer"] !== "CONTROLLER" || record["source_kind"] !== "BOUNDED_WORKER_RESULT" || !Array.isArray(record["source_record_content_sha256"]) ||
+      (record["source_record_content_sha256"] as unknown[]).length === 0 || new Set(record["source_record_content_sha256"] as unknown[]).size !== (record["source_record_content_sha256"] as unknown[]).length ||
+      !(record["source_record_content_sha256"] as unknown[]).every(isSha256DigestValue)) return false;
+  if (!["HARD_ENFORCEABLE", "SOFT_ENFORCEABLE", "OBSERVABLE_ONLY", "ESTIMATED_ONLY", "UNAVAILABLE"].includes(record["enforcement_class"] as string)) return false;
+  return (record["value"] === null) === (record["basis"] === "UNAVAILABLE") && (record["value"] === null) === (record["enforcement_class"] === "UNAVAILABLE");
+}
+
+/** Runtime validation for the cross-process result boundary and launcher projection. */
+export function isBoundedProviderTelemetry(value: unknown): value is BoundedProviderTelemetrySummary {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const expectedKeys = ["source", "usage_evidence_content_sha256", "provider_request_scope", ...TELEMETRY_METRIC_KEYS].sort();
+  if (Object.keys(record).sort().join(",") !== expectedKeys.join(",") || record["source"] !== "PERSISTED_AUTHORITATIVE_M5_USAGE_EVIDENCE" ||
+      record["provider_request_scope"] !== "LOGICAL_PI_PROVIDER_STREAM_DISPATCH_ONLY" || !Array.isArray(record["usage_evidence_content_sha256"]) ||
+      (record["usage_evidence_content_sha256"] as unknown[]).length === 0 || new Set(record["usage_evidence_content_sha256"] as unknown[]).size !== (record["usage_evidence_content_sha256"] as unknown[]).length ||
+      !(record["usage_evidence_content_sha256"] as unknown[]).every(isSha256DigestValue)) return false;
+  if (!TELEMETRY_METRIC_KEYS.every((key) => isBoundedProviderTelemetryMetric(record[key]))) return false;
+  const metric = (key: typeof TELEMETRY_METRIC_KEYS[number]): BoundedProviderTelemetryMetric => record[key] as BoundedProviderTelemetryMetric;
+  const matches = (key: typeof TELEMETRY_METRIC_KEYS[number], basis: "VALIDATED" | "OBSERVED", enforcement: BoundedProviderTelemetryMetric["enforcement_class"]): boolean => {
+    const entry = metric(key);
+    return entry.value === null ? entry.basis === "UNAVAILABLE" && entry.enforcement_class === "UNAVAILABLE" : entry.basis === basis && entry.enforcement_class === enforcement;
+  };
+  if (!matches("worker_invocation_count", "VALIDATED", "HARD_ENFORCEABLE") || !matches("model_turn_count", "OBSERVED", "SOFT_ENFORCEABLE") ||
+      !matches("provider_request_count", "OBSERVED", "OBSERVABLE_ONLY") || !matches("accepted_m4_tool_call_count", "VALIDATED", "HARD_ENFORCEABLE")) return false;
+  return (["input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "estimated_cost_microusd", "provider_reported_cost_microusd", "transport_attempt_count"] as const)
+    .every((key) => metric(key).value === null && metric(key).basis === "UNAVAILABLE" && metric(key).enforcement_class === "UNAVAILABLE");
+}
+/** Read-only terminal projection used by the controller and deterministic replay consumers. */
+export async function readPersistedStaticProviderTelemetry(input: {
+  readonly stateRoot: string;
+  readonly finalState: WorkflowState | null;
+  readonly outcome: "PASS" | "BLOCKED";
+}): Promise<BoundedProviderTelemetrySummary | null> {
+  return await persistedStaticProviderTelemetry(input.stateRoot, input.finalState, input.outcome) ?? null;
+}
 type BoundedWorkerRunner = typeof runBoundedWorker;
 
 interface ResolvedWorkerInvocation {
@@ -1117,7 +1310,7 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
     if (controllerAbort.signal.aborted || cancellationObserved) throw new BoundedWorkflowError("CANCELLED", `cancellation observed before ${stage}`);
   };
   let ownedRoot: string | undefined; let stateRoot = ""; let temporaryRoot = ""; let createdStateRoot = false; let retainedArtifacts = false; let parentOwnedRoot = false;
-  let lock: WorktreeLockHandle | undefined; let finalState: WorkflowState | null = null; let reason = "BLOCKED"; let outcome: "PASS" | "BLOCKED" = "BLOCKED"; let hygieneWarning: string | undefined; let releaseCertain = true;
+  let lock: WorktreeLockHandle | undefined; let finalState: WorkflowState | null = null; let reason = "BLOCKED"; let outcome: "PASS" | "BLOCKED" = "BLOCKED"; let hygieneWarning: string | undefined; let releaseCertain = true; let telemetry: BoundedProviderTelemetrySummary | undefined;
   const usages: M5UsageEvidenceDocument[] = []; let publishedUsageCount = 0;
   let terminalRefusalFailure: M5FailureInput | undefined;
   let terminalBlock: ((detail: string, failures?: readonly M5FailureInput[], obligationEvidence?: readonly M5ObligationEvidenceInput[]) => Promise<void>) | undefined;
@@ -1551,11 +1744,15 @@ async function runBoundedMutationWorkflowImpl(value: unknown, options: Productiv
         reason = finalState?.phase === "PASS" ? "BLOCKED_CANCELLED_AFTER_INTERNAL_PASS" : "BLOCKED_CANCELLED";
       }
     }
+    if (goal.execution_mode === "STATIC_APPROVED_DAG" && finalState !== null) {
+      try { telemetry = await readPersistedStaticProviderTelemetry({ stateRoot, finalState, outcome }) ?? undefined; }
+      catch { telemetry = undefined; }
+    }
     if (ownedRoot !== undefined && createdStateRoot && releaseCertain && !retainedArtifacts && !parentOwnedRoot) try { await rm(ownedRoot, { recursive: true, force: true }); }
     catch (error: unknown) { hygieneWarning ??= `temporary evidence cleanup failed: ${error instanceof Error ? error.message : String(error)}`; }
     if (options.signal !== undefined) options.signal.removeEventListener("abort", observeCancellation);
   }
-  return { outcome, reason, finalState, ...(retainedArtifacts && ownedRoot !== undefined ? { evidenceRoot: ownedRoot } : {}), ...(hygieneWarning === undefined ? {} : { hygieneWarning }) };
+  return { outcome, reason, finalState, ...(retainedArtifacts && ownedRoot !== undefined ? { evidenceRoot: ownedRoot } : {}), ...(hygieneWarning === undefined ? {} : { hygieneWarning }), ...(telemetry === undefined ? {} : { telemetry }) };
 }
 
 interface Deferred<T> {
@@ -1913,9 +2110,11 @@ function checkedChildResult(value: unknown): BoundedMutationRunResult {
     throw new ForceStopCapabilityError("productive child result fields are invalid");
   }
   if (record["finalState"] !== null) assertDocumentValid("pi_gacw_state_v0", record["finalState"]);
+  if (record["telemetry"] !== undefined && !isBoundedProviderTelemetry(record["telemetry"])) throw new ForceStopCapabilityError("productive child telemetry is invalid");
   return {
     outcome: record["outcome"], reason: record["reason"], finalState: record["finalState"] as WorkflowState | null,
     ...(typeof record["hygieneWarning"] === "string" ? { hygieneWarning: record["hygieneWarning"] } : {}),
+    ...(record["telemetry"] === undefined ? {} : { telemetry: record["telemetry"] as BoundedProviderTelemetrySummary }),
   };
 }
 

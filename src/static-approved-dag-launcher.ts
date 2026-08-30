@@ -8,9 +8,11 @@ import { assertM4CanonicalPath } from "./secure-fs/path.js";
 import { isBoundedRoutingIdentity, type ModelExecutionDefinitionV1 } from "./schemas/definitions.js";
 import {
   runBoundedMutationWorkflow,
+  isBoundedProviderTelemetry,
   type BoundedMutationAuthority,
   type BoundedMutationOptions,
   type BoundedMutationRunResult,
+  type BoundedProviderTelemetrySummary,
   type ControllerVerificationCommand,
   type StaticApprovedDagTimeBudgets,
 } from "./workflow-controller.js";
@@ -68,7 +70,7 @@ export interface StaticApprovedDagLaunchReport {
   readonly workflow: StaticWorkflowStateSummary | null;
   readonly evidence_root: string | null;
   readonly hygiene_warning: string | null;
-  readonly telemetry: null;
+  readonly telemetry: BoundedProviderTelemetrySummary | null;
 }
 
 export type StaticApprovedDagController = (value: unknown, options?: BoundedMutationOptions) => Promise<BoundedMutationRunResult>;
@@ -379,6 +381,7 @@ function resultReport(spec: StaticApprovedDagLaunchSpec | null, digest: Sha256Di
   const classification = result?.outcome === "PASS" && phase === "PASS" ? "PASS" : result?.outcome === "BLOCKED" && phase === "BLOCKED" ? "VALID_BLOCKED" : "INVALID";
   // No authoritative finalState means no state summary; never fabricate counters or tasks.
   const workflow = result !== null && asRecord(result.finalState) !== null ? workflowStateSummary(result, spec !== null && spec.expected_route.logical_role === "CODING_EXECUTOR") : null;
+  const telemetry = (classification === "PASS" || classification === "VALID_BLOCKED") && result !== null && isBoundedProviderTelemetry(result.telemetry) ? result.telemetry : null;
   return Object.freeze({
     classification,
     spec_sha256: digest,
@@ -387,7 +390,7 @@ function resultReport(spec: StaticApprovedDagLaunchSpec | null, digest: Sha256Di
     workflow,
     evidence_root: typeof result?.evidenceRoot === "string" ? result.evidenceRoot : null,
     hygiene_warning: typeof result?.hygieneWarning === "string" ? result.hygieneWarning.slice(0, 4096) : null,
-    telemetry: null,
+    telemetry,
   });
 }
 
