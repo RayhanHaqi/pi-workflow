@@ -183,6 +183,12 @@ test("M5-R2 lower-layer finite mapping is explicit and security-sensitive", () =
   assert.equal(mapLowerLayerFailureCode("LOCK_LOST"), "CONCURRENT_WRITER");
   assert.equal(mapLowerLayerFailureCode("PATH_OUTSIDE_ROOT"), "SCOPE_EXPANSION_REQUIRED");
   assert.equal(mapLowerLayerFailureCode("SECURE_WRITE_UNCERTAIN"), "MUTATION_UNCERTAIN");
+  assert.equal(mapLowerLayerFailureCode("COMMAND_SPEC_MISMATCH"), "COMMAND_CONTRACT_ERROR");
+  assert.equal(mapLowerLayerFailureCode("HEAD_DRIFT"), "STATE_DRIFT");
+  assert.equal(mapLowerLayerFailureCode("ROLLBACK_UNCERTAIN"), "CLEANUP_UNCERTAIN");
+  assert.equal(mapLowerLayerFailureCode("COMMAND_SANDBOX_UNAVAILABLE"), "CAPABILITY_UNAVAILABLE");
+  assert.equal(mapLowerLayerFailureCode("BASELINE_APPROVAL_MISMATCH"), "AUTHORITY_CONTRADICTION");
+  assert.equal(mapLowerLayerFailureCode("EVIDENCE_NOT_FOUND"), "CONTEXT_MISSING");
   assert.equal(mapLowerLayerFailureCode("not-a-known-code"), "EVIDENCE_INVALID");
 });
 

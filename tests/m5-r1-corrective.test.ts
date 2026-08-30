@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { evaluateAuthority, mapLowerLayerFailureCode } from "../src/control/evaluate.js";
+import { evaluateAuthority } from "../src/control/evaluate.js";
 import { sha256Canonical, type Sha256Digest } from "../src/identity/index.js";
 import { classifyM5Authority } from "../src/persistence/m5-authority.js";
 import type { InspectedObject } from "../src/persistence/types.js";
@@ -113,16 +113,6 @@ test("M5-R1 gate ignores forged caller detections and validates all six grammars
   })) });
   assert.equal(gate.contract_gate.status, "SATISFIED");
   assert.deepEqual(gate.contract_gate.detections, []);
-});
-
-test("M5-R1 lower-layer mapping preserves security and authority distinctions", () => {
-  const cases = [
-    ["COMMAND_SPEC_MISMATCH", "COMMAND_CONTRACT_ERROR"], ["PATH_OUTSIDE_ROOT", "SCOPE_EXPANSION_REQUIRED"], ["LOCK_LOST", "CONCURRENT_WRITER"],
-    ["HEAD_DRIFT", "STATE_DRIFT"], ["ROLLBACK_UNCERTAIN", "CLEANUP_UNCERTAIN"], ["COMMAND_SANDBOX_UNAVAILABLE", "CAPABILITY_UNAVAILABLE"],
-    ["SECURE_WRITE_UNCERTAIN", "MUTATION_UNCERTAIN"], ["BASELINE_APPROVAL_MISMATCH", "AUTHORITY_CONTRADICTION"],
-    ["EVIDENCE_NOT_FOUND", "CONTEXT_MISSING"], ["new-unknown-code", "EVIDENCE_INVALID"],
-  ] as const;
-  for (const [code, expected] of cases) assert.equal(mapLowerLayerFailureCode(code), expected, code);
 });
 
 test("M5-R1 initial routes cover Direct, Single Owner, Routed, hard-Sol and authority", () => {
