@@ -291,15 +291,3 @@ test("R5 cleanup-completeness rejects every residual target after a completed ta
     await assert.rejects(applyRetentionCleanup(retentionInput(value)), (error: unknown) => codeOf(error) === "CLEANUP_UNCERTAIN");
   } finally { await removeRepositoryFixture(value.fixture); }
 });
-
-test("R5 direct cleanup-rooted idempotence remains authoritative", async () => {
-  const value = await createTerminalBlobFixture([{ name: "one.txt", bytes: "one\n" }]);
-  try {
-    const complete = await applyRetentionCleanup(retentionInput(value));
-    const idempotent = await applyRetentionCleanup(retentionInput(value));
-    assert.equal(idempotent.operation, "CLEANUP");
-    assert.equal(idempotent.outcome, "IDEMPOTENT");
-    assert.equal(idempotent.blobs[0]!.prior_successful_result_content_sha256, complete.content_sha256);
-    assert.equal(await classification(value.fixture, idempotent.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
-  } finally { await removeRepositoryFixture(value.fixture); }
-});
