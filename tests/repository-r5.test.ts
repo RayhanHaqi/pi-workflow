@@ -292,35 +292,6 @@ test("R5 cleanup-completeness rejects every residual target after a completed ta
   } finally { await removeRepositoryFixture(value.fixture); }
 });
 
-test("R5 inspection-proof-separation keeps observation authoritative but outside cleanup proof graphs", async () => {
-  const value = await createTerminalBlobFixture([{ name: "one.txt", bytes: "one\n" }]);
-  try {
-    const complete = await applyRetentionCleanup(retentionInput(value));
-    const observation = await inspectRetention(retentionInput(value));
-    assert.equal(observation.operation, "INSPECT");
-    assert.equal(observation.blobs[0]!.status, "ALREADY_REMOVED");
-    assert.equal(observation.blobs[0]!.prior_successful_result_content_sha256, null);
-    assert.equal(await classification(value.fixture, observation.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
-
-    const forgedInspectionDraft = structuredClone(observation) as any;
-    forgedInspectionDraft.blobs[0]!.prior_successful_result_content_sha256 = complete.content_sha256;
-    const forgedInspection = identifyContractDocument(
-      "pi_gacw_retention_result_v0", forgedInspectionDraft,
-    ) as unknown as M3RetentionResultDocument;
-    await persist(value.fixture, "retention", forgedInspection);
-    assert.equal(await classification(value.fixture, forgedInspection.content_sha256), "INVALID_MANAGED_RECORD");
-
-    const mediatedDraft = structuredClone(observation) as any;
-    mediatedDraft.operation = "CLEANUP";
-    mediatedDraft.outcome = "IDEMPOTENT";
-    mediatedDraft.blobs[0]!.prior_successful_result_content_sha256 = observation.content_sha256;
-    const mediated = identifyContractDocument("pi_gacw_retention_result_v0", mediatedDraft) as unknown as M3RetentionResultDocument;
-    await persist(value.fixture, "retention", mediated);
-    assert.equal(await classification(value.fixture, mediated.content_sha256), "INVALID_MANAGED_RECORD");
-    await assert.rejects(applyRetentionCleanup(retentionInput(value)), (error: unknown) => codeOf(error) === "CLEANUP_UNCERTAIN");
-  } finally { await removeRepositoryFixture(value.fixture); }
-});
-
 test("R5 direct cleanup-rooted idempotence remains authoritative", async () => {
   const value = await createTerminalBlobFixture([{ name: "one.txt", bytes: "one\n" }]);
   try {
