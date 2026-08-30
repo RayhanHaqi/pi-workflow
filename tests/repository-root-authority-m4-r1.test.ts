@@ -1,25 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { createServer } from "node:net";
 import test from "node:test";
 
 import { identifyContractDocument, type M3RepositoryIdentityDocument } from "../src/schemas/index.js";
-import { sha256Bytes } from "../src/identity/index.js";
 import { resolveRepositoryIdentity } from "../src/repository/index.js";
 import { createSecureFilesystem, probeSecureFilesystemCapabilities, SecureFilesystemError } from "../src/secure-fs/index.js";
 import { secureMutation } from "../src/secure-fs/client.js";
-import { mutationJournalForError } from "../src/secure-fs/helper.js";
 import { resetSecureFilesystemTestHooks, setSecureFilesystemTestHooks } from "../src/secure-fs/test-hooks.js";
 import { createRepositoryFixture, removeRepositoryFixture } from "./repository-helpers.js";
 
 function code(error: unknown): unknown { return error instanceof SecureFilesystemError ? error.code : (error as { code?: unknown }).code; }
-async function listen(path: string, action: () => Promise<void>) {
-  const server = createServer((connection) => { let data = ""; connection.on("data", async (chunk) => {
-    data += chunk.toString(); if (!data.includes("\n")) return; try { await action(); connection.end("1"); } catch { connection.destroy(); }
-  }); });
-  await new Promise<void>((resolve, reject) => server.listen(path, resolve).once("error", reject)); return server;
-}
 
 async function authorityFixture() {
   const fixture = await createRepositoryFixture();
@@ -63,24 +54,4 @@ test("installed-inode-binding: retained temporary FD is the installed CREATE ino
     const installed = await stat(join(value.fixture.repository, "created.txt"));
     assert.equal(outcome.after?.inode, installed.ino); assert.equal(outcome.after?.device, installed.dev); assert.equal(outcome.journal.final_verification, "PASS");
   } finally { await removeRepositoryFixture(value.fixture); }
-});
-
-test("mutation-receipt-journal: exchange/preimage mismatch preserves rollback activity", async () => {
-  const value = await authorityFixture(); const socket = join(value.fixture.root, "journal.sock");
-  try {
-    const filesystem = await createSecureFilesystem({ repository: value.repository, capability: value.capability, readablePaths: [{ path: "tracked.txt", kind: "EXACT" }] });
-    const path = value.fixture.trackedPath; const beforeBytes = await readFile(path); const beforeStat = await stat(path);
-    const expected = { digest: sha256Bytes(beforeBytes), size: beforeBytes.byteLength, mode: beforeStat.mode & 0o777 };
-    const displaced = join(value.fixture.repository, "displaced.txt");
-    const server = await listen(socket, async () => { await rename(path, displaced); await writeFile(path, beforeBytes, { mode: expected.mode }); });
-    setSecureFilesystemTestHooks({ checkpointSocket: socket, checkpointStage: "BEFORE_RENAME" });
-    let caught: unknown;
-    try { await secureMutation(filesystem, { operation: "REPLACE", path: "tracked.txt", expected, replacement: Buffer.from("replacement\n"), finalMode: expected.mode, hashLimitBytes: 1024 }); }
-    catch (error: unknown) { caught = error; }
-    assert.equal(code(caught), "PREIMAGE_MISMATCH"); const journal = mutationJournalForError(caught);
-    assert.equal(journal?.atomic_rename_attempted, true); assert.equal(journal?.atomic_rename_completed, true);
-    assert.equal(journal?.rollback_required, true); assert.equal(journal?.rollback_attempted, true); assert.equal(journal?.rollback_completed, true);
-    assert.equal(journal?.rollback_directory_fsync_completed, true); assert.equal(await readFile(path, "utf8"), "initial\n");
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  } finally { resetSecureFilesystemTestHooks(); await removeRepositoryFixture(value.fixture); }
 });

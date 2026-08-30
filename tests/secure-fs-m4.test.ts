@@ -9,6 +9,7 @@ import { sha256Bytes } from "../src/identity/index.js";
 import { resolveRepositoryIdentity } from "../src/repository/index.js";
 import { createSecureFilesystem, probeSecureFilesystemCapabilities, SecureFilesystemError } from "../src/secure-fs/index.js";
 import { secureMutation } from "../src/secure-fs/client.js";
+import { mutationJournalForError } from "../src/secure-fs/helper.js";
 import { resetSecureFilesystemTestHooks, setSecureFilesystemTestHooks } from "../src/secure-fs/test-hooks.js";
 import { createRepositoryFixture, removeRepositoryFixture } from "./repository-helpers.js";
 
@@ -220,8 +221,15 @@ test("M4 deterministic same-content inode swap is detected and rolled back", asy
     }); });
     await new Promise<void>((resolve, reject) => server.listen(control, resolve).once("error", reject));
     setSecureFilesystemTestHooks({ checkpointSocket: control, checkpointStage: "BEFORE_RENAME" });
+    let caught: unknown;
     await assert.rejects(secureMutation(value.filesystem, { operation: "REPLACE", path: "tracked.txt", expected: before, replacement: Buffer.from("new\n"), finalMode: before.mode, hashLimitBytes: 1024 }),
-      (error: unknown) => code(error) === "PREIMAGE_MISMATCH");
+      (error: unknown) => { caught = error; return code(error) === "PREIMAGE_MISMATCH"; });
+    const journal = mutationJournalForError(caught);
+    assert.equal(journal?.atomic_rename_completed, true);
+    assert.equal(journal?.rollback_required, true);
+    assert.equal(journal?.rollback_attempted, true);
+    assert.equal(journal?.rollback_completed, true);
+    assert.equal(journal?.rollback_directory_fsync_completed, true);
     assert.equal(await readFile(value.fixture.trackedPath, "utf8"), "initial\n"); assert.equal(await readFile(attackerCopy, "utf8"), "initial\n");
     await new Promise<void>((resolve) => server.close(() => resolve()));
   } finally { resetSecureFilesystemTestHooks(); await removeRepositoryFixture(value.fixture); }
