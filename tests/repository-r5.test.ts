@@ -121,15 +121,6 @@ test("R5 retained-population-continuity invalidates every dependent authority af
   }
 });
 
-test("R5 exact cleanup proof preserves a removed blob baseline as complete authority", async () => {
-  const value = await createTerminalBlobFixture([{ name: "proof.txt", bytes: "proof\n" }]);
-  try {
-    await applyRetentionCleanup(retentionInput(value));
-    assert.equal(await classification(value.fixture, value.baseline.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
-    assert.equal(await classification(value.fixture, value.approval.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
-  } finally { await removeRepositoryFixture(value.fixture); }
-});
-
 test("R5 guardian-interpreter-provenance binds acquisition wrapper and helper identity", async () => {
   const fixture = await createRepositoryFixture();
   const wrapperRoot = join(fixture.root, "wrappers");

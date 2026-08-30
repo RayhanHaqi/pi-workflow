@@ -131,6 +131,7 @@ test("R5-R1 complete and cleanup-only idempotent chains remain exact proof", asy
     assert.equal(await classification(value.fixture, second.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     assert.equal(await classification(value.fixture, third.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     assert.equal(await classification(value.fixture, value.baseline.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
+    assert.equal(await classification(value.fixture, value.approval.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
     const publicResult = await applyRetentionCleanup(retentionInput(value));
     assert.equal(publicResult.operation, "CLEANUP"); assert.equal(publicResult.outcome, "IDEMPOTENT");
   } finally { await removeRepositoryFixture(value.fixture); }
