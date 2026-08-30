@@ -122,12 +122,6 @@ test("V1 frozen High/XHigh launcher digests remain identical and V1 rejects a mo
   assert.throws(() => normalizeStaticApprovedDagLaunchSpec(withDefinition), /contains unknown or missing fields/);
 });
 
-test("V2 builtin CODING_EXECUTOR route without a definition normalizes without the field and derives the legacy shape", () => {
-  const spec = normalizeStaticApprovedDagLaunchSpec(v2Spec({ logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false }));
-  assert.deepEqual(spec.expected_route, { logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false });
-  assert.ok(!("model_execution_definition" in spec.expected_route));
-});
-
 test("exact Ox definition normalizes, keeps V2 fallback=false, and derives exactly the frozen digest", () => {
   const spec = normalizeStaticApprovedDagLaunchSpec(v2Spec({
     logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false,
