@@ -495,6 +495,7 @@ test("V1 freeze: legacy Terra specs keep their exact historical digests and rout
   const normalized = normalizeStaticApprovedDagLaunchSpec(V1_PIN_SPEC);
   assert.equal(normalized.spec_version, "static-approved-dag-launch-v1");
   assert.deepEqual(normalized.expected_route, { logical_role: "TERRA_EXECUTOR", provider_id: "openai-codex", model_id: "gpt-5.6-terra", effort: "high", fallback: false });
+  assert.throws(() => normalizeStaticApprovedDagLaunchSpec({ ...structuredClone(V1_PIN_SPEC), expected_route: { ...V1_PIN_SPEC.expected_route, model_execution_definition: {} } }), /contains unknown or missing fields/);
 });
 
 test("V1 freeze rejects verifier-specific readable authority without changing legacy normalization", () => {

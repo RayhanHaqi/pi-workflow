@@ -112,16 +112,6 @@ async function expectDynamicAdmissionFailure(models: readonly unknown[], digest:
 // Launcher authority
 // ---------------------------------------------------------------------------
 
-test("V1 frozen High/XHigh launcher digests remain identical and V1 rejects a model execution definition", () => {
-  const high = v1PinSpec();
-  assert.equal(staticApprovedDagSpecSha256(high), V1_FROZEN_HIGH_DIGEST);
-  const xhigh = structuredClone(high); (xhigh["expected_route"] as Record<string, unknown>)["effort"] = "xhigh";
-  assert.equal(staticApprovedDagSpecSha256(xhigh), V1_FROZEN_XHIGH_DIGEST);
-  const withDefinition = structuredClone(high);
-  (withDefinition["expected_route"] as Record<string, unknown>)["model_execution_definition"] = structuredClone(OX_MODEL_EXECUTION_DEFINITION);
-  assert.throws(() => normalizeStaticApprovedDagLaunchSpec(withDefinition), /contains unknown or missing fields/);
-});
-
 test("exact Ox definition normalizes, keeps V2 fallback=false, and derives exactly the frozen digest", () => {
   const spec = normalizeStaticApprovedDagLaunchSpec(v2Spec({
     logical_role: "CODING_EXECUTOR", provider_id: "openrouter", model_id: "stealth/ox-alpha", effort: "high", fallback: false,
