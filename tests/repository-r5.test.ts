@@ -15,7 +15,6 @@ import {
   resolveRepositoryIdentity,
   runFastPreflight,
   runFullPreflight,
-  runPostflight,
   verifyBaselineApproval,
 } from "../src/repository/index.js";
 import { canonicalJsonRecordBytes } from "../src/repository/storage.js";
@@ -190,57 +189,6 @@ test("R5 guardian-interpreter-provenance binds acquisition wrapper and helper id
   } finally {
     if (originalPath === undefined) delete process.env["PATH"];
     else process.env["PATH"] = originalPath;
-    if (lock !== undefined) await releaseWorktreeLock(lock).catch(() => undefined);
-    await removeRepositoryFixture(fixture);
-  }
-});
-
-test("R5 deleted-baseline-reversion produces an authoritative baseline-to-HEAD transition", async () => {
-  const fixture = await createRepositoryFixture(); let lock: Awaited<ReturnType<typeof acquireWorktreeLock>> | undefined;
-  try {
-    await unlink(fixture.trackedPath);
-    const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
-    lock = await acquireWorktreeLock({ stateRoot: fixture.stateRoot, repository });
-    const baseline = (await captureBaseline(await baselineInput(
-      fixture, lock, "APPROVED_BASELINE_DIRTY", [pathDecision("tracked.txt")],
-    ))).baseline;
-    const approval = (await createBaselineApproval({
-      stateRoot: fixture.stateRoot, runId: fixture.runId, baseline,
-      approvedBy: "r5-owner", approvedAt: "2026-01-01T00:00:00.000Z",
-    })).approval;
-    const selected = await instructionAuthorityInputs(fixture);
-    const taskScopeIdentity = scopeIdentity(["tracked.txt"], ["AGENTS.md", "AUTHORITY.md"]);
-    const full = await runFullPreflight({
-      stateRoot: fixture.stateRoot, runId: fixture.runId,
-      expectedRepository: baseline.repository, expectedWorktreeKey: baseline.repository.worktree_key,
-      expectedBranch: baseline.repository.branch, expectedHead: baseline.repository.head,
-      expectedWorktreeListSha256: baseline.repository.worktree_list_sha256,
-      baseline, approval, instructionFiles: selected.instructions, authorityFiles: selected.authorities,
-      requiredEnvironment: await requiredEnvironment(fixture.repository), taskScopeIdentity,
-      allowShallow: false, allowPartialClone: false, lock,
-    });
-    await writeFile(fixture.trackedPath, "initial\n", { mode: 0o644 });
-    const postflight = await runPostflight({
-      stateRoot: fixture.stateRoot, runId: fixture.runId, acceptedState: full.acceptedState, baseline,
-      instructionFiles: selected.instructions, authorityFiles: selected.authorities,
-      editablePaths: ["tracked.txt"], frozenPaths: ["AGENTS.md", "AUTHORITY.md"], taskScopeIdentity,
-      claimedWorkflowPaths: ["tracked.txt"], lock,
-    });
-    assert.deepEqual(postflight.postflight.repository_git_delta, []);
-    assert.equal(postflight.postflight.workflow_owned_delta.length, 1);
-    const delta = postflight.postflight.workflow_owned_delta[0]!;
-    assert.equal(delta.change_kind, "BASELINE_REVERTED");
-    assert.equal(delta.before_content_sha256, null);
-    assert.equal(delta.before_type, "DELETED");
-    assert.equal(delta.before_mode, null);
-    assert.equal(delta.after_type, "REGULAR");
-    assert.equal(await classification(fixture, postflight.acceptedState.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
-    const fast = await runFastPreflight({
-      stateRoot: fixture.stateRoot, runId: fixture.runId, acceptedState: postflight.acceptedState, baseline,
-      instructionFiles: selected.instructions, authorityFiles: selected.authorities, taskScopeIdentity, lock,
-    });
-    assert.equal(fast.result, "PASS");
-  } finally {
     if (lock !== undefined) await releaseWorktreeLock(lock).catch(() => undefined);
     await removeRepositoryFixture(fixture);
   }

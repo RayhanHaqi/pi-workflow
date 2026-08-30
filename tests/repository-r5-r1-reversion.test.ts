@@ -57,7 +57,7 @@ interface PreparedReversion {
 async function runReversion(
   fixture: RepositoryFixture,
   prepared: PreparedReversion,
-): Promise<void> {
+): Promise<Awaited<ReturnType<typeof runPostflight>>> {
   const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
   const lock = await acquireWorktreeLock({ stateRoot: fixture.stateRoot, repository });
   try {
@@ -96,6 +96,7 @@ async function runReversion(
       instructionFiles: selected.instructions, authorityFiles: selected.authorities, taskScopeIdentity, lock,
     });
     assert.equal(fast.result, "PASS");
+    return result;
   } finally {
     await releaseWorktreeLock(lock).catch(() => undefined);
   }
@@ -114,10 +115,15 @@ test("R5-R1 baseline reversion positive matrix", async (t) => {
     const fixture = await createRepositoryFixture();
     try {
       await unlink(fixture.trackedPath);
-      await runReversion(fixture, {
+      const result = await runReversion(fixture, {
         paths: ["tracked.txt"], claimed: ["tracked.txt"], expectedRepositoryPaths: [],
         restore: async () => writeFile(fixture.trackedPath, "initial\n", { mode: 0o644 }),
       });
+      const delta = result.postflight.workflow_owned_delta[0]!;
+      assert.equal(delta.before_content_sha256, null);
+      assert.equal(delta.before_type, "DELETED");
+      assert.equal(delta.before_mode, null);
+      assert.equal(delta.after_type, "REGULAR");
     } finally { await removeRepositoryFixture(fixture); }
   });
   await t.test("modified baseline restored to stored HEAD content", async () => {
