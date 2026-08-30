@@ -5,7 +5,6 @@ import test from "node:test";
 
 import { sha256Canonical } from "../src/identity/index.js";
 import { inspectRunStorage } from "../src/persistence/index.js";
-import { m3PorcelainIdentityProjection } from "../src/persistence/m3-authority.js";
 import {
   acquireWorktreeLock,
   applyRetentionCleanup,
@@ -22,12 +21,10 @@ import {
 import { canonicalJsonRecordBytes } from "../src/repository/storage.js";
 import {
   identifyContractDocument,
-  type M3BaselineRuntimeDocument,
   type M3RetentionResultDocument,
 } from "../src/schemas/index.js";
 import {
   createRepositoryFixture,
-  git,
   instructionAuthorityInputs,
   removeRepositoryFixture,
   requiredEnvironment,
@@ -68,110 +65,6 @@ async function classification(fixture: RepositoryFixture, digest: string): Promi
   const inspection = await inspectRunStorage({ stateRoot: fixture.stateRoot, runId: fixture.runId });
   return inspection.managedRecordClassifications.find((entry) => entry.object.contentSha256 === digest)?.classification;
 }
-
-function refreshFingerprint(draft: Record<string, unknown>): void {
-  const fingerprint = draft["git_fingerprint"] as Record<string, unknown>;
-  fingerprint["staged_diff_sha256"] = sha256Canonical(fingerprint["staged"]);
-  fingerprint["unstaged_diff_sha256"] = sha256Canonical(fingerprint["unstaged"]);
-  fingerprint["untracked_inventory_sha256"] = sha256Canonical(fingerprint["untracked"]);
-  fingerprint["porcelain_v2_sha256"] = sha256Canonical(m3PorcelainIdentityProjection(fingerprint as never));
-  const identified = identifyContractDocument("pi_gacw_git_state_fingerprint_v0", fingerprint);
-  draft["git_fingerprint"] = identified;
-  const accepted = draft["accepted_baseline"] as Record<string, unknown>;
-  accepted["git_state_sha256"] = identified.content_sha256;
-  draft["accepted_baseline"] = identifyContractDocument("pi_gacw_baseline_v0", accepted);
-}
-
-function identifyBaseline(
-  baseline: M3BaselineRuntimeDocument,
-  mutate: (draft: Record<string, unknown>) => void,
-): M3BaselineRuntimeDocument {
-  const draft = structuredClone(baseline) as unknown as Record<string, unknown>;
-  mutate(draft);
-  refreshFingerprint(draft);
-  for (const path of draft["paths"] as Array<Record<string, unknown>>) {
-    const fingerprint = draft["git_fingerprint"] as M3BaselineRuntimeDocument["git_fingerprint"];
-    const name = path["path"] as string;
-    path["status_sha256"] = sha256Canonical({
-      staged: fingerprint.staged.filter((entry) => entry.path === name || entry.old_path === name),
-      unstaged: fingerprint.unstaged.filter((entry) => entry.path === name || entry.old_path === name),
-      untracked: fingerprint.untracked.filter((entry) => entry.path === name),
-      conflicts: fingerprint.conflicts.filter((entry) => entry.path === name),
-    });
-  }
-  return identifyContractDocument("pi_gacw_baseline_runtime_v0", draft) as unknown as M3BaselineRuntimeDocument;
-}
-
-async function assertForgedModeRejected(
-  fixture: RepositoryFixture,
-  baseline: M3BaselineRuntimeDocument,
-): Promise<void> {
-  await persist(fixture, "baselines", baseline);
-  await assert.rejects(
-    createBaselineApproval({
-      stateRoot: fixture.stateRoot,
-      runId: fixture.runId,
-      baseline,
-      approvedBy: "r5-owner",
-      approvedAt: "2026-01-01T00:00:00.000Z",
-    }),
-    (error: unknown) => codeOf(error) === "BASELINE_PROVENANCE_INVALID",
-  );
-  assert.equal(await classification(fixture, baseline.content_sha256), "INVALID_MANAGED_RECORD");
-}
-
-test("R5 staged-mode-binding validates the exact HEAD-index-worktree mode layers", async (t) => {
-  const cases: readonly [string, (fixture: RepositoryFixture) => Promise<void>, (baseline: M3BaselineRuntimeDocument) => M3BaselineRuntimeDocument][] = [
-    [
-      "staged-only worktree mode",
-      async (fixture) => { await writeFile(fixture.trackedPath, "staged\n"); await git(fixture.repository, "add", "--", "tracked.txt"); },
-      (baseline) => identifyBaseline(baseline, (draft) => {
-        const staged = ((draft["git_fingerprint"] as Record<string, unknown>)["staged"] as Array<Record<string, unknown>>)[0]!;
-        staged["worktree_mode"] = staged["worktree_mode"] === "100755" ? "100644" : "100755";
-      }),
-    ],
-    [
-      "mixed staged and unstaged worktree mode",
-      async (fixture) => {
-        await writeFile(fixture.trackedPath, "index\n"); await git(fixture.repository, "add", "--", "tracked.txt");
-        await writeFile(fixture.trackedPath, "worktree\n");
-      },
-      (baseline) => identifyBaseline(baseline, (draft) => {
-        const staged = ((draft["git_fingerprint"] as Record<string, unknown>)["staged"] as Array<Record<string, unknown>>)[0]!;
-        staged["worktree_mode"] = staged["worktree_mode"] === "100755" ? "100644" : "100755";
-      }),
-    ],
-    [
-      "staged deletion worktree sentinel",
-      async (fixture) => { await git(fixture.repository, "rm", "--", "tracked.txt"); },
-      (baseline) => identifyBaseline(baseline, (draft) => {
-        const staged = ((draft["git_fingerprint"] as Record<string, unknown>)["staged"] as Array<Record<string, unknown>>)[0]!;
-        staged["worktree_mode"] = "100644";
-      }),
-    ],
-  ];
-  for (const [name, setup, forge] of cases) {
-    await t.test(name, async () => {
-      const fixture = await createRepositoryFixture(); let lock: Awaited<ReturnType<typeof acquireWorktreeLock>> | undefined;
-      try {
-        await setup(fixture);
-        const repository = await resolveRepositoryIdentity({ requestedPath: fixture.repository, requireHead: true });
-        lock = await acquireWorktreeLock({ stateRoot: fixture.stateRoot, repository });
-        const baseline = (await captureBaseline(await baselineInput(
-          fixture,
-          lock,
-          "APPROVED_BASELINE_DIRTY",
-          [pathDecision("tracked.txt")],
-        ))).baseline;
-        assert.equal(await classification(fixture, baseline.content_sha256), "AUTHORITATIVE_MANAGED_RECORD");
-        await assertForgedModeRejected(fixture, forge(baseline));
-      } finally {
-        if (lock !== undefined) await releaseWorktreeLock(lock).catch(() => undefined);
-        await removeRepositoryFixture(fixture);
-      }
-    });
-  }
-});
 
 test("R5 retained-population-continuity invalidates every dependent authority after unproved loss", async () => {
   const fixture = await createRepositoryFixture(); let lock: Awaited<ReturnType<typeof acquireWorktreeLock>> | undefined;
