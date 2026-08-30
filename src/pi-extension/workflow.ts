@@ -2,12 +2,15 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { runBoundedMutationWorkflow } from "../workflow-controller.js";
+import { classifyOperatorNotice, operatorInputKindForPhase } from "../operator-status.js";
 import { prepareWorkflow, renderTaskPreview, runApprovedWorkflow } from "../workflow.js";
+
+type Notify = (message: string, type?: "info" | "warning" | "error") => void;
 
 interface ExtensionUI {
   readonly setWidget: (key: string, content: string[] | undefined, options?: { readonly placement?: "aboveEditor" | "belowEditor" }) => void;
   readonly setStatus: (key: string, text: string | undefined) => void;
-  readonly notify: (message: string, type?: "info" | "warning" | "error") => void;
+  readonly notify: Notify;
   readonly confirm: (title: string, message: string, options?: { readonly signal?: AbortSignal }) => Promise<boolean>;
   readonly input: (title: string, placeholder?: string) => Promise<string | undefined>;
 }
@@ -25,9 +28,19 @@ interface ExtensionAPI {
 
 const WIDGET_KEY = "pi-workflow-preview";
 
+/** Informational UI delivery is isolated from controller authority and may be dropped. */
+export function notifyBestEffort(notify: Notify, message: string, type: "info" | "warning" | "error" = "info"): void {
+  try { notify(message, type); } catch { /* UI delivery cannot cancel or reclassify a workflow. */ }
+}
+
+function notifyResult(ctx: ExtensionCommandContext, result: { readonly outcome: "PASS" | "BLOCKED"; readonly reason: string; readonly finalState?: { readonly phase: string; readonly terminal_reason: string | null } | null }): void {
+  const notice = classifyOperatorNotice({ phase: result.finalState?.phase ?? null, outcome: result.outcome, terminal_reason: result.finalState?.terminal_reason ?? null, reason: result.reason });
+  if (notice !== null) notifyBestEffort(ctx.ui.notify, `${notice.kind}: ${notice.message}`, notice.level);
+}
+
 async function handleMutation(fileArgument: string, ctx: ExtensionCommandContext): Promise<void> {
   if (fileArgument.length === 0 || fileArgument.includes("\n") || fileArgument.includes("\r")) {
-    ctx.ui.notify("BLOCKED (not started): usage is /workflow mutate <goal.json>", "error");
+    notifyBestEffort(ctx.ui.notify, "BLOCKED (not started): usage is /workflow mutate <goal.json>", "error");
     return;
   }
   try {
@@ -37,8 +50,9 @@ async function handleMutation(fileArgument: string, ctx: ExtensionCommandContext
     const result = await runBoundedMutationWorkflow(goal, {
       cwd: ctx.cwd,
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
-      onControlCapability: ({ path }) => { ctx.ui.notify(`FORCE_STOP_CAPABILITY ${path}`, "info"); },
+      onControlCapability: ({ path }) => { notifyBestEffort(ctx.ui.notify, `FORCE_STOP_CAPABILITY ${path}`, "info"); },
       approveBaseline: async (baseline) => {
+        notifyBestEffort(ctx.ui.notify, `AUTHORITY_INPUT_REQUIRED: operator input required: ${operatorInputKindForPhase("AWAITING_BASELINE_APPROVAL")}`, "info");
         const inventory = JSON.stringify(baseline.paths.map((entry) => ({ path: entry.path, ownership_class: entry.ownership_class, data_class: entry.data_class, capture_mode: entry.capture_mode, retention_days_after_terminal: entry.retention_days_after_terminal })));
         const confirmed = ctx.signal === undefined
           ? await ctx.ui.confirm("Approve exact dirty baseline", `${baseline.content_sha256}\n${inventory}`)
@@ -49,37 +63,42 @@ async function handleMutation(fileArgument: string, ctx: ExtensionCommandContext
         return approvedBy === undefined || approvedBy.length === 0 || approvedAt === undefined || approvedAt.length === 0
           ? null : { baseline_content_sha256: baseline.content_sha256 as `sha256:${string}`, approved_by: approvedBy, approved_at: approvedAt };
       },
-      approveTasks: async ({ contract, plan }) => {
+      approveTasks: async ({ mode, contract, plan }) => {
         const target = plan?.content_sha256 ?? contract.content_sha256;
+        const inputPhase = mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG" ? "AWAITING_PLAN_APPROVAL" : mode === "SINGLE_OWNER_SOL" ? "AWAITING_SINGLE_OWNER_APPROVAL" : "AWAITING_DIRECT_APPROVAL";
+        notifyBestEffort(ctx.ui.notify, `AUTHORITY_INPUT_REQUIRED: operator input required: ${operatorInputKindForPhase(inputPhase)}`, "info");
         const kind = plan === null ? "final Contract-bound execution authority" : "exact routed PlanApproval";
         const confirmed = ctx.signal === undefined
           ? await ctx.ui.confirm(`Approve ${kind}`, target)
           : await ctx.ui.confirm(`Approve ${kind}`, target, { signal: ctx.signal });
         return confirmed ? target as `sha256:${string}` : null;
       },
-      approveOwnerAcceptance: async ({ finalState }) => ctx.signal === undefined
-        ? ctx.ui.confirm("Declared owner acceptance", finalState.content_sha256)
-        : ctx.ui.confirm("Declared owner acceptance", finalState.content_sha256, { signal: ctx.signal }),
+      approveOwnerAcceptance: async ({ finalState }) => {
+        notifyBestEffort(ctx.ui.notify, `AUTHORITY_INPUT_REQUIRED: operator input required: ${operatorInputKindForPhase("AWAITING_DECLARED_OWNER_ACCEPTANCE")}`, "info");
+        return ctx.signal === undefined
+          ? ctx.ui.confirm("Declared owner acceptance", finalState.content_sha256)
+          : ctx.ui.confirm("Declared owner acceptance", finalState.content_sha256, { signal: ctx.signal });
+      },
     });
-    ctx.ui.notify(`${result.outcome}: ${result.reason}`, result.outcome === "PASS" ? "info" : "warning");
+    notifyResult(ctx, result);
   } catch (error: unknown) {
-    ctx.ui.notify(`BLOCKED: ${error instanceof Error ? error.message : String(error)}`, "error");
+    notifyBestEffort(ctx.ui.notify, `BLOCKED: ${error instanceof Error ? error.message : String(error)}`, "error");
   }
 }
 
 async function handleWorkflow(args: string, ctx: ExtensionCommandContext): Promise<void> {
   const fileArgument = args.trim();
   if (fileArgument.startsWith("mutate ")) {
-    if (!ctx.hasUI) { ctx.ui.notify("BLOCKED (not started): /workflow mutate requires human UI confirmation", "error"); return; }
+    if (!ctx.hasUI) { notifyBestEffort(ctx.ui.notify, "BLOCKED (not started): /workflow mutate requires human UI confirmation", "error"); return; }
     await handleMutation(fileArgument.slice("mutate ".length).trim(), ctx);
     return;
   }
   if (fileArgument.length === 0 || fileArgument.includes("\n") || fileArgument.includes("\r")) {
-    ctx.ui.notify("BLOCKED (not started): usage is /workflow <goal.json>", "error");
+    notifyBestEffort(ctx.ui.notify, "BLOCKED (not started): usage is /workflow <goal.json>", "error");
     return;
   }
   if (!ctx.hasUI) {
-    ctx.ui.notify("BLOCKED (not started): /workflow requires human UI confirmation", "error");
+    notifyBestEffort(ctx.ui.notify, "BLOCKED (not started): /workflow requires human UI confirmation", "error");
     return;
   }
 
@@ -88,27 +107,28 @@ async function handleWorkflow(args: string, ctx: ExtensionCommandContext): Promi
     const source = await readFile(resolve(ctx.cwd, fileArgument), "utf8");
     prepared = prepareWorkflow(JSON.parse(source) as unknown);
   } catch (error: unknown) {
-    ctx.ui.notify(`BLOCKED (not started): ${error instanceof Error ? error.message : String(error)}`, "error");
+    notifyBestEffort(ctx.ui.notify, `BLOCKED (not started): ${error instanceof Error ? error.message : String(error)}`, "error");
     return;
   }
 
   ctx.ui.setWidget(WIDGET_KEY, renderTaskPreview(prepared).split("\n"), { placement: "aboveEditor" });
   ctx.ui.setStatus(WIDGET_KEY, `Approval required: ${prepared.task.content_sha256}`);
   try {
+    notifyBestEffort(ctx.ui.notify, `AUTHORITY_INPUT_REQUIRED: operator input required: ${operatorInputKindForPhase("AWAITING_DIRECT_APPROVAL")}`, "info");
     const approved = ctx.signal === undefined
       ? await ctx.ui.confirm("Approve bounded read-only workflow", `Approve the exact TaskDocument content_sha256 ${prepared.task.content_sha256}?`)
       : await ctx.ui.confirm("Approve bounded read-only workflow", `Approve the exact TaskDocument content_sha256 ${prepared.task.content_sha256}?`, { signal: ctx.signal });
     if (!approved) {
-      ctx.ui.notify("BLOCKED (not started): workflow approval was rejected", "warning");
+      notifyBestEffort(ctx.ui.notify, "BLOCKED (not started): workflow approval was rejected", "warning");
       return;
     }
     const result = await runApprovedWorkflow(prepared, prepared.task.content_sha256, {
       cwd: ctx.cwd,
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
     });
-    ctx.ui.notify(`${result.outcome}: ${result.reason}`, result.outcome === "PASS" ? "info" : "warning");
+    notifyResult(ctx, result);
   } catch (error: unknown) {
-    ctx.ui.notify(`BLOCKED: ${error instanceof Error ? error.message : String(error)}`, "error");
+    notifyBestEffort(ctx.ui.notify, `BLOCKED: ${error instanceof Error ? error.message : String(error)}`, "error");
   } finally {
     ctx.ui.setStatus(WIDGET_KEY, undefined);
     ctx.ui.setWidget(WIDGET_KEY, undefined);

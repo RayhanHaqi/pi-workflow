@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { forceStopBoundedMutationWorkflow, runBoundedMutationWorkflow } from "../workflow-controller.js";
 import { inspectDeterministicResumeEligibility } from "../resume-inspection.js";
+import { classifyOperatorNotice, readOperatorStatus, operatorInputKindForPhase } from "../operator-status.js";
 import {
   approvalLine,
   prepareWorkflow,
@@ -19,15 +20,28 @@ function output(value: string): void {
   process.stdout.write(`${value}\n`);
 }
 
+function bestEffortOutput(value: string): void {
+  try { output(value); } catch { /* Informational output cannot alter workflow authority. */ }
+}
+
+function outputOperatorNotice(notice: ReturnType<typeof classifyOperatorNotice>): void {
+  if (notice !== null) bestEffortOutput(`OPERATOR_NOTICE ${notice.kind} ${notice.message}`);
+}
+
 async function stdinText(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function reportResult(result: Pick<WorkflowRunResult, "outcome" | "reason">): number {
+function reportResult(result: {
+  readonly outcome: "PASS" | "BLOCKED";
+  readonly reason: string;
+  readonly finalState?: { readonly phase: string; readonly terminal_reason: string | null } | null;
+}): number {
   output(result.outcome);
   output(result.reason);
+  outputOperatorNotice(classifyOperatorNotice({ phase: result.finalState?.phase ?? null, outcome: result.outcome, terminal_reason: result.finalState?.terminal_reason ?? null, reason: result.reason }));
   return result.outcome === "PASS" ? 0 : 3;
 }
 
@@ -51,8 +65,9 @@ async function runMutationCommand(argv: readonly string[]): Promise<number> {
   try {
     const result = await runBoundedMutationWorkflow(goal, {
       cwd: process.cwd(), signal: abort.signal,
-      onControlCapability: ({ path }) => { output(`FORCE_STOP_CAPABILITY ${path}`); },
+      onControlCapability: ({ path }) => { bestEffortOutput(`FORCE_STOP_CAPABILITY ${path}`); },
       approveBaseline: async (baseline) => {
+        outputOperatorNotice(classifyOperatorNotice({ phase: "AWAITING_BASELINE_APPROVAL", operator_input_kind: operatorInputKindForPhase("AWAITING_BASELINE_APPROVAL"), reason: baseline.content_sha256 }));
         output(`DIRTY_BASELINE_APPROVAL_REQUIRED ${baseline.content_sha256}`);
         output(JSON.stringify(baseline.paths.map((entry) => ({ path: entry.path, ownership_class: entry.ownership_class, data_class: entry.data_class, capture_mode: entry.capture_mode, retention_days_after_terminal: entry.retention_days_after_terminal }))));
         const response = (await approvals.question("Enter APPROVE_BASELINE <baseline-content-sha256> <approved-by> <approved-at-utc>: ")).trim();
@@ -61,13 +76,16 @@ async function runMutationCommand(argv: readonly string[]): Promise<number> {
           ? { baseline_content_sha256: baseline.content_sha256 as `sha256:${string}`, approved_by: match[2]!, approved_at: match[3]! }
           : null;
       },
-      approveTasks: async ({ contract, plan }) => {
+      approveTasks: async ({ mode, contract, plan }) => {
         const target = plan?.content_sha256 ?? contract.content_sha256;
+        const inputPhase = mode === "ROUTED_DAG" || mode === "STATIC_APPROVED_DAG" ? "AWAITING_PLAN_APPROVAL" : mode === "SINGLE_OWNER_SOL" ? "AWAITING_SINGLE_OWNER_APPROVAL" : "AWAITING_DIRECT_APPROVAL";
+        outputOperatorNotice(classifyOperatorNotice({ phase: inputPhase, operator_input_kind: operatorInputKindForPhase(inputPhase), reason: target }));
         output(`EXECUTION_APPROVAL_REQUIRED ${plan === null ? "CONTRACT" : "PLAN"} ${target}`);
         return (await approvals.question(`Enter ${approvalLine(target as `sha256:${string}`)}: `)).trim() === approvalLine(target as `sha256:${string}`)
           ? target as `sha256:${string}` : null;
       },
       approveOwnerAcceptance: async ({ finalState }) => {
+        outputOperatorNotice(classifyOperatorNotice({ phase: "AWAITING_DECLARED_OWNER_ACCEPTANCE", operator_input_kind: operatorInputKindForPhase("AWAITING_DECLARED_OWNER_ACCEPTANCE"), reason: finalState.content_sha256 }));
         output(`OWNER_ACCEPTANCE_REQUIRED ${finalState.content_sha256}`);
         return (await approvals.question(`Enter OWNER_ACCEPT ${finalState.content_sha256}: `)).trim() === `OWNER_ACCEPT ${finalState.content_sha256}`;
       },
@@ -97,10 +115,22 @@ async function runResumeInspectCommand(argv: readonly string[]): Promise<number>
   return result.classification === "RESUMABLE" ? 0 : 3;
 }
 
+async function runStatusCommand(argv: readonly string[]): Promise<number> {
+  if (argv.length !== 2) {
+    const invalid = await readOperatorStatus("");
+    output(JSON.stringify(invalid));
+    return 2;
+  }
+  const result = await readOperatorStatus(argv[1]!);
+  output(JSON.stringify(result));
+  return result.classification === "PASS" || result.classification === "VALID_BLOCKED" || result.classification === "IN_PROGRESS" ? 0 : 3;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (argv[0] === "force-stop") return runForceStopCommand(argv);
   if (argv[0] === "mutate") return runMutationCommand(argv);
   if (argv[0] === "resume-inspect") return runResumeInspectCommand(argv);
+  if (argv[0] === "status") return runStatusCommand(argv);
   if (argv.length !== 1) {
     output("BLOCKED (not started): usage is pi-workflow <goal.json>");
     return 2;

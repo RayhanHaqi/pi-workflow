@@ -14,6 +14,7 @@ import { commandSpecification, createM4Fixture } from "./m4-helpers.js";
 import { releaseAdmission } from "./repository-matrix-helpers.js";
 import { removeRepositoryFixture } from "./repository-helpers.js";
 
+import { notifyBestEffort } from "../src/pi-extension/workflow.js";
 const execFileAsync = promisify(execFile);
 
 async function repository(
@@ -163,6 +164,27 @@ test("D-01/R1-T03 COMPLETE remains a recognized successful lifecycle result", as
     const claim = JSON.parse(await readFile(join(dirname(value.capability), "completion.claim.json"), "utf8")) as Record<string, unknown>;
     assert.equal(claim["winner"], "COMPLETED");
   } finally { await dispose(value); }
+});
+
+
+test("a thrown informational capability notice cannot cancel or alter the persisted workflow result", async () => {
+  const root = await repository();
+  const retained = await mkdtemp(join(tmpdir(), "m8-notification-isolation-retained-"));
+  try {
+    const result = await runBoundedMutationWorkflowExternalForTests(goal(), {
+      cwd: root,
+      authority: authority(),
+      retainedArtifactRoot: retained,
+      approveTasks: async ({ contract }) => contract.content_sha256 as `sha256:${string}`,
+      onControlCapability: ({ path }) => { notifyBestEffort(() => { throw new Error("presentation failed"); }, "FORCE_STOP_CAPABILITY", "info"); assert.equal(typeof path, "string"); },
+    }, "COMPLETE");
+    assert.equal(result.outcome, "PASS", result.reason);
+    assert.doesNotMatch(result.reason, /BLOCKED_CANCELLED|parent startup failure/u);
+    assert.ok(result.evidenceRoot !== undefined);
+    const inspection = await inspectRunStorage({ stateRoot: join(result.evidenceRoot, "state"), runId: "pre-m8-bounded" });
+    assert.equal(inspection.status, "HEALTHY");
+    assert.equal(inspection.workflowState?.phase, "PASS");
+  } finally { await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });
 
 test("productive-child input-type execArgv sanitizer preserves file bootstrap and unrelated flags", async () => {

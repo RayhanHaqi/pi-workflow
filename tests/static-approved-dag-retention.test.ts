@@ -9,6 +9,8 @@ import test from "node:test";
 import { main as staticApprovedDagCliMain } from "../src/cli/static-approved-dag.js";
 import { inspectRunStorage, readM5ManagedRecords } from "../src/persistence/store.js";
 import { inspectDeterministicResumeEligibility } from "../src/resume-inspection.js";
+import { readOperatorStatus } from "../src/operator-status.js";
+import { main as workflowCliMain } from "../src/cli/pi-workflow.js";
 import { configureBoundedWorkerFauxRuntimeForTests } from "../src/pi-adapter/bounded-worker.js";
 import {
   executeStaticApprovedDag,
@@ -437,4 +439,104 @@ test("external lifecycle default cleanup removes temporary evidence when retenti
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test("pi-workflow status reconstructs a retained PASS from persisted authority in a fresh process", async () => {
+  const root = await repository();
+  const parent = await mkdtemp(join(tmpdir(), "operator-status-pass-parent-"));
+  let invocations = 0;
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute({ tools }) {
+      invocations += 1;
+      const path = invocations === 1 ? "a.txt" : "b.txt";
+      await tools.writePath({ path, operation: "CREATE", replacementBytes: Buffer.from(`${path}\n`), expectedPreimageExists: false, expectedPreimageDigest: null, expectedPreimageSize: null, expectedPreimageMode: null });
+      tools.submitReport("operator status pass");
+      return { completed: true, cleanupCertain: true, modelTurns: 3, providerRequests: 2, inputTokens: 11, outputTokens: 22, costMicrousd: 1234 };
+    },
+  }));
+  try {
+    const report = await launchV2(root, { retainedArtifactRoot: parent });
+    assert.equal(report.classification, "PASS", report.reason);
+    const evidence = report.evidence_root!;
+    const before = (await readdir(evidence, { recursive: true })).sort();
+    const status = await readOperatorStatus(evidence);
+    const repeated = await readOperatorStatus(evidence);
+    assert.deepEqual(repeated, status);
+    assert.equal(status.classification, "PASS");
+    assert.equal(status.storage_status, "HEALTHY");
+    assert.equal(status.run_id, "pre-m8-bounded");
+    assert.equal(status.phase, "PASS");
+    assert.equal(status.terminal_classification, "PASS");
+    assert.equal(status.terminal, true);
+    assert.deepEqual(status.completion, { completed: true, outcome: "PASS" });
+    assert.deepEqual(status.operator_input, { required: false, kind: null });
+    assert.equal(status.notice?.kind, "COMPLETION");
+    assert.deepEqual(status.telemetry, report.telemetry);
+    assert.deepEqual((await readdir(evidence, { recursive: true })).sort(), before, "status reads do not change retained evidence");
+
+    const fresh = await execFileAsync(process.execPath, [join(process.cwd(), "dist", "src", "cli", "pi-workflow.js"), "status", evidence], {
+      cwd: process.cwd(), env: { ...process.env, REAL_PROVIDER_RUNS: "0" },
+    });
+    assert.deepEqual(JSON.parse(fresh.stdout), status, "fresh status process uses persisted evidence rather than runtime memory");
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(parent, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("operator status reconstructs VALID_BLOCKED and preserves unavailable telemetry fields", async () => {
+  const root = await repository();
+  const parent = await mkdtemp(join(tmpdir(), "operator-status-blocked-parent-"));
+  configureBoundedWorkerFauxRuntimeForTests(() => ({
+    async execute() {
+      return { completed: false, firstFailureCode: "TEST_RUNTIME_FAILURE", firstFailureStage: "TEST_RUNTIME", cleanupCertain: true, modelTurns: null, providerRequests: null };
+    },
+  }));
+  try {
+    const report = await launchV2(root, { retainedArtifactRoot: parent });
+    assert.equal(report.classification, "VALID_BLOCKED", report.reason);
+    const status = await readOperatorStatus(report.evidence_root!);
+    assert.equal(status.classification, "VALID_BLOCKED");
+    assert.equal(status.phase, "BLOCKED");
+    assert.equal(status.terminal_classification, "VALID_BLOCKED");
+    assert.equal(status.terminal, true);
+    assert.deepEqual(status.completion, { completed: true, outcome: "BLOCKED" });
+    assert.equal(status.notice?.kind, "UNRECOVERABLE_BLOCK");
+    assert.deepEqual(status.telemetry, report.telemetry);
+    if (status.telemetry !== null) {
+      assert.equal(status.telemetry.model_turn_count.value, null);
+      assert.equal(status.telemetry.model_turn_count.basis, "UNAVAILABLE");
+      assert.equal(status.telemetry.provider_request_count.value, null);
+      assert.equal(status.telemetry.provider_request_count.enforcement_class, "UNAVAILABLE");
+      for (const field of ["input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens", "estimated_cost_microusd", "provider_reported_cost_microusd", "transport_attempt_count"] as const) {
+        assert.equal(status.telemetry[field].value, null, `${field} remains unavailable`);
+        assert.equal(status.telemetry[field].basis, "UNAVAILABLE", `${field} remains unavailable`);
+      }
+    }
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(parent, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("status CLI preserves the read-only invalid/incomplete distinction", async () => {
+  const missing = await readOperatorStatus(join(tmpdir(), "operator-status-does-not-exist"));
+  assert.equal(missing.classification, "INVALID");
+  assert.equal(missing.storage_status, "UNAVAILABLE");
+  const root = await mkdtemp(join(tmpdir(), "operator-status-incomplete-"));
+  try {
+    await mkdir(join(root, "state"), { recursive: true, mode: 0o700 });
+    await mkdir(join(root, "state", "runs"), { recursive: true, mode: 0o700 });
+    await mkdir(join(root, "state", "runs", "run"), { recursive: true, mode: 0o700 });
+    const first = await captureStdout(() => workflowCliMain(["status", root]));
+    assert.equal(first.result, 3);
+    assert.equal(JSON.parse(first.output).classification, "INCOMPLETE");
+    const output = await readOperatorStatus(root);
+    assert.equal(output.classification, "INCOMPLETE");
+    assert.equal(output.storage_status, "BLOCKED_UNEXPECTED_STATE_STORE_ENTRY");
+    assert.equal(output.phase, null);
+    assert.equal(output.telemetry, null);
+    assert.equal(output.notice, null);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -15,6 +15,7 @@ import {
   type StaticApprovedDagLaunchSpec,
 } from "../src/static-approved-dag-launcher.js";
 import { main as staticApprovedDagCliMain } from "../src/cli/static-approved-dag.js";
+import { classifyOperatorNotice, operatorInputKindForPhase, readOperatorStatus } from "../src/operator-status.js";
 
 const HEAD = "a".repeat(40);
 const TREE = "b".repeat(40);
@@ -649,4 +650,35 @@ test("V2 routing identity rejects whitespace, control characters, oversize value
     assert.throws(() => normalizeStaticApprovedDagLaunchSpec(badModel), (error: unknown) => error instanceof StaticApprovedDagLaunchError && error.code === "INVALID_SPEC", JSON.stringify(bad));
     assert.equal(inspectStaticApprovedDagSpec(badModel).classification, "INVALID");
   }
+});
+
+
+test("operator notice semantics cover only required action and terminal categories", () => {
+  const phases = [
+    "AWAITING_BASELINE_APPROVAL",
+    "AWAITING_DIRECT_APPROVAL",
+    "AWAITING_SINGLE_OWNER_APPROVAL",
+    "AWAITING_PLAN_APPROVAL",
+    "AWAITING_DECLARED_OWNER_ACCEPTANCE",
+  ] as const;
+  assert.deepEqual(phases.map((phase) => operatorInputKindForPhase(phase)), [
+    "BASELINE_APPROVAL", "DIRECT_APPROVAL", "SINGLE_OWNER_APPROVAL", "PLAN_APPROVAL", "OWNER_ACCEPTANCE",
+  ]);
+  assert.deepEqual(classifyOperatorNotice({ phase: "READY" }), null);
+  assert.equal(classifyOperatorNotice({ phase: "AWAITING_PLAN_APPROVAL" })?.kind, "AUTHORITY_INPUT_REQUIRED");
+  assert.equal(classifyOperatorNotice({ phase: "BLOCKED", terminal_reason: "BLOCKED_OUTPUT_DELTA_MISMATCH" })?.kind, "UNRECOVERABLE_BLOCK");
+  assert.equal(classifyOperatorNotice({ phase: "BLOCKED", terminal_reason: "STATIC_NODE_WALL_DEADLINE_EXCEEDED" })?.kind, "TIME_EXHAUSTED");
+  assert.equal(classifyOperatorNotice({ phase: "BLOCKED", terminal_reason: "M4_TOOL_BUDGET_EXHAUSTED" })?.kind, "BUDGET_EXHAUSTED");
+  assert.equal(classifyOperatorNotice({ phase: "PASS", terminal_reason: "PASS" })?.kind, "COMPLETION");
+  assert.equal(classifyOperatorNotice({ phase: "PASS", outcome: "BLOCKED", terminal_reason: "BLOCKED_CLEANUP_UNCERTAIN" })?.kind, "UNRECOVERABLE_BLOCK");
+});
+
+test("missing operator status storage is explicitly invalid and repeatable", async () => {
+  const first = await readOperatorStatus(join(ROOT, "missing-retained-run"));
+  const second = await readOperatorStatus(join(ROOT, "missing-retained-run"));
+  assert.equal(first.classification, "INVALID");
+  assert.equal(first.storage_status, "UNAVAILABLE");
+  assert.equal(first.phase, null);
+  assert.equal(first.telemetry, null);
+  assert.deepEqual(second, first);
 });

@@ -19,7 +19,7 @@ import { inspectRunStorage, publishM6WorkerRecord } from "../src/persistence/sto
 import { M6_RUNTIME_MODULES } from "../src/persistence/m6-authority.js";
 import type { M6DirectReadOnlyWorkerInput, M6WorkerExecutionResult } from "../src/pi-adapter/worker.js";
 import { identifyContractDocument } from "../src/schemas/index.js";
-import workflowExtension from "../src/pi-extension/workflow.js";
+import workflowExtension, { notifyBestEffort } from "../src/pi-extension/workflow.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -330,6 +330,7 @@ test("/workflow registers one human command and rejects without UI approval", as
     await registered!.handler("goal.json", context);
     assert.equal(confirmed, 1);
     assert.equal(notifications.some((message) => message.includes("BLOCKED (not started)")), true);
+    assert.equal(notifications.some((message) => message.includes("AUTHORITY_INPUT_REQUIRED")), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -350,4 +351,11 @@ test("CLI has no approval bypass and rejects before workflow start", async () =>
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test("Pi informational notification delivery is best effort and never throws into workflow authority", () => {
+  let attempts = 0;
+  assert.doesNotThrow(() => notifyBestEffort(() => { attempts += 1; throw new Error("notification transport failed"); }, "informational notice", "warning"));
+  assert.equal(attempts, 1);
 });

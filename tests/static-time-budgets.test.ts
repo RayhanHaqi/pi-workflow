@@ -16,6 +16,7 @@ import {
 import { configureBoundedWorkerFauxRuntimeForTests, type BoundedWorkerRuntime } from "../src/pi-adapter/bounded-worker.js";
 import { identifyContractDocument, type PlanApprovalDocument } from "../src/schemas/index.js";
 import { installTestWallClock } from "../src/wall-clock.js";
+import { readOperatorStatus } from "../src/operator-status.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -207,5 +208,39 @@ test("STATIC_APPROVED_DAG ignores a runtime attempt to extend a frozen deadline"
   } finally {
     configureBoundedWorkerFauxRuntimeForTests(undefined);
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("operator status distinguishes persisted static time exhaustion from a generic block", async () => {
+  const root = await fixture();
+  const retained = await mkdtemp(join(tmpdir(), "operator-status-time-retained-"));
+  const budgets = { worker_deadline_ms: 300_000, node_wall_ms: 600_000, workflow_wall_ms: 1_800_000 } as const;
+  const deadlines: number[] = [];
+  let result: Awaited<ReturnType<typeof runBoundedMutationWorkflowForTests>> | undefined;
+  try {
+    await withFakeDate(async (advance) => {
+      configureBoundedWorkerFauxRuntimeForTests(() => mutationRuntime(deadlines, () => advance(600_000)));
+      try {
+        result = await runBoundedMutationWorkflowForTests(goal(), {
+          cwd: root,
+          authority: authority(budgets),
+          retainedArtifactRoot: retained,
+          approveTasks: async ({ plan }) => plan!.content_sha256 as `sha256:${string}`,
+        });
+      } finally { configureBoundedWorkerFauxRuntimeForTests(undefined); }
+    });
+    assert.equal(result?.outcome, "BLOCKED", result?.reason);
+    assert.match(result?.reason ?? "", /STATIC_NODE_WALL_DEADLINE_EXCEEDED/u);
+    assert.ok(result?.evidenceRoot !== undefined);
+    const status = await readOperatorStatus(result.evidenceRoot);
+    assert.equal(status.classification, "VALID_BLOCKED");
+    assert.equal(status.time.exhausted, true);
+    assert.deepEqual(status.time.scopes, ["NODE"]);
+    // A terminal M5 snapshot may independently show another exhausted envelope; the semantic notice remains TIME_EXHAUSTED by its exact persisted reason.
+    assert.equal(status.notice?.kind, "TIME_EXHAUSTED");
+  } finally {
+    configureBoundedWorkerFauxRuntimeForTests(undefined);
+    await rm(retained, { recursive: true, force: true }); await rm(root, { recursive: true, force: true });
   }
 });

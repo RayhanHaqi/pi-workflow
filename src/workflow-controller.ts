@@ -1094,6 +1094,7 @@ function usage(policy: M5ControlPolicyDocument, decision: M5ControlDecisionDocum
  */
 async function persistedStaticProviderTelemetry(
   stateRoot: string,
+  runId: string,
   finalState: WorkflowState | null,
   outcome: "PASS" | "BLOCKED",
 ): Promise<BoundedProviderTelemetrySummary | undefined> {
@@ -1102,8 +1103,8 @@ async function persistedStaticProviderTelemetry(
   let inspection: Awaited<ReturnType<typeof inspectRunStorage>>;
   let records: Awaited<ReturnType<typeof readM5ManagedRecords>>;
   try {
-    inspection = await inspectRunStorage({ stateRoot, runId: RUN_ID });
-    records = await readM5ManagedRecords({ stateRoot, runId: RUN_ID });
+    inspection = await inspectRunStorage({ stateRoot, runId });
+    records = await readM5ManagedRecords({ stateRoot, runId });
   } catch {
     return undefined;
   }
@@ -1114,7 +1115,7 @@ async function persistedStaticProviderTelemetry(
     return matches.length === 1 && matches[0]!.classification === "AUTHORITATIVE_MANAGED_RECORD";
   };
   const terminalDecisions = records.decisions.filter((decision) =>
-    decision.run_id === RUN_ID && decision.predicted_next_state_content_sha256 === durableState.content_sha256 &&
+    decision.run_id === runId && decision.predicted_next_state_content_sha256 === durableState.content_sha256 &&
     decision.outcome === (outcome === "PASS" ? "PASS" : "BLOCK") && classifiedAs("M5_CONTROL_DECISION", decision.content_sha256));
   if (terminalDecisions.length !== 1) return undefined;
   const terminalDecision = terminalDecisions[0]!;
@@ -1124,10 +1125,10 @@ async function persistedStaticProviderTelemetry(
   const usage = usageEvidenceIds.map((digest) => usageByDigest.get(digest));
   if (usage.some((entry): entry is undefined => entry === undefined)) return undefined;
   const boundedUsage = usage as M5UsageEvidenceDocument[];
-  if (boundedUsage.some((entry) => entry.run_id !== RUN_ID || entry.policy_content_sha256 !== terminalDecision.policy_content_sha256 ||
+  if (boundedUsage.some((entry) => entry.run_id !== runId || entry.policy_content_sha256 !== terminalDecision.policy_content_sha256 ||
       entry.execution_mode !== "STATIC_APPROVED_DAG" || entry.logical_role === null || entry.source_layer !== "CONTROLLER" ||
       entry.source_kind !== "BOUNDED_WORKER_RESULT" || !classifiedAs("M5_USAGE_EVIDENCE", entry.content_sha256))) return undefined;
-  const authoritativeStaticUsage = records.usage.filter((entry) => entry.run_id === RUN_ID && entry.execution_mode === "STATIC_APPROVED_DAG" &&
+  const authoritativeStaticUsage = records.usage.filter((entry) => entry.run_id === runId && entry.execution_mode === "STATIC_APPROVED_DAG" &&
     entry.source_layer === "CONTROLLER" && entry.source_kind === "BOUNDED_WORKER_RESULT" && classifiedAs("M5_USAGE_EVIDENCE", entry.content_sha256));
   const usageSet = new Set(usageEvidenceIds);
   if (authoritativeStaticUsage.length !== boundedUsage.length || authoritativeStaticUsage.some((entry) => !usageSet.has(entry.content_sha256 as Sha256Digest))) return undefined;
@@ -1240,10 +1241,12 @@ export function isBoundedProviderTelemetry(value: unknown): value is BoundedProv
 /** Read-only terminal projection used by the controller and deterministic replay consumers. */
 export async function readPersistedStaticProviderTelemetry(input: {
   readonly stateRoot: string;
+  /** The bounded controller's historical run identity is the default; retained-run projections may supply another exact identity. */
+  readonly runId?: string;
   readonly finalState: WorkflowState | null;
   readonly outcome: "PASS" | "BLOCKED";
 }): Promise<BoundedProviderTelemetrySummary | null> {
-  return await persistedStaticProviderTelemetry(input.stateRoot, input.finalState, input.outcome) ?? null;
+  return await persistedStaticProviderTelemetry(input.stateRoot, input.runId ?? RUN_ID, input.finalState, input.outcome) ?? null;
 }
 type BoundedWorkerRunner = typeof runBoundedWorker;
 
