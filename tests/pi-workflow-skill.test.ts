@@ -57,6 +57,45 @@ test("Pi package exposes the pi-workflow skill with valid metadata", async () =>
   assert.match(source, /existing workflow controller, CLI, and Pi extension are authoritative/u);
 });
 
+test("pi-workflow skill is fail-closed until the existing owner handoff", async () => {
+  const source = await readFile(SKILL_PATH, "utf8");
+
+  assert.match(source, /preparation-only/u);
+  assert.match(source, /`\/skill:pi-workflow \.\.\.`/u);
+  assert.match(source, /`task authorization`/u);
+  assert.match(source, /`pi-workflow engine approval`/u);
+  for (const phrase of ["Authorized:", "execute the task", "you may modify files", "create a commit"]) {
+    assert.ok(source.includes(phrase), `skill names natural-language authorization phrase: ${phrase}`);
+  }
+  assert.match(source, /must never treat .* as pi-workflow engine approval .* mutations directly/su);
+
+  assert.match(source, /parent Pi agent must not directly:/u);
+  for (const operation of [
+    "write, edit, or delete project files",
+    "create commits",
+    "create or delete branches or worktrees",
+    "create or remove environments",
+    "run mutation-capable setup or install commands",
+    "invoke implementation tools or provider/model calls",
+    "start subagents",
+    "execute the coding task itself",
+  ]) {
+    assert.ok(source.includes(operation), `skill forbids pre-handoff operation: ${operation}`);
+  }
+
+  assert.match(source, /READY_FOR_OWNER_APPROVAL/u);
+  assert.match(source, /exact route\/provider\/model\/effort/u);
+  assert.match(source, /exact editable scopes/u);
+  assert.match(source, /exact required inputs, outputs, and deterministic verification/u);
+  assert.match(source, /exact budgets, attempt limits/u);
+  assert.match(source, /exact existing owner-start action/u);
+  assert.match(source, /`APPROVE <TaskDocument\.content_sha256>`/u);
+  assert.match(source, /`\/workflow <goal\.json>`/u);
+  assert.match(source, /`\/workflow mutate <goal\.json>`/u);
+  assert.match(source, /must not invoke or simulate the owner's command/u);
+  assert.match(source, /model-callable workflow-start tool/u);
+});
+
 test("npm tarball includes the packaged pi-workflow skill", async () => {
   const packageRoot = await mkdtemp(join(tmpdir(), "pi-workflow-skill-pack-"));
   const extractRoot = join(packageRoot, "extract");
