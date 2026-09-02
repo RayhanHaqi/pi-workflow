@@ -57,7 +57,7 @@ test("Pi package exposes the pi-workflow skill with valid metadata", async () =>
   assert.match(source, /existing workflow controller, CLI, and Pi extension are authoritative/u);
 });
 
-test("pi-workflow skill is fail-closed until the existing owner handoff", async () => {
+test("pi-workflow skill remains preparation-only until the existing owner handoff", async () => {
   const source = await readFile(SKILL_PATH, "utf8");
 
   assert.match(source, /preparation-only/u);
@@ -82,18 +82,47 @@ test("pi-workflow skill is fail-closed until the existing owner handoff", async 
   ]) {
     assert.ok(source.includes(operation), `skill forbids pre-handoff operation: ${operation}`);
   }
-
-  assert.match(source, /READY_FOR_OWNER_APPROVAL/u);
-  assert.match(source, /exact route\/provider\/model\/effort/u);
-  assert.match(source, /exact editable scopes/u);
-  assert.match(source, /exact required inputs, outputs, and deterministic verification/u);
-  assert.match(source, /exact budgets, attempt limits/u);
-  assert.match(source, /exact existing owner-start action/u);
   assert.match(source, /`APPROVE <TaskDocument\.content_sha256>`/u);
   assert.match(source, /`\/workflow <goal\.json>`/u);
   assert.match(source, /`\/workflow mutate <goal\.json>`/u);
   assert.match(source, /must not invoke or simulate the owner's command/u);
   assert.match(source, /model-callable workflow-start tool/u);
+});
+
+test("pi-workflow skill resolves derivable workflow values before owner approval", async () => {
+  const source = await readFile(SKILL_PATH, "utf8");
+
+  for (const requiredContract of [
+    "read-only repository inspection",
+    "STATIC_APPROVED_DAG",
+    "TERRA_EXECUTOR",
+    "openai-codex",
+    "gpt-5.6-terra",
+    "static_max_attempts_per_leaf: 1",
+    "smallest conservative values",
+    "narrowest credible editable paths/globs",
+    "documentation output paths",
+    "branch, HEAD, HEAD tree, clean/dirty state",
+    "controller-supported deterministic verification surfaces",
+    "normalizeStaticApprovedDagLaunchSpec",
+    "staticApprovedDagSpecSha256",
+    "exact existing owner-start action",
+    "normalized spec and generated approval/spec digest",
+  ]) {
+    assert.ok(source.includes(requiredContract), `skill resolves or presents: ${requiredContract}`);
+  }
+  assert.match(source, /The owner never invents or supplies a digest/u);
+  assert.match(source, /READY_FOR_OWNER_APPROVAL[\s\S]*stop without mutation/u);
+});
+
+test("pi-workflow skill blocks unsupported engine capabilities rather than defaulting them", async () => {
+  const source = await readFile(SKILL_PATH, "utf8");
+
+  assert.match(source, /BLOCKED \(not started\)/u);
+  assert.match(source, /Canonical defaults do not solve unsupported capabilities/u);
+  for (const capability of ["Git worktree creation", "branch creation", "networked Conda environment creation", "commits"]) {
+    assert.ok(source.includes(capability), `skill names unsupported capability boundary: ${capability}`);
+  }
 });
 
 test("npm tarball includes the packaged pi-workflow skill", async () => {
